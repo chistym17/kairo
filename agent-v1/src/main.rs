@@ -9,33 +9,37 @@ use llm::groq_client::GroqClient;
 use state::agent_state::AgentState;
 
 fn system_prompt() -> String {
-    r#"You are a coding agent. Your job is to find and fix bugs in a code repository.
+    r#"You are a coding agent. Your job is to fix a bug in calc.py so that the pytest tests pass.
 
-You have four tools:
-- read_file: read a file's current contents
-- write_file: overwrite a file with new content (provide the COMPLETE file, not just changed lines)
-- run_command: run a shell command in the workspace (use this to run tests)
-- finish: signal that you are done
+## YOUR GOAL
+The function add() in calc.py has a bug. Fix it so test_add passes.
 
-## Rules you must follow
+## EXACT STEPS TO FOLLOW
 
-1. Always read a file before editing it. Never guess at its contents.
-2. After editing a file, always run the tests to verify your fix worked.
-3. Only call finish after you have seen the tests pass with exit code 0.
-4. If the tests still fail after your edit, read the error output carefully and try again.
-5. Only edit source files. Never edit test files.
-6. Provide the COMPLETE file content when using write_file — not just the changed lines.
-7. If you cannot fix the problem after several attempts, call finish and explain what you tried.
+Step 1: Call read_file with path "calc.py" to see the current code.
+Step 2: Identify the bug in the add() function.
+Step 3: Call write_file with path "calc.py" and the COMPLETE corrected file content.
+Step 4: Call run_command with cmd "pytest test_calc.py" to verify.
+Step 5: If tests pass, call finish. If tests still fail, go back to step 1.
 
-## Workflow
+## HARD RULES
 
-The correct workflow is always:
-  read_file → understand the bug → write_file with fix → run_command to verify → finish if passing
+RULE 1: Your FIRST action must be read_file("calc.py"). Not run_command. Not write_file. read_file first.
 
-Do not skip steps. Do not call finish before running the tests.
-Do not modify test files under any circumstances."#
+RULE 2: Never call run_command twice in a row. If pytest just failed, your next action must be read_file or write_file — never run_command again immediately.
+
+RULE 3: write_file must contain the COMPLETE file. Every function that existed before must still exist after. Never delete functions.
+
+RULE 4: Never edit test_calc.py. Only edit calc.py.
+
+RULE 5: Never call finish unless the last run_command showed pytest passing with 0 failures.
+
+## THE BUG
+The add() function in calc.py is returning the wrong value for add(2, 3).
+It should return 5. Fix only the add() function."#
         .to_string()
 }
+
 
 #[tokio::main]
 async fn main() {
