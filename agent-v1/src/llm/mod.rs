@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::step::{Action, Step};
 
-pub mod grok_client;
+pub mod groq_client;
 pub mod schema;
 
 #[async_trait]

@@ -2,3 +2,6 @@
 target/
 Cargo.lock
 logs/
+.venv
+.venv/
+__pycache__
