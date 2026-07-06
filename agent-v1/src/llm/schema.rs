@@ -28,27 +28,45 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Write new content to a file in the workspace, replacing its entire contents. \
-                    Use this to fix bugs after you have read the file and identified what needs to change. \
-                    You must provide the COMPLETE new file content — not just the changed lines. \
-                    Path must be relative to the workspace root. \
-                    After writing, always run the tests to verify your fix worked.",
+                "description": "Create a new file in the workspace. Only use this when the file does not exist yet. \
+                    To edit an existing file, use apply_patch instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative path to the file from workspace root. \
-                                Example: 'calc.py'"
+                            "description": "Relative path to the file from workspace root."
                         },
                         "content": {
                             "type": "string",
-                            "description": "The complete new content of the file. \
-                                Must include all lines — not just the changed ones. \
-                                Preserve indentation and formatting exactly."
+                            "description": "The complete content of the new file."
                         }
                     },
                     "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": "Apply a unified diff patch to an existing file in the workspace. \
+                    Use this to fix bugs after reading the file. \
+                    Only include the lines that change — do not rewrite the whole file. \
+                    Path must be relative to the workspace root.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Relative path to the file from workspace root. Example: 'calc.py'"
+                        },
+                        "diff": {
+                            "type": "string",
+                            "description": "Unified diff patch. Example:\n--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a * b\n+    return a + b"
+                        }
+                    },
+                    "required": ["path", "diff"]
                 }
             }
         },
@@ -132,6 +150,19 @@ pub fn parse_tool_call(
             })
         }
 
+        "apply_patch" => {
+            let path = args["path"]
+                .as_str()
+                .ok_or("apply_patch missing required arg: path")?;
+            let diff = args["diff"]
+                .as_str()
+                .ok_or("apply_patch missing required arg: diff")?;
+            Ok(Action::ApplyPatch {
+                path: PathBuf::from(path),
+                diff: diff.to_string(),
+            })
+        }
+
         "run_command" => {
             let cmd = args["cmd"]
                 .as_str()
@@ -151,7 +182,7 @@ pub fn parse_tool_call(
         }
 
         unknown => Err(format!(
-            "unknown tool name: '{}'. Valid tools: read_file, write_file, run_command, finish",
+            "unknown tool name: '{}'. Valid tools: read_file, write_file, apply_patch, run_command, finish",
             unknown
         )),
     }

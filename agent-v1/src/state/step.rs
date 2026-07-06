@@ -10,6 +10,8 @@ pub enum Action {
 
     WriteFile { path: PathBuf, content: String },
 
+    ApplyPatch { path: PathBuf, diff: String },
+
     RunCommand { cmd: String },
 
     Finish { summary: String },

@@ -198,6 +198,13 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
                 "content": content
             }),
         ),
+        Action::ApplyPatch { path, diff } => (
+            "apply_patch",
+            json!({
+                "path": path.to_string_lossy(),
+                "diff": diff
+            }),
+        ),
         Action::RunCommand { cmd } => ("run_command", json!({ "cmd": cmd })),
         Action::Finish { summary } => ("finish", json!({ "summary": summary })),
     }

@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
 
+pub mod apply_patch;
 pub mod diff;
 pub mod read_file;
 pub mod run_command;
@@ -71,6 +72,8 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
         Action::ReadFile { path } => read_file::execute(path, workspace_root),
 
         Action::WriteFile { path, content } => write_file::execute(path, content, workspace_root),
+
+        Action::ApplyPatch { path, diff } => apply_patch::execute(path, diff, workspace_root),
 
         Action::RunCommand { cmd } => run_command::execute(cmd, workspace_root),
 
