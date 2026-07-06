@@ -9,18 +9,18 @@ use llm::groq_client::GroqClient;
 use state::agent_state::AgentState;
 
 fn system_prompt() -> String {
-    r#"You are a coding agent. Your job is to fix a bug in calc.py so that the pytest tests pass.
+    r#"You are a coding agent. Your job is to fix a bug in calc.py so that pytest tests pass.
 
-## YOUR GOAL
-The function add() in calc.py has a bug. Fix it so test_add passes.
+The user's message describes which test is failing and which function to fix. Follow that — do not guess a different function.
 
 ## EXACT STEPS TO FOLLOW
 
 Step 1: Call read_file with path "calc.py" to see the current code.
-Step 2: Identify the bug in the add() function.
-Step 3: Call write_file with path "calc.py" and the COMPLETE corrected file content.
-Step 4: Call run_command with cmd "pytest test_calc.py" to verify.
-Step 5: If tests pass, call finish. If tests still fail, go back to step 1.
+Step 2: Read test_calc.py if needed to understand what the tests expect.
+Step 3: Identify and fix the bug in calc.py only.
+Step 4: Call write_file with path "calc.py" and the COMPLETE corrected file content.
+Step 5: Call run_command with cmd "pytest test_calc.py" to verify.
+Step 6: If tests pass, call finish. If tests still fail, go back to step 1.
 
 ## HARD RULES
 
@@ -30,13 +30,9 @@ RULE 2: Never call run_command twice in a row. If pytest just failed, your next 
 
 RULE 3: write_file must contain the COMPLETE file. Every function that existed before must still exist after. Never delete functions.
 
-RULE 4: Never edit test_calc.py. Only edit calc.py.
+RULE 4: Never edit test_calc.py. Only edit calc.py. "Fix the failing test" means fix the source code so the test passes — not edit the test file.
 
-RULE 5: Never call finish unless the last run_command showed pytest passing with 0 failures.
-
-## THE BUG
-The add() function in calc.py is returning the wrong value for add(2, 3).
-It should return 5. Fix only the add() function."#
+RULE 5: Never call finish unless the last run_command showed pytest passing with 0 failures."#
         .to_string()
 }
 
@@ -61,6 +57,7 @@ async fn main() {
     println!("[agent-v1] workspace: {}", config.workspace_root.display());
     println!("[agent-v1] model: {}", config.model_id);
     println!("[agent-v1] max_steps: {}", config.max_steps);
+    println!("[agent-v1] step_delay: {}ms", config.step_delay_ms);
 
     // Verify workspace exists before starting
     if !config.workspace_root.exists() {
@@ -86,7 +83,7 @@ async fn main() {
     println!("[agent-v1] log: logs/run_{}.jsonl", state.run_id);
 
     // Run the loop
-    let stop_reason = loop_engine::run(&mut state, &llm, &system_prompt()).await;
+    let stop_reason = loop_engine::run(&mut state, &llm, &system_prompt(), config.step_delay_ms).await;
 
     // Final summary
     println!("\n[agent-v1] ── run complete ──────────────────────────");

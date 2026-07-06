@@ -105,6 +105,41 @@ pub fn write_entry(entry: &LogEntry) {
     }
 }
 
+/// Write an event (delay, rate-limit retry, etc.) to the run's log file.
+pub fn write_event(run_id: &str, event_type: &str, detail: &str, duration_ms: u64) {
+    let log_dir = PathBuf::from("logs");
+    let log_path = log_dir.join(format!("run_{}.jsonl", run_id));
+
+    let event = serde_json::json!({
+        "record_type": "event",
+        "run_id": run_id,
+        "event": event_type,
+        "detail": detail,
+        "duration_ms": duration_ms,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let line = match serde_json::to_string(&event) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[logging] failed to serialize event: {}", e);
+            return;
+        }
+    };
+
+    let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[logging] failed to open log for event: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = writeln!(file, "{}", line) {
+        eprintln!("[logging] failed to write event: {}", e);
+    }
+}
+
 /// Write a run summary as the final line of the log file.
 ///
 /// Called after the loop exits with a StopReason.

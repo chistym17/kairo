@@ -1,5 +1,5 @@
 use crate::llm::{LlmClient, LlmError};
-use crate::logging::{write_entry, write_run_summary, LogEntry};
+use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::state::agent_state::AgentState;
 use crate::state::step::Step;
 use crate::state::stop_reason::StopReason;
@@ -17,10 +17,15 @@ use crate::tools;
 ///   - Phase 4: caller constructs AgentState with a worktree workspace_root
 ///
 /// Everything that changes lives in what gets passed in, not in here.
-pub async fn run(state: &mut AgentState, llm: &dyn LlmClient, system_prompt: &str) -> StopReason {
+pub async fn run(
+    state: &mut AgentState,
+    llm: &dyn LlmClient,
+    system_prompt: &str,
+    step_delay_ms: u64,
+) -> StopReason {
     println!(
-        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n",
-        state.run_id, state.goal, state.model_id, state.max_steps
+        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] step_delay: {}ms\n",
+        state.run_id, state.goal, state.model_id, state.max_steps, step_delay_ms
     );
 
     loop {
@@ -40,6 +45,18 @@ pub async fn run(state: &mut AgentState, llm: &dyn LlmClient, system_prompt: &st
             state.step_count
         );
 
+        // ── 1.5. Throttle: wait before hitting the API ─────────────────
+        if step_delay_ms > 0 && state.step_count > 0 {
+            println!("[agent] waiting {}ms before next API call", step_delay_ms);
+            write_event(
+                &state.run_id,
+                "step_delay",
+                &format!("waiting {}ms before step {}", step_delay_ms, state.step_count),
+                step_delay_ms,
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(step_delay_ms)).await;
+        }
+
         // ── 2. Ask the LLM what to do next ─────────────────────────────
         let action = match llm
             .next_action(system_prompt, &state.goal, &state.history)
@@ -50,37 +67,44 @@ pub async fn run(state: &mut AgentState, llm: &dyn LlmClient, system_prompt: &st
                 action
             }
 
-            // Model returned text instead of a tool call
             Err(LlmError::NoToolCall(text)) => {
                 println!(
                     "[agent] model returned text instead of tool call:\n{}",
                     &text[..text.len().min(300)]
                 );
-                // Don't stop — this can happen transiently with smaller models.
-                // Increment step count so we don't loop forever, then retry.
-                // The full history gives the model context to self-correct.
+                write_event(
+                    &state.run_id,
+                    "no_tool_call",
+                    &text[..text.len().min(200)],
+                    0,
+                );
                 state.step_count += 1;
                 continue;
             }
 
-            // Malformed tool call — log and retry
             Err(LlmError::MalformedToolCall(msg)) => {
                 println!("[agent] malformed tool call: {}", msg);
+                write_event(&state.run_id, "malformed_tool_call", &msg, 0);
                 state.step_count += 1;
                 continue;
             }
 
-            // Rate limited — wait and retry
             Err(LlmError::RateLimited) => {
-                println!("[agent] rate limited — waiting 10s");
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                // Don't increment step count for rate limit retries
+                let wait_ms: u64 = 15_000;
+                println!("[agent] rate limited — waiting {}ms", wait_ms);
+                write_event(
+                    &state.run_id,
+                    "rate_limited",
+                    &format!("API returned 429, backing off {}ms", wait_ms),
+                    wait_ms,
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
                 continue;
             }
 
-            // Hard API error — stop the run
             Err(LlmError::ApiError(msg)) => {
                 println!("[agent] API error: {}", msg);
+                write_event(&state.run_id, "api_error", &msg, 0);
                 let reason = StopReason::ToolError;
                 write_run_summary(&state.run_id, &state.model_id, &reason, state.step_count);
                 return reason;

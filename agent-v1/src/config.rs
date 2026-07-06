@@ -22,6 +22,10 @@ pub struct Config {
     /// Absolute or relative path to the workspace the agent can touch
     /// All tool operations are sandboxed inside this directory
     pub workspace_root: PathBuf,
+
+    /// Milliseconds to wait before each LLM API call.
+    /// Prevents rate limiting from rapid back-to-back requests.
+    pub step_delay_ms: u64,
 }
 
 impl Config {
@@ -37,6 +41,9 @@ impl Config {
                 .parse::<u32>()
                 .expect("MAX_STEPS must be a positive integer"),
             workspace_root: PathBuf::from(env_or("WORKSPACE_ROOT", "./test_repo")),
+            step_delay_ms: env_or("STEP_DELAY_MS", "2000")
+                .parse::<u64>()
+                .expect("STEP_DELAY_MS must be a non-negative integer"),
         }
     }
 }
