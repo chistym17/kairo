@@ -26,6 +26,12 @@ pub struct Config {
     /// Milliseconds to wait before each LLM API call.
     /// Prevents rate limiting from rapid back-to-back requests.
     pub step_delay_ms: u64,
+
+    /// Retries when Groq returns tool_use_failed (model had right idea, bad format).
+    pub tool_use_max_retries: u32,
+
+    /// Backoff between tool_use_failed retries.
+    pub tool_use_retry_delay_ms: u64,
 }
 
 impl Config {
@@ -44,6 +50,12 @@ impl Config {
             step_delay_ms: env_or("STEP_DELAY_MS", "2000")
                 .parse::<u64>()
                 .expect("STEP_DELAY_MS must be a non-negative integer"),
+            tool_use_max_retries: env_or("TOOL_USE_MAX_RETRIES", "3")
+                .parse::<u32>()
+                .expect("TOOL_USE_MAX_RETRIES must be a non-negative integer"),
+            tool_use_retry_delay_ms: env_or("TOOL_USE_RETRY_DELAY_MS", "3000")
+                .parse::<u64>()
+                .expect("TOOL_USE_RETRY_DELAY_MS must be a non-negative integer"),
         }
     }
 }

@@ -60,6 +60,8 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
                 &llm,
                 &system_prompt,
                 config.agent.step_delay_ms,
+                config.agent.tool_use_max_retries,
+                config.agent.tool_use_retry_delay_ms,
             )
             .await;
 

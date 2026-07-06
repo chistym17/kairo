@@ -24,6 +24,10 @@ pub enum LlmError {
 
     ApiError(String),
 
+    /// Groq rejected the model's tool call (HTTP 400, code tool_use_failed).
+    /// Often transient — the model had the right idea but bad formatting.
+    ToolUseFailed(String),
+
     RateLimited,
 
     NoToolCall(String),
@@ -34,6 +38,7 @@ impl std::fmt::Display for LlmError {
         match self {
             LlmError::MalformedToolCall(msg) => write!(f, "malformed tool call: {}", msg),
             LlmError::ApiError(msg) => write!(f, "API error: {}", msg),
+            LlmError::ToolUseFailed(msg) => write!(f, "tool_use_failed: {}", msg),
             LlmError::RateLimited => write!(f, "rate limited"),
             LlmError::NoToolCall(text) => {
                 write!(

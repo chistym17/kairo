@@ -22,6 +22,8 @@ pub async fn run(
     llm: &dyn LlmClient,
     system_prompt: &str,
     step_delay_ms: u64,
+    tool_use_max_retries: u32,
+    tool_use_retry_delay_ms: u64,
 ) -> StopReason {
     println!(
         "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] step_delay: {}ms\n",
@@ -58,56 +60,148 @@ pub async fn run(
         }
 
         // ── 2. Ask the LLM what to do next ─────────────────────────────
-        let action = match llm
-            .next_action(system_prompt, &state.goal, &state.history)
-            .await
-        {
-            Ok(action) => {
-                println!("[agent] action: {:?}", action);
-                action
-            }
+        let action = 'next_action: loop {
+            match llm
+                .next_action(system_prompt, &state.goal, &state.history)
+                .await
+            {
+                Ok(action) => {
+                    println!("[agent] action: {:?}", action);
+                    break 'next_action action;
+                }
 
-            Err(LlmError::NoToolCall(text)) => {
-                println!(
-                    "[agent] model returned text instead of tool call:\n{}",
-                    &text[..text.len().min(300)]
-                );
-                write_event(
-                    &state.run_id,
-                    "no_tool_call",
-                    &text[..text.len().min(200)],
-                    0,
-                );
-                state.step_count += 1;
-                continue;
-            }
+                Err(LlmError::NoToolCall(text)) => {
+                    println!(
+                        "[agent] model returned text instead of tool call:\n{}",
+                        &text[..text.len().min(300)]
+                    );
+                    write_event(
+                        &state.run_id,
+                        "no_tool_call",
+                        &text[..text.len().min(200)],
+                        0,
+                    );
+                    state.step_count += 1;
+                    continue;
+                }
 
-            Err(LlmError::MalformedToolCall(msg)) => {
-                println!("[agent] malformed tool call: {}", msg);
-                write_event(&state.run_id, "malformed_tool_call", &msg, 0);
-                state.step_count += 1;
-                continue;
-            }
+                Err(LlmError::MalformedToolCall(msg)) => {
+                    println!("[agent] malformed tool call: {}", msg);
+                    write_event(&state.run_id, "malformed_tool_call", &msg, 0);
+                    state.step_count += 1;
+                    continue;
+                }
 
-            Err(LlmError::RateLimited) => {
-                let wait_ms: u64 = 15_000;
-                println!("[agent] rate limited — waiting {}ms", wait_ms);
-                write_event(
-                    &state.run_id,
-                    "rate_limited",
-                    &format!("API returned 429, backing off {}ms", wait_ms),
-                    wait_ms,
-                );
-                tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
-                continue;
-            }
+                Err(LlmError::RateLimited) => {
+                    let wait_ms: u64 = 15_000;
+                    println!("[agent] rate limited — waiting {}ms", wait_ms);
+                    write_event(
+                        &state.run_id,
+                        "rate_limited",
+                        &format!("API returned 429, backing off {}ms", wait_ms),
+                        wait_ms,
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
+                    continue 'next_action;
+                }
 
-            Err(LlmError::ApiError(msg)) => {
-                println!("[agent] API error: {}", msg);
-                write_event(&state.run_id, "api_error", &msg, 0);
-                let reason = StopReason::ToolError;
-                write_run_summary(&state.run_id, &state.model_id, &reason, state.step_count);
-                return reason;
+                Err(LlmError::ToolUseFailed(mut msg)) => {
+                    if tool_use_max_retries == 0 {
+                        println!("[agent] tool_use_failed — retries disabled, stopping");
+                        write_event(
+                            &state.run_id,
+                            "tool_use_failed",
+                            &msg[..msg.len().min(500)],
+                            0,
+                        );
+                        let reason = StopReason::ToolError;
+                        write_run_summary(
+                            &state.run_id,
+                            &state.model_id,
+                            &reason,
+                            state.step_count,
+                        );
+                        return reason;
+                    }
+
+                    for attempt in 1..=tool_use_max_retries {
+                        println!(
+                            "[agent] tool_use_failed — retry {}/{} in {}ms",
+                            attempt, tool_use_max_retries, tool_use_retry_delay_ms
+                        );
+                        write_event(
+                            &state.run_id,
+                            "tool_use_failed_retry",
+                            &format!(
+                                "attempt {}/{}, waiting {}ms — {}",
+                                attempt,
+                                tool_use_max_retries,
+                                tool_use_retry_delay_ms,
+                                &msg[..msg.len().min(200)]
+                            ),
+                            tool_use_retry_delay_ms,
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            tool_use_retry_delay_ms,
+                        ))
+                        .await;
+
+                        match llm
+                            .next_action(system_prompt, &state.goal, &state.history)
+                            .await
+                        {
+                            Ok(action) => {
+                                println!(
+                                    "[agent] action (after tool_use_failed retry {}): {:?}",
+                                    attempt, action
+                                );
+                                break 'next_action action;
+                            }
+                            Err(LlmError::ToolUseFailed(retry_msg)) => {
+                                msg = retry_msg;
+                                if attempt == tool_use_max_retries {
+                                    println!(
+                                        "[agent] tool_use_failed — exhausted {} retries, stopping",
+                                        tool_use_max_retries
+                                    );
+                                    write_event(
+                                        &state.run_id,
+                                        "tool_use_failed",
+                                        &msg[..msg.len().min(500)],
+                                        0,
+                                    );
+                                    let reason = StopReason::ToolError;
+                                    write_run_summary(
+                                        &state.run_id,
+                                        &state.model_id,
+                                        &reason,
+                                        state.step_count,
+                                    );
+                                    return reason;
+                                }
+                            }
+                            Err(LlmError::RateLimited) => {
+                                let wait_ms: u64 = 15_000;
+                                println!("[agent] rate limited — waiting {}ms", wait_ms);
+                                write_event(
+                                    &state.run_id,
+                                    "rate_limited",
+                                    &format!("API returned 429, backing off {}ms", wait_ms),
+                                    wait_ms,
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms))
+                                    .await;
+                            }
+                            Err(other) => {
+                                return handle_fatal_llm_error(state, other);
+                            }
+                        }
+                    }
+                }
+
+                Err(LlmError::ApiError(msg)) => {
+                    return handle_fatal_llm_error(state, LlmError::ApiError(msg));
+                }
             }
         };
 
@@ -159,4 +253,31 @@ pub async fn run(
             return reason;
         }
     }
+}
+
+fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
+    match err {
+        LlmError::ApiError(msg) => {
+            println!("[agent] API error: {}", msg);
+            write_event(&state.run_id, "api_error", &msg, 0);
+        }
+        other => {
+            println!("[agent] unrecoverable LLM error: {}", other);
+            write_event(
+                &state.run_id,
+                "llm_error",
+                &other.to_string(),
+                0,
+            );
+        }
+    }
+
+    let reason = StopReason::ToolError;
+    write_run_summary(
+        &state.run_id,
+        &state.model_id,
+        &reason,
+        state.step_count,
+    );
+    reason
 }

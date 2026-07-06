@@ -83,6 +83,9 @@ impl LlmClient for GroqClient {
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            if body.contains("tool_use_failed") {
+                return Err(LlmError::ToolUseFailed(format!("HTTP {}: {}", status, body)));
+            }
             return Err(LlmError::ApiError(format!("HTTP {}: {}", status, body)));
         }
 

@@ -79,7 +79,15 @@ async fn main() {
     println!("[agent-v1] log: logs/run_{}.jsonl", state.run_id);
 
     // Run the loop
-    let stop_reason = loop_engine::run(&mut state, &llm, &system_prompt(), config.step_delay_ms).await;
+    let stop_reason = loop_engine::run(
+        &mut state,
+        &llm,
+        &system_prompt(),
+        config.step_delay_ms,
+        config.tool_use_max_retries,
+        config.tool_use_retry_delay_ms,
+    )
+    .await;
 
     // Final summary
     println!("\n[agent-v1] ── run complete ──────────────────────────");
