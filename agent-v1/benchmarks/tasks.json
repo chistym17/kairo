@@ -1,0 +1,44 @@
+{
+  "tasks": [
+    {
+      "id": "calc-add-abs",
+      "tier": 1,
+      "workspace": "benchmarks/workspaces/calc-add-abs",
+      "goal": "The test test_add in test_calc.py is failing because add() in calc.py has a bug. Read calc.py, identify the bug, fix it with apply_patch, verify with pytest.",
+      "verify_cmd": "pytest test_calc.py",
+      "files_readonly": ["test_calc.py"]
+    },
+    {
+      "id": "calc-power-zero",
+      "tier": 2,
+      "workspace": "benchmarks/workspaces/calc-power-zero",
+      "goal": "The test test_power in test_calc.py is failing because power() in calc.py has a bug. Read calc.py, identify the bug, fix it with apply_patch, verify with pytest.",
+      "verify_cmd": "pytest test_calc.py",
+      "files_readonly": ["test_calc.py"]
+    },
+    {
+      "id": "calc-cap-100",
+      "tier": 2,
+      "workspace": "benchmarks/workspaces/calc-cap-100",
+      "goal": "The test test_add_large in test_calc.py is failing because add() in calc.py has a bug. Read calc.py, identify the bug, fix it with apply_patch, verify with pytest.",
+      "verify_cmd": "pytest test_calc.py",
+      "files_readonly": ["test_calc.py"]
+    },
+    {
+      "id": "calc-divide",
+      "tier": 3,
+      "workspace": "benchmarks/workspaces/calc-divide",
+      "goal": "The test test_divide in test_calc.py is failing because divide() in calc.py has a bug. Read calc.py, identify the bug, fix it with apply_patch, verify with pytest.",
+      "verify_cmd": "pytest test_calc.py",
+      "files_readonly": ["test_calc.py"]
+    },
+    {
+      "id": "calc-multiply-zero",
+      "tier": 1,
+      "workspace": "benchmarks/workspaces/calc-multiply-zero",
+      "goal": "The test test_multiply_zero in test_calc.py is failing because multiply() in calc.py has a bug. Read calc.py, identify the bug, fix it with apply_patch, verify with pytest.",
+      "verify_cmd": "pytest test_calc.py",
+      "files_readonly": ["test_calc.py"]
+    }
+  ]
+}

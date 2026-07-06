@@ -3,9 +3,17 @@ name = "agent-v1"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "agent_v1"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agent-v1"
 path = "src/main.rs"
+
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

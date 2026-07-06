@@ -1,12 +1,8 @@
-mod config;
-mod llm;
-mod logging;
-mod loop_engine;
-mod state;
-mod tools;
-
-use llm::groq_client::GroqClient;
-use state::agent_state::AgentState;
+use agent_v1::config;
+use agent_v1::llm::groq_client::GroqClient;
+use agent_v1::loop_engine;
+use agent_v1::state::agent_state::AgentState;
+use agent_v1::state::stop_reason::StopReason;
 
 fn system_prompt() -> String {
     r#"You are a coding agent. Your job is to fix a bug in calc.py so that pytest tests pass.
@@ -93,7 +89,7 @@ async fn main() {
 
     // Exit code reflects success — useful for scripting and Phase 3 batch runs
     match stop_reason {
-        state::stop_reason::StopReason::TaskComplete => std::process::exit(0),
+        StopReason::TaskComplete => std::process::exit(0),
         _ => std::process::exit(1),
     }
 }

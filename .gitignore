@@ -9,3 +9,5 @@ agent-v1/phase-1-journey.md
 agent-v1/phase-1-overview.md
 .env
 agent-v1/phase2-plan.md
+agent-v1/benchmarks/workspaces/
+agent-v1/benchmarks/results/
