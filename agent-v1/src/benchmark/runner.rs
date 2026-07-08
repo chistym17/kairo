@@ -74,6 +74,12 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
                 println!("[benchmark] warning: run edited a test file");
             }
 
+            let diff_preview = match worktree::diff_preview(&task.workspace, 60) {
+                Ok(s) if s.trim().is_empty() => None,
+                Ok(s) => Some(s),
+                Err(e) => Some(format!("(failed to compute diff preview: {e:#})")),
+            };
+
             let trial_result = build_trial_result(
                 &task.id,
                 task.tier,
@@ -82,6 +88,7 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
                 &parsed,
                 oracle.passed,
                 &oracle.output,
+                diff_preview,
             );
 
             println!(

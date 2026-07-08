@@ -12,6 +12,8 @@ use crate::state::stop_reason::StopReason;
 #[serde(rename_all = "snake_case")]
 pub enum FailureCategory {
     WrongFile,
+    TestGaming,
+    NoSourceEdit,
     SyntaxError,
     PatchFailed,
     MaxSteps,
@@ -26,6 +28,8 @@ impl FailureCategory {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::WrongFile => "wrong_file",
+            Self::TestGaming => "test_gaming",
+            Self::NoSourceEdit => "no_source_edit",
             Self::SyntaxError => "syntax_error",
             Self::PatchFailed => "patch_failed",
             Self::MaxSteps => "max_steps",
@@ -69,6 +73,7 @@ pub struct TrialResult {
     pub failure_category: Option<FailureCategory>,
     pub duration_secs: Option<f64>,
     pub edited_test_file: bool,
+    pub diff_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +167,7 @@ pub fn build_trial_result(
     parsed: &ParsedRunLog,
     oracle_passed: bool,
     oracle_output: &str,
+    diff_preview: Option<String>,
 ) -> TrialResult {
     let summary = parsed.summary.clone().unwrap_or(RunSummary {
         stop_reason: StopReason::ToolError,
@@ -170,8 +176,13 @@ pub fn build_trial_result(
         timestamp: String::new(),
     });
 
+    let has_diff = diff_preview
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
     let benchmark_passed =
-        oracle_passed && summary.stop_reason == StopReason::TaskComplete;
+        oracle_passed && summary.stop_reason == StopReason::TaskComplete && has_diff;
 
     let failure_category = if benchmark_passed {
         None
@@ -181,6 +192,7 @@ pub fn build_trial_result(
             oracle_passed,
             parsed,
             oracle_output,
+            has_diff,
         ))
     };
 
@@ -197,6 +209,7 @@ pub fn build_trial_result(
         failure_category,
         duration_secs: duration_between(&parsed.first_timestamp, &parsed.last_timestamp),
         edited_test_file: parsed.edited_test_file,
+        diff_preview,
     }
 }
 
@@ -256,7 +269,16 @@ fn classify_failure(
     oracle_passed: bool,
     parsed: &ParsedRunLog,
     oracle_output: &str,
+    has_diff: bool,
 ) -> FailureCategory {
+    if oracle_output.contains("[benchmark] readonly file violation") {
+        return FailureCategory::TestGaming;
+    }
+
+    if oracle_passed && summary.stop_reason == StopReason::TaskComplete && !has_diff {
+        return FailureCategory::NoSourceEdit;
+    }
+
     if parsed.edited_test_file {
         return FailureCategory::WrongFile;
     }

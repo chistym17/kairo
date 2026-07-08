@@ -100,6 +100,28 @@ fn render_markdown(report: &BenchmarkReport) -> String {
         ));
     }
 
+    let failed: Vec<_> = report.trials.iter().filter(|t| !t.benchmark_passed).collect();
+    if !failed.is_empty() {
+        md.push_str("\n## Diff previews (failed runs)\n\n");
+        for trial in failed {
+            md.push_str(&format!(
+                "### {} (trial {})\n\n",
+                trial.task_id, trial.trial
+            ));
+            if let Some(diff) = &trial.diff_preview {
+                if diff.trim().is_empty() {
+                    md.push_str("_No diff._\n\n");
+                } else {
+                    md.push_str("```diff\n");
+                    md.push_str(diff);
+                    md.push_str("\n```\n\n");
+                }
+            } else {
+                md.push_str("_No diff captured._\n\n");
+            }
+        }
+    }
+
     md.push_str("\n## Analysis\n\n");
     md.push_str(&report.analysis);
     md.push('\n');
