@@ -10,6 +10,7 @@ pub struct BenchmarkConfig {
     pub trials: u32,
     pub output_dir: PathBuf,
     pub snapshots_dir: PathBuf,
+    pub repo_dir: PathBuf,
 }
 
 impl BenchmarkConfig {
@@ -26,6 +27,7 @@ impl BenchmarkConfig {
                 "BENCHMARK_SNAPSHOTS",
                 "benchmarks/snapshots",
             )),
+            repo_dir: PathBuf::from(env_or("BENCHMARK_REPO", "benchmarks/repo")),
             agent,
         }
     }

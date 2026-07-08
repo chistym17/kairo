@@ -9,6 +9,8 @@ pub struct Task {
     pub id: String,
     pub tier: u32,
     pub workspace: PathBuf,
+    #[serde(default)]
+    pub git_ref: Option<String>,
     pub goal: String,
     pub verify_cmd: String,
     #[serde(default)]
@@ -36,4 +38,12 @@ pub fn load_tasks(path: &Path) -> Result<Vec<Task>> {
     }
 
     Ok(file.tasks)
+}
+
+impl Task {
+    pub fn resolved_git_ref(&self) -> String {
+        self.git_ref
+            .clone()
+            .unwrap_or_else(|| format!("task/{}", self.id))
+    }
 }

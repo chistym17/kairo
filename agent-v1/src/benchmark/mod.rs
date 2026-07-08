@@ -4,6 +4,7 @@ pub mod oracle;
 pub mod prompt;
 pub mod report;
 pub mod reset;
+pub mod worktree;
 pub mod run_index;
 pub mod runner;
 pub mod task;

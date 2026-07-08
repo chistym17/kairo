@@ -9,9 +9,9 @@ use super::metrics::{self, aggregate, build_trial_result, log_path_for_run, Benc
 use super::oracle;
 use super::prompt;
 use super::report;
-use super::reset;
 use super::run_index;
 use super::task;
+use super::worktree;
 
 pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     let tasks = task::load_tasks(&config.tasks_path)?;
@@ -26,13 +26,7 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     let mut trial_results = Vec::new();
 
     for task in &tasks {
-        let snapshot = config.snapshot_for(&task.id);
-        anyhow::ensure!(
-            snapshot.is_dir(),
-            "missing snapshot for task {}: {}",
-            task.id,
-            snapshot.display()
-        );
+        let git_ref = task.resolved_git_ref();
 
         for trial in 0..config.trials {
             println!(
@@ -40,8 +34,9 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
                 task.id, trial
             );
 
-            reset::reset_workspace(&snapshot, &task.workspace)
-                .with_context(|| format!("failed to reset workspace for {}", task.id))?;
+            worktree::reset_worktree(&config.repo_dir, &git_ref, &task.workspace).with_context(
+                || format!("failed to reset worktree for {} at {}", task.id, git_ref),
+            )?;
 
             let mut state = AgentState::new(
                 &task.goal,
