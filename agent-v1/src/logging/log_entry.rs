@@ -255,12 +255,14 @@ mod tests {
         let mut entry = make_test_entry();
         entry.run_id = "test-append-456".to_string();
 
+        // Ensure a clean slate if previous test runs left a file behind.
+        let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", entry.run_id));
+        let _ = std::fs::remove_file(&log_path);
+
         // Write same entry twice
         write_entry(&entry);
         entry.step_index = 1;
         write_entry(&entry);
-
-        let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", entry.run_id));
 
         let content = std::fs::read_to_string(&log_path).unwrap();
         let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();

@@ -76,7 +76,7 @@ async fn main() {
     );
 
     let result = runtime
-        .run(goal, config.workspace_root)
+        .run(goal, config.workspace_root, None)
         .await
         .unwrap_or_else(|e| {
             eprintln!("[agent-v1] runtime error: {e:#}");

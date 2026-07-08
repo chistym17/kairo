@@ -5,6 +5,7 @@ use anyhow::Result;
 
 use crate::llm::LlmClient;
 use crate::loop_engine;
+use crate::agent::{AgentEvent, AgentObserver};
 use crate::state::agent_state::AgentState;
 use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
@@ -50,7 +51,12 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn run(&self, goal: impl Into<String>, workspace_root: impl Into<PathBuf>) -> Result<RunResult> {
+    pub async fn run(
+        &self,
+        goal: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+        observer: Option<&dyn AgentObserver>,
+    ) -> Result<RunResult> {
         let goal = goal.into();
         let workspace_root = workspace_root.into();
 
@@ -67,6 +73,16 @@ impl AgentRuntime {
             self.max_steps,
         );
 
+        if let Some(obs) = observer {
+            obs.on_event(AgentEvent::RunStarted {
+                run_id: state.run_id.clone(),
+                goal: state.goal.clone(),
+                workspace_root: state.workspace_root.to_string_lossy().to_string(),
+                model_id: state.model_id.clone(),
+                max_steps: state.max_steps,
+            });
+        }
+
         let stop_reason = loop_engine::run(
             &mut state,
             self.llm.as_ref(),
@@ -74,20 +90,32 @@ impl AgentRuntime {
             self.step_delay_ms,
             self.tool_use_max_retries,
             self.tool_use_retry_delay_ms,
+            observer,
         )
         .await;
 
         let changed_files = collect_changed_files(&state);
         let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", state.run_id));
 
-        Ok(RunResult {
+        let result = RunResult {
             run_id: state.run_id,
             stop_reason: stop_reason.clone(),
             total_steps: state.step_count,
             success: stop_reason == StopReason::TaskComplete,
             changed_files,
             log_path,
-        })
+        };
+
+        if let Some(obs) = observer {
+            obs.on_event(AgentEvent::RunFinished {
+                run_id: result.run_id.clone(),
+                stop_reason: format!("{:?}", result.stop_reason),
+                total_steps: result.total_steps,
+                success: result.success,
+            });
+        }
+
+        Ok(result)
     }
 }
 
@@ -172,7 +200,7 @@ mod tests {
             "system",
         );
 
-        let result = runtime.run("goal", &workspace).await.unwrap();
+        let result = runtime.run("goal", &workspace, None).await.unwrap();
         assert!(result.success);
         assert!(result.changed_files.iter().any(|p| p.ends_with("hello.txt")));
     }

@@ -4,6 +4,7 @@ use crate::state::agent_state::AgentState;
 use crate::state::step::Step;
 use crate::state::stop_reason::StopReason;
 use crate::tools;
+use crate::agent::{AgentEvent, AgentObserver};
 
 /// Run the agent loop until a stop condition is reached.
 ///
@@ -24,6 +25,7 @@ pub async fn run(
     step_delay_ms: u64,
     tool_use_max_retries: u32,
     tool_use_retry_delay_ms: u64,
+    observer: Option<&dyn AgentObserver>,
 ) -> StopReason {
     println!(
         "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] step_delay: {}ms\n",
@@ -45,6 +47,14 @@ pub async fn run(
         println!(
             "\n[agent] ── step {} ──────────────────────────────",
             state.step_count
+        );
+
+        emit(
+            observer,
+            AgentEvent::StepStarted {
+                run_id: state.run_id.clone(),
+                step_index: state.step_count,
+            },
         );
 
         // ── 1.5. Throttle: wait before hitting the API ─────────────────
@@ -82,6 +92,14 @@ pub async fn run(
                         0,
                     );
                     state.step_count += 1;
+                    emit(
+                        observer,
+                        AgentEvent::Error {
+                            run_id: state.run_id.clone(),
+                            step_index: Some(state.step_count),
+                            message: "model returned text instead of tool call".to_string(),
+                        },
+                    );
                     continue;
                 }
 
@@ -89,6 +107,14 @@ pub async fn run(
                     println!("[agent] malformed tool call: {}", msg);
                     write_event(&state.run_id, "malformed_tool_call", &msg, 0);
                     state.step_count += 1;
+                    emit(
+                        observer,
+                        AgentEvent::Error {
+                            run_id: state.run_id.clone(),
+                            step_index: Some(state.step_count),
+                            message: format!("malformed tool call: {}", msg),
+                        },
+                    );
                     continue;
                 }
 
@@ -193,6 +219,14 @@ pub async fn run(
                                     .await;
                             }
                             Err(other) => {
+                                emit(
+                                    observer,
+                                    AgentEvent::Error {
+                                        run_id: state.run_id.clone(),
+                                        step_index: Some(state.step_count),
+                                        message: other.to_string(),
+                                    },
+                                );
                                 return handle_fatal_llm_error(state, other);
                             }
                         }
@@ -200,13 +234,77 @@ pub async fn run(
                 }
 
                 Err(LlmError::ApiError(msg)) => {
+                    emit(
+                        observer,
+                        AgentEvent::Error {
+                            run_id: state.run_id.clone(),
+                            step_index: Some(state.step_count),
+                            message: format!("api error: {}", msg),
+                        },
+                    );
                     return handle_fatal_llm_error(state, LlmError::ApiError(msg));
                 }
             }
         };
 
         // ── 3. Execute the tool ─────────────────────────────────────────
+        emit(
+            observer,
+            AgentEvent::ToolStarted {
+                run_id: state.run_id.clone(),
+                step_index: state.step_count,
+                tool: tool_name(&action).to_string(),
+            },
+        );
+
         let result = tools::dispatch(&action, &state.workspace_root);
+
+        emit(
+            observer,
+            AgentEvent::ToolCompleted {
+                run_id: state.run_id.clone(),
+                step_index: state.step_count,
+                tool: tool_name(&action).to_string(),
+                success: result.success,
+            },
+        );
+
+        if result.success {
+            if let Some(path) = mutating_path(&action) {
+                emit(
+                    observer,
+                    AgentEvent::FileModified {
+                        run_id: state.run_id.clone(),
+                        step_index: state.step_count,
+                        path,
+                    },
+                );
+            }
+        } else {
+            emit(
+                observer,
+                AgentEvent::Error {
+                    run_id: state.run_id.clone(),
+                    step_index: Some(state.step_count),
+                    message: result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "tool failed".to_string()),
+                },
+            );
+        }
+
+        if let crate::state::step::Action::RunCommand { cmd } = &action {
+            emit(
+                observer,
+                AgentEvent::CommandCompleted {
+                    run_id: state.run_id.clone(),
+                    step_index: state.step_count,
+                    cmd: cmd.clone(),
+                    success: result.success,
+                },
+            );
+        }
 
         println!(
             "[agent] result: success={} output_len={}{}",
@@ -246,12 +344,48 @@ pub async fn run(
         // ── 7. Push to history so LLM sees it next turn ─────────────────
         state.record_step(step);
 
+        emit(
+            observer,
+            AgentEvent::StepCompleted {
+                run_id: state.run_id.clone(),
+                step_index: state.step_count - 1,
+                stop_reason: stop_reason.as_ref().map(|r| format!("{:?}", r)),
+            },
+        );
+
         // ── 8. Stop if the action signalled termination ─────────────────
         if let Some(reason) = stop_reason {
             println!("\n[agent] stopping: {:?}", reason);
             write_run_summary(&state.run_id, &state.model_id, &reason, state.step_count);
             return reason;
         }
+    }
+}
+
+fn emit(observer: Option<&dyn AgentObserver>, event: AgentEvent) {
+    if let Some(obs) = observer {
+        obs.on_event(event);
+    }
+}
+
+fn tool_name(action: &crate::state::step::Action) -> &'static str {
+    use crate::state::step::Action;
+    match action {
+        Action::ReadFile { .. } => "read_file",
+        Action::WriteFile { .. } => "write_file",
+        Action::ApplyPatch { .. } => "apply_patch",
+        Action::RunCommand { .. } => "run_command",
+        Action::Finish { .. } => "finish",
+    }
+}
+
+fn mutating_path(action: &crate::state::step::Action) -> Option<String> {
+    use crate::state::step::Action;
+    match action {
+        Action::ApplyPatch { path, .. } | Action::WriteFile { path, .. } => {
+            Some(path.to_string_lossy().to_string())
+        }
+        _ => None,
     }
 }
 

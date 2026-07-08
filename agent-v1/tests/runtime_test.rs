@@ -64,7 +64,7 @@ async fn runtime_runs_and_reports_changed_files() {
         "system",
     );
 
-    let result = runtime.run("goal", workspace).await.unwrap();
+    let result = runtime.run("goal", workspace, None).await.unwrap();
 
     assert!(result.success);
     assert!(result.total_steps >= 1);
