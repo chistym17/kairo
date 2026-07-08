@@ -1,7 +1,6 @@
+use agent_v1::agent::AgentRuntime;
 use agent_v1::config;
 use agent_v1::llm::groq_client::GroqClient;
-use agent_v1::loop_engine;
-use agent_v1::state::agent_state::AgentState;
 use agent_v1::state::stop_reason::StopReason;
 
 fn system_prompt() -> String {
@@ -64,39 +63,35 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Build the LLM client
+    // Build the LLM client + runtime
     let llm = GroqClient::new(&config.groq_api_key, &config.model_id);
-
-    // Build fresh agent state for this run
-    let mut state = AgentState::new(
-        goal,
-        config.workspace_root,
-        config.model_id,
+    let runtime = AgentRuntime::new(
+        Box::new(llm),
+        &config.model_id,
         config.max_steps,
-    );
-
-    println!("[agent-v1] run_id: {}", state.run_id);
-    println!("[agent-v1] log: logs/run_{}.jsonl", state.run_id);
-
-    // Run the loop
-    let stop_reason = loop_engine::run(
-        &mut state,
-        &llm,
-        &system_prompt(),
         config.step_delay_ms,
         config.tool_use_max_retries,
         config.tool_use_retry_delay_ms,
-    )
-    .await;
+        system_prompt(),
+    );
+
+    let result = runtime
+        .run(goal, config.workspace_root)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("[agent-v1] runtime error: {e:#}");
+            std::process::exit(1);
+        });
 
     // Final summary
     println!("\n[agent-v1] ── run complete ──────────────────────────");
-    println!("[agent-v1] stop reason: {:?}", stop_reason);
-    println!("[agent-v1] total steps: {}", state.step_count);
-    println!("[agent-v1] log: logs/run_{}.jsonl", state.run_id);
+    println!("[agent-v1] run_id: {}", result.run_id);
+    println!("[agent-v1] stop reason: {:?}", result.stop_reason);
+    println!("[agent-v1] total steps: {}", result.total_steps);
+    println!("[agent-v1] log: {}", result.log_path.display());
 
     // Exit code reflects success — useful for scripting and Phase 3 batch runs
-    match stop_reason {
+    match result.stop_reason {
         StopReason::TaskComplete => std::process::exit(0),
         _ => std::process::exit(1),
     }
