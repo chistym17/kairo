@@ -60,7 +60,14 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
             )
             .await;
 
-            let oracle = oracle::run_oracle(&task.workspace, &task.verify_cmd)?;
+            let (oracle, readonly_violations) = oracle::run_oracle_strict(
+                &task.workspace,
+                &task.verify_cmd,
+                &task.files_readonly,
+            )?;
+            if !readonly_violations.is_empty() {
+                println!("[benchmark] readonly violation: {:?}", readonly_violations);
+            }
             let parsed = metrics::parse_run_log(&log_path_for_run(&state.run_id))?;
 
             if parsed.edited_test_file {

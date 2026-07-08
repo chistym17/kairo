@@ -132,9 +132,12 @@ pub fn parse_run_log(path: &Path) -> Result<ParsedRunLog> {
         }
         last_timestamp = Some(entry.timestamp.clone());
 
-        let path_str = action_path(&entry.action);
-        if path_str.contains("test_") {
-            edited_test_file = true;
+        // Only count *edits*, not reads.
+        if is_mutating_action(&entry.action) {
+            let path_str = action_path(&entry.action);
+            if path_str.contains("test_") {
+                edited_test_file = true;
+            }
         }
 
         if tool_name(&entry.action) == "apply_patch" && !entry.result.success {
@@ -345,6 +348,10 @@ fn action_path(action: &Action) -> String {
         | Action::ApplyPatch { path, .. } => path.to_string_lossy().to_string(),
         Action::RunCommand { .. } | Action::Finish { .. } => String::new(),
     }
+}
+
+fn is_mutating_action(action: &Action) -> bool {
+    matches!(action, Action::ApplyPatch { .. } | Action::WriteFile { .. })
 }
 
 #[cfg(test)]
