@@ -10,6 +10,7 @@ pub enum Message {
     User { content: String },
     Assistant { content: String },
     Tool { name: String, result: String },
+    Summary { content: String },
 }
 
 impl Message {
@@ -29,6 +30,12 @@ impl Message {
         Self::Tool {
             name: name.into(),
             result: result.into(),
+        }
+    }
+
+    pub fn summary(content: impl Into<String>) -> Self {
+        Self::Summary {
+            content: content.into(),
         }
     }
 }

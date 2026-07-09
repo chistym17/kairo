@@ -47,6 +47,10 @@ fn session_message_to_groq(msg: &Message) -> Value {
             "role": "tool",
             "content": compress_tool_output(&format!("[{name}] {result}"))
         }),
+        Message::Summary { content } => json!({
+            "role": "assistant",
+            "content": format!("Session summary:\n{content}")
+        }),
     }
 }
 

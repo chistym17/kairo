@@ -23,13 +23,19 @@ pub struct ContextReduction {
 pub struct ContextManager {
     max_context_tokens: usize,
     reserve_tokens: usize,
+    keep_recent_session_messages: usize,
 }
 
 impl ContextManager {
-    pub fn new(max_context_tokens: usize, reserve_tokens: usize) -> Self {
+    pub fn new(
+        max_context_tokens: usize,
+        reserve_tokens: usize,
+        keep_recent_session_messages: usize,
+    ) -> Self {
         Self {
             max_context_tokens,
             reserve_tokens,
+            keep_recent_session_messages,
         }
     }
 
@@ -70,14 +76,24 @@ impl ContextManager {
             );
         }
 
-        // Trim: drop oldest session messages first.
-        let mut start = 0usize;
+        // Trim: prefer dropping old messages, keep recent messages.
+        let len = session_messages.len();
+        let mut start = len.saturating_sub(self.keep_recent_session_messages);
         let mut best = (full_request.clone(), full_stats.clone(), 0usize);
 
-        while start < session_messages.len() {
-            start += 1;
-            let view = &session_messages[start..];
-            let (req, stats) = builder.build_with_stats(workspace_root, goal, view, step_history);
+        while start <= len {
+            let dropped_slice = &session_messages[..start];
+            let kept_slice = &session_messages[start..];
+
+            let mut view: Vec<Message> = Vec::new();
+            let summary = summarize_dropped_messages(dropped_slice);
+            if !summary.trim().is_empty() {
+                view.push(Message::summary(summary));
+            }
+            view.extend_from_slice(kept_slice);
+
+            let (req, stats) =
+                builder.build_with_stats(workspace_root, goal, &view, step_history);
 
             let dropped = start;
             best = (req, stats.clone(), dropped);
@@ -85,6 +101,11 @@ impl ContextManager {
             if stats.estimated_tokens <= budget {
                 break;
             }
+
+            if start == len {
+                break;
+            }
+            start += 1;
         }
 
         let (request, stats, dropped) = best;
@@ -102,6 +123,43 @@ impl ContextManager {
     }
 }
 
+fn summarize_dropped_messages(dropped: &[Message]) -> String {
+    // Deterministic, simple summary for now (no extra LLM call).
+    // Keep it short and bounded.
+    const MAX_CHARS: usize = 1200;
+    const MAX_LINES: usize = 30;
+
+    if dropped.is_empty() {
+        return String::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for msg in dropped {
+        match msg {
+            Message::User { content } => lines.push(format!("User: {}", content.trim())),
+            Message::Assistant { content } => {
+                lines.push(format!("Assistant: {}", content.trim()))
+            }
+            Message::Tool { name, result } => lines.push(format!(
+                "Tool({}): {}",
+                name,
+                result.lines().next().unwrap_or("").trim()
+            )),
+            Message::Summary { content } => lines.push(format!("Summary: {}", content.trim())),
+        }
+        if lines.len() >= MAX_LINES {
+            break;
+        }
+    }
+
+    let mut out = lines.join("\n");
+    if out.len() > MAX_CHARS {
+        out.truncate(MAX_CHARS);
+        out.push_str("…");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,7 +169,7 @@ mod tests {
     fn trims_oldest_session_messages_when_over_budget() {
         let dir = tempfile::tempdir().unwrap();
         let builder = ContextBuilder::new();
-        let mgr = ContextManager::new(100, 0); // tiny budget
+        let mgr = ContextManager::new(100, 0, 20); // tiny budget
 
         let mut msgs = Vec::new();
         for i in 0..50 {
@@ -125,6 +183,66 @@ mod tests {
         assert!(bounded.estimated_tokens <= full.estimated_tokens);
         assert!(reduction.trimmed);
         assert!(reduction.dropped_session_messages > 0);
+    }
+
+    #[test]
+    fn injects_summary_when_trimming() {
+        let dir = tempfile::tempdir().unwrap();
+        let builder = ContextBuilder::new();
+        let mgr = ContextManager::new(200, 0, 20); // tiny budget
+
+        let mut msgs = Vec::new();
+        for i in 0..50 {
+            msgs.push(Message::user(format!("msg {i} - {}", "x".repeat(50))));
+        }
+
+        let (req, _full, _bounded, _reduction) =
+            mgr.build_bounded_request(&builder, dir.path(), "goal", &msgs, &[]);
+        assert!(reduction.trimmed);
+
+        let arr = req.messages.as_array().unwrap();
+        let has_summary = arr.iter().any(|m| {
+            m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                && m
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .contains("Session summary:")
+        });
+        assert!(has_summary);
+    }
+
+    #[test]
+    fn prefers_keeping_recent_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let builder = ContextBuilder::new();
+        let mgr = ContextManager::new(2000, 0, 5); // keep last 5 if possible
+
+        let mut msgs = Vec::new();
+        for i in 0..30 {
+            msgs.push(Message::user(format!("old {i} {}", "x".repeat(50))));
+        }
+        // make last messages distinct
+        msgs.push(Message::user("RECENT A"));
+        msgs.push(Message::user("RECENT B"));
+        msgs.push(Message::user("RECENT C"));
+        msgs.push(Message::user("RECENT D"));
+        msgs.push(Message::user("RECENT E"));
+
+        let (req, _full, _bounded, reduction) =
+            mgr.build_bounded_request(&builder, dir.path(), "goal", &msgs, &[]);
+        // If trimming happens, the policy should prefer keeping the most recent messages.
+
+        let arr = req.messages.as_array().unwrap();
+        let joined = arr
+            .iter()
+            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Expect recent messages to survive into context view.
+        assert!(joined.contains("RECENT A"));
+        assert!(joined.contains("RECENT E"));
     }
 }
 

@@ -155,6 +155,7 @@ fn build_runtime(config: &config::Config) -> AgentRuntime {
         default_system_prompt(),
         config.max_context_tokens,
         config.context_reserve_tokens,
+        config.keep_recent_session_messages,
     )
 }
 

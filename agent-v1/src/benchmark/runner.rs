@@ -26,6 +26,7 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
         system_prompt.clone(),
         config.agent.max_context_tokens,
         config.agent.context_reserve_tokens,
+        config.agent.keep_recent_session_messages,
     );
 
     println!("[benchmark] tasks: {}", tasks.len());

@@ -45,6 +45,7 @@ impl AgentRuntime {
         system_prompt: impl Into<String>,
         max_context_tokens: usize,
         context_reserve_tokens: usize,
+        keep_recent_session_messages: usize,
     ) -> Self {
         Self {
             llm,
@@ -54,7 +55,11 @@ impl AgentRuntime {
             tool_use_max_retries,
             tool_use_retry_delay_ms,
             context_builder: ContextBuilder::new().with_system_prompt(system_prompt),
-            context_manager: ContextManager::new(max_context_tokens, context_reserve_tokens),
+            context_manager: ContextManager::new(
+                max_context_tokens,
+                context_reserve_tokens,
+                keep_recent_session_messages,
+            ),
         }
     }
 
@@ -232,6 +237,7 @@ mod tests {
             "system",
             16000,
             2048,
+            20,
         );
 
         let result = runtime.run("goal", &workspace, None, None).await.unwrap();

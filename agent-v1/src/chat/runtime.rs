@@ -197,7 +197,7 @@ mod tests {
             .create(&workspace, SessionSettings::default())
             .unwrap();
 
-        let agent = AgentRuntime::new(Box::new(FakeLlm), "fake", 5, 0, 0, 0, "system", 16000, 2048);
+        let agent = AgentRuntime::new(Box::new(FakeLlm), "fake", 5, 0, 0, 0, "system", 16000, 2048, 20);
         let mut chat = ChatRuntime::new(manager, session, agent, workspace);
 
         chat.handle_message("fix bug").await.unwrap();

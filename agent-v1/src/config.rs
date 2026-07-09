@@ -41,6 +41,10 @@ pub struct Config {
     /// Tokens reserved for the model's response / tool call formatting.
     /// Effective input budget = max_context_tokens - context_reserve_tokens.
     pub context_reserve_tokens: usize,
+
+    /// Prefer keeping at least this many most-recent session messages in the
+    /// LLM context view before dropping older history.
+    pub keep_recent_session_messages: usize,
 }
 
 impl Config {
@@ -71,6 +75,9 @@ impl Config {
             context_reserve_tokens: env_or("CONTEXT_RESERVE_TOKENS", "2048")
                 .parse::<usize>()
                 .expect("CONTEXT_RESERVE_TOKENS must be a non-negative integer"),
+            keep_recent_session_messages: env_or("KEEP_RECENT_SESSION_MESSAGES", "20")
+                .parse::<usize>()
+                .expect("KEEP_RECENT_SESSION_MESSAGES must be a non-negative integer"),
         }
     }
 }
