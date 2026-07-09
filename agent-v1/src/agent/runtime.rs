@@ -217,6 +217,9 @@ mod tests {
                 path: PathBuf::from("hello.txt"),
                 content: "hi".to_string(),
             },
+            Action::RunCommand {
+                cmd: "ls".to_string(),
+            },
             Action::Finish {
                 summary: "ok".to_string(),
             },

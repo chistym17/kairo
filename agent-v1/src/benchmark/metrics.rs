@@ -356,6 +356,7 @@ fn write_analysis(
 fn tool_name(action: &Action) -> &'static str {
     match action {
         Action::ReadFile { .. } => "read_file",
+        Action::ListFiles { .. } => "list_files",
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
@@ -366,6 +367,7 @@ fn tool_name(action: &Action) -> &'static str {
 fn action_path(action: &Action) -> String {
     match action {
         Action::ReadFile { path }
+        | Action::ListFiles { path, .. }
         | Action::WriteFile { path, .. }
         | Action::ApplyPatch { path, .. } => path.to_string_lossy().to_string(),
         Action::RunCommand { .. } | Action::Finish { .. } => String::new(),

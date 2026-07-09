@@ -8,6 +8,12 @@ use crate::tools::ToolResult;
 pub enum Action {
     ReadFile { path: PathBuf },
 
+    ListFiles {
+        path: PathBuf,
+        max_depth: u32,
+        max_entries: u32,
+    },
+
     WriteFile { path: PathBuf, content: String },
 
     ApplyPatch { path: PathBuf, diff: String },

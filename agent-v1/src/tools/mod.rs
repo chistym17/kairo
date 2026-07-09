@@ -6,6 +6,7 @@ use crate::state::stop_reason::StopReason;
 
 pub mod apply_patch;
 pub mod diff;
+pub mod list_files;
 pub mod read_file;
 pub mod run_command;
 pub mod write_file;
@@ -70,6 +71,12 @@ fn strip_ansi(s: &str) -> String {
 pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
     match action {
         Action::ReadFile { path } => read_file::execute(path, workspace_root),
+
+        Action::ListFiles {
+            path,
+            max_depth,
+            max_entries,
+        } => list_files::execute(path, *max_depth, *max_entries, workspace_root),
 
         Action::WriteFile { path, content } => write_file::execute(path, content, workspace_root),
 

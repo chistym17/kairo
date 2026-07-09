@@ -6,6 +6,7 @@ use crate::state::agent_state::AgentState;
 use crate::state::step::Step;
 use crate::state::stop_reason::StopReason;
 use crate::tools;
+use crate::tools::ToolResult;
 use crate::agent::{AgentEvent, AgentObserver};
 use serde_json::json;
 
@@ -315,7 +316,46 @@ pub async fn run(
             },
         );
 
-        let result = tools::dispatch(&action, &state.workspace_root);
+        let result = match &action {
+            crate::state::step::Action::ApplyPatch { diff, .. } => {
+                if !looks_like_unified_diff(diff) {
+                    write_event(
+                        &state.run_id,
+                        "invalid_apply_patch_diff",
+                        "apply_patch.diff must be a unified diff (must contain '---', '+++', and '@@').",
+                        0,
+                    );
+                    ToolResult::error(
+                        "invalid apply_patch.diff: expected unified diff (---/+++/@@).",
+                    )
+                } else {
+                    tools::dispatch(&action, &state.workspace_root)
+                }
+            }
+            crate::state::step::Action::Finish { .. } => {
+                if !finish_allowed(&state.history) {
+                    write_event(
+                        &state.run_id,
+                        "finish_blocked",
+                        "finish blocked: last run_command did not succeed",
+                        0,
+                    );
+                    ToolResult {
+                        success: false,
+                        output: String::new(),
+                        diff: None,
+                        error: Some(
+                            "finish blocked: run tests successfully before calling finish"
+                                .to_string(),
+                        ),
+                        stop_reason: None,
+                    }
+                } else {
+                    tools::dispatch(&action, &state.workspace_root)
+                }
+            }
+            _ => tools::dispatch(&action, &state.workspace_root),
+        };
 
         emit(
             observer,
@@ -430,10 +470,26 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
     use crate::state::step::Action;
     match action {
         Action::ReadFile { .. } => "read_file",
+        Action::ListFiles { .. } => "list_files",
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
         Action::Finish { .. } => "finish",
+    }
+}
+
+fn looks_like_unified_diff(diff: &str) -> bool {
+    let d = diff.trim_start();
+    (d.starts_with("--- ") || d.contains("\n--- "))
+        && (d.starts_with("+++ ") || d.contains("\n+++ "))
+        && (d.starts_with("@@") || d.contains("\n@@"))
+}
+
+fn finish_allowed(history: &[Step]) -> bool {
+    match history.last() {
+        Some(step) => matches!(step.action, crate::state::step::Action::RunCommand { .. })
+            && step.result.success,
+        None => false,
     }
 }
 
