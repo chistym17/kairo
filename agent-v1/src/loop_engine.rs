@@ -316,45 +316,18 @@ pub async fn run(
             },
         );
 
-        let result = match &action {
-            crate::state::step::Action::ApplyPatch { diff, .. } => {
-                if !looks_like_unified_diff(diff) {
-                    write_event(
-                        &state.run_id,
-                        "invalid_apply_patch_diff",
-                        "apply_patch.diff must be a unified diff (must contain '---', '+++', and '@@').",
-                        0,
-                    );
-                    ToolResult::error(
-                        "invalid apply_patch.diff: expected unified diff (---/+++/@@).",
-                    )
-                } else {
-                    tools::dispatch(&action, &state.workspace_root)
+        let result = match validate_action(&action, &state.history) {
+            Some(ValidationError { event, message }) => {
+                write_event(&state.run_id, &event, &message, 0);
+                ToolResult {
+                    success: false,
+                    output: String::new(),
+                    diff: None,
+                    error: Some(message),
+                    stop_reason: None,
                 }
             }
-            crate::state::step::Action::Finish { .. } => {
-                if !finish_allowed(&state.history) {
-                    write_event(
-                        &state.run_id,
-                        "finish_blocked",
-                        "finish blocked: last run_command did not succeed",
-                        0,
-                    );
-                    ToolResult {
-                        success: false,
-                        output: String::new(),
-                        diff: None,
-                        error: Some(
-                            "finish blocked: run tests successfully before calling finish"
-                                .to_string(),
-                        ),
-                        stop_reason: None,
-                    }
-                } else {
-                    tools::dispatch(&action, &state.workspace_root)
-                }
-            }
-            _ => tools::dispatch(&action, &state.workspace_root),
+            None => tools::dispatch(&action, &state.workspace_root),
         };
 
         emit(
@@ -491,6 +464,90 @@ fn finish_allowed(history: &[Step]) -> bool {
             && step.result.success,
         None => false,
     }
+}
+
+struct ValidationError {
+    event: String,
+    message: String,
+}
+
+fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Option<ValidationError> {
+    use crate::state::step::Action;
+
+    match action {
+        Action::ReadFile { path } => validate_rel_path("read_file", path),
+        Action::ListFiles { path, .. } => validate_rel_path("list_files", path),
+        Action::WriteFile { path, .. } => validate_rel_path("write_file", path),
+        Action::ApplyPatch { path, diff } => {
+            if let Some(e) = validate_rel_path("apply_patch", path) {
+                return Some(e);
+            }
+            if !looks_like_unified_diff(diff) {
+                return Some(ValidationError {
+                    event: "invalid_apply_patch_diff".to_string(),
+                    message:
+                        "apply_patch.diff must be a unified diff (must contain '---', '+++', and '@@')."
+                            .to_string(),
+                });
+            }
+            None
+        }
+        Action::RunCommand { cmd } => validate_run_command(cmd),
+        Action::Finish { .. } => {
+            if !finish_allowed(history) {
+                Some(ValidationError {
+                    event: "finish_blocked".to_string(),
+                    message: "finish blocked: run tests successfully before calling finish"
+                        .to_string(),
+                })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn validate_rel_path(tool: &str, path: &std::path::PathBuf) -> Option<ValidationError> {
+    use std::path::Component;
+
+    if path.is_absolute() {
+        return Some(ValidationError {
+            event: "invalid_tool_args".to_string(),
+            message: format!("{tool} path must be relative (not absolute): {}", path.display()),
+        });
+    }
+
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Some(ValidationError {
+            event: "invalid_tool_args".to_string(),
+            message: format!(
+                "{tool} path must not contain '..' path traversal: {}",
+                path.display()
+            ),
+        });
+    }
+
+    None
+}
+
+fn validate_run_command(cmd: &str) -> Option<ValidationError> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return Some(ValidationError {
+            event: "invalid_tool_args".to_string(),
+            message: "run_command cmd must be non-empty".to_string(),
+        });
+    }
+
+    let banned = ["&&", "||", "|", ">", "<", ";"];
+    if banned.iter().any(|b| trimmed.contains(b)) {
+        return Some(ValidationError {
+            event: "invalid_tool_args".to_string(),
+            message: "run_command cmd must not contain shell operators (&&, ||, |, >, <, ;)".to_string(),
+        });
+    }
+
+    None
 }
 
 fn mutating_path(action: &crate::state::step::Action) -> Option<String> {
