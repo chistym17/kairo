@@ -1,5 +1,6 @@
 use crate::llm::{LlmClient, LlmError};
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
+use crate::session::Message;
 use crate::state::agent_state::AgentState;
 use crate::state::step::Step;
 use crate::state::stop_reason::StopReason;
@@ -26,6 +27,7 @@ pub async fn run(
     tool_use_max_retries: u32,
     tool_use_retry_delay_ms: u64,
     observer: Option<&dyn AgentObserver>,
+    session_messages: &[Message],
 ) -> StopReason {
     println!(
         "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] step_delay: {}ms\n",
@@ -72,7 +74,12 @@ pub async fn run(
         // ── 2. Ask the LLM what to do next ─────────────────────────────
         let action = 'next_action: loop {
             match llm
-                .next_action(system_prompt, &state.goal, &state.history)
+                .next_action(
+                    system_prompt,
+                    &state.goal,
+                    &state.history,
+                    session_messages,
+                )
                 .await
             {
                 Ok(action) => {
@@ -173,7 +180,12 @@ pub async fn run(
                         .await;
 
                         match llm
-                            .next_action(system_prompt, &state.goal, &state.history)
+                            .next_action(
+                                system_prompt,
+                                &state.goal,
+                                &state.history,
+                                session_messages,
+                            )
                             .await
                         {
                             Ok(action) => {

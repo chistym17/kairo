@@ -6,6 +6,7 @@ use anyhow::Result;
 use crate::llm::LlmClient;
 use crate::loop_engine;
 use crate::agent::{AgentEvent, AgentObserver};
+use crate::session::Session;
 use crate::state::agent_state::AgentState;
 use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
@@ -56,6 +57,7 @@ impl AgentRuntime {
         goal: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
         observer: Option<&dyn AgentObserver>,
+        session: Option<&mut Session>,
     ) -> Result<RunResult> {
         let goal = goal.into();
         let workspace_root = workspace_root.into();
@@ -66,8 +68,13 @@ impl AgentRuntime {
             workspace_root.display()
         );
 
+        let session_messages = session
+            .as_ref()
+            .map(|s| s.messages.as_slice())
+            .unwrap_or(&[]);
+
         let mut state = AgentState::new(
-            goal,
+            goal.clone(),
             workspace_root,
             self.model_id.clone(),
             self.max_steps,
@@ -91,8 +98,16 @@ impl AgentRuntime {
             self.tool_use_max_retries,
             self.tool_use_retry_delay_ms,
             observer,
+            session_messages,
         )
         .await;
+
+        if let Some(session) = session {
+            session.add_user_message(&goal);
+            if let Some(summary) = finish_summary(&state) {
+                session.add_assistant_message(summary);
+            }
+        }
 
         let changed_files = collect_changed_files(&state);
         let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", state.run_id));
@@ -117,6 +132,16 @@ impl AgentRuntime {
 
         Ok(result)
     }
+}
+
+fn finish_summary(state: &AgentState) -> Option<String> {
+    state.history.iter().rev().find_map(|step| {
+        if let Action::Finish { summary } = &step.action {
+            Some(summary.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn collect_changed_files(state: &AgentState) -> Vec<String> {
@@ -160,6 +185,7 @@ mod tests {
             _system_prompt: &str,
             _goal: &str,
             _history: &[Step],
+            _session_messages: &[crate::session::Message],
         ) -> std::result::Result<Action, LlmError> {
             let mut actions = self.actions.lock().unwrap();
             if actions.is_empty() {
@@ -200,7 +226,7 @@ mod tests {
             "system",
         );
 
-        let result = runtime.run("goal", &workspace, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
         assert!(result.success);
         assert!(result.changed_files.iter().any(|p| p.ends_with("hello.txt")));
     }

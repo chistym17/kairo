@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 
 use crate::llm::schema::{build_tools_schema, parse_tool_call};
 use crate::llm::{LlmClient, LlmError};
+use crate::session::Message;
 use crate::state::step::{Action, Step};
 use crate::tools::ToolResult;
 
@@ -22,17 +23,26 @@ impl GroqClient {
             http: reqwest::Client::new(),
         }
     }
-    fn build_messages(&self, system_prompt: &str, goal: &str, history: &[Step]) -> Value {
-        let mut messages = vec![
-            json!({
-                "role": "system",
-                "content": system_prompt
-            }),
-            json!({
-                "role": "user",
-                "content": goal
-            }),
-        ];
+    fn build_messages(
+        &self,
+        system_prompt: &str,
+        goal: &str,
+        history: &[Step],
+        session_messages: &[Message],
+    ) -> Value {
+        let mut messages = vec![json!({
+            "role": "system",
+            "content": system_prompt
+        })];
+
+        for msg in session_messages {
+            messages.push(session_message_to_groq(msg));
+        }
+
+        messages.push(json!({
+            "role": "user",
+            "content": goal
+        }));
 
         for step in history {
             let tool_call_msg = action_to_assistant_message(&step.action);
@@ -53,8 +63,9 @@ impl LlmClient for GroqClient {
         system_prompt: &str,
         goal: &str,
         history: &[Step],
+        session_messages: &[Message],
     ) -> Result<Action, LlmError> {
-        let messages = self.build_messages(system_prompt, goal, history);
+        let messages = self.build_messages(system_prompt, goal, history, session_messages);
         let tools = build_tools_schema();
 
         let body = json!({
@@ -138,6 +149,23 @@ impl LlmClient for GroqClient {
 
     fn model_id(&self) -> &str {
         &self.model
+    }
+}
+
+fn session_message_to_groq(msg: &Message) -> Value {
+    match msg {
+        Message::User { content } => json!({
+            "role": "user",
+            "content": content
+        }),
+        Message::Assistant { content } => json!({
+            "role": "assistant",
+            "content": content
+        }),
+        Message::Tool { name, result } => json!({
+            "role": "tool",
+            "content": format!("[{name}] {result}")
+        }),
     }
 }
 

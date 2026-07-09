@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::session::Message;
 use crate::state::step::{Action, Step};
 
 pub mod groq_client;
@@ -13,6 +14,7 @@ pub trait LlmClient: Send + Sync {
         system_prompt: &str,
         goal: &str,
         history: &[Step],
+        session_messages: &[Message],
     ) -> Result<Action, LlmError>;
 
     fn model_id(&self) -> &str;

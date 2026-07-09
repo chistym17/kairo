@@ -24,6 +24,7 @@ impl LlmClient for FakeLlm {
         _system_prompt: &str,
         _goal: &str,
         _history: &[Step],
+        _session_messages: &[agent_v1::session::Message],
     ) -> Result<Action, LlmError> {
         let mut actions = self.actions.lock().unwrap();
         if actions.is_empty() {
@@ -64,7 +65,7 @@ async fn runtime_runs_and_reports_changed_files() {
         "system",
     );
 
-    let result = runtime.run("goal", workspace, None).await.unwrap();
+    let result = runtime.run("goal", workspace, None, None).await.unwrap();
 
     assert!(result.success);
     assert!(result.total_steps >= 1);
