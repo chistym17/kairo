@@ -1,3 +1,4 @@
+use crate::context::ContextBuilder;
 use crate::llm::{LlmClient, LlmError};
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Message;
@@ -22,7 +23,7 @@ use crate::agent::{AgentEvent, AgentObserver};
 pub async fn run(
     state: &mut AgentState,
     llm: &dyn LlmClient,
-    system_prompt: &str,
+    context_builder: &ContextBuilder,
     step_delay_ms: u64,
     tool_use_max_retries: u32,
     tool_use_retry_delay_ms: u64,
@@ -73,14 +74,14 @@ pub async fn run(
 
         // ── 2. Ask the LLM what to do next ─────────────────────────────
         let action = 'next_action: loop {
-            match llm
-                .next_action(
-                    system_prompt,
-                    &state.goal,
-                    &state.history,
-                    session_messages,
-                )
-                .await
+            let request = context_builder.build(
+                &state.workspace_root,
+                &state.goal,
+                session_messages,
+                &state.history,
+            );
+
+            match llm.next_action(&request).await
             {
                 Ok(action) => {
                     println!("[agent] action: {:?}", action);
@@ -179,14 +180,14 @@ pub async fn run(
                         ))
                         .await;
 
-                        match llm
-                            .next_action(
-                                system_prompt,
-                                &state.goal,
-                                &state.history,
-                                session_messages,
-                            )
-                            .await
+                        let request = context_builder.build(
+                            &state.workspace_root,
+                            &state.goal,
+                            session_messages,
+                            &state.history,
+                        );
+
+                        match llm.next_action(&request).await
                         {
                             Ok(action) => {
                                 println!(

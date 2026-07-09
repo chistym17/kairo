@@ -6,6 +6,7 @@ use anyhow::Result;
 use crate::llm::LlmClient;
 use crate::loop_engine;
 use crate::agent::{AgentEvent, AgentObserver};
+use crate::context::ContextBuilder;
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
 use crate::state::step::Action;
@@ -28,7 +29,7 @@ pub struct AgentRuntime {
     pub step_delay_ms: u64,
     pub tool_use_max_retries: u32,
     pub tool_use_retry_delay_ms: u64,
-    pub system_prompt: String,
+    context_builder: ContextBuilder,
 }
 
 impl AgentRuntime {
@@ -48,7 +49,7 @@ impl AgentRuntime {
             step_delay_ms,
             tool_use_max_retries,
             tool_use_retry_delay_ms,
-            system_prompt: system_prompt.into(),
+            context_builder: ContextBuilder::new().with_system_prompt(system_prompt),
         }
     }
 
@@ -93,7 +94,7 @@ impl AgentRuntime {
         let stop_reason = loop_engine::run(
             &mut state,
             self.llm.as_ref(),
-            &self.system_prompt,
+            &self.context_builder,
             self.step_delay_ms,
             self.tool_use_max_retries,
             self.tool_use_retry_delay_ms,
@@ -163,8 +164,8 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::tempdir;
 
+    use crate::context::LlmRequest;
     use crate::llm::{LlmError};
-    use crate::state::step::Step;
 
     struct FakeLlm {
         actions: std::sync::Mutex<Vec<Action>>,
@@ -182,10 +183,7 @@ mod tests {
     impl LlmClient for FakeLlm {
         async fn next_action(
             &self,
-            _system_prompt: &str,
-            _goal: &str,
-            _history: &[Step],
-            _session_messages: &[crate::session::Message],
+            _request: &LlmRequest,
         ) -> std::result::Result<Action, LlmError> {
             let mut actions = self.actions.lock().unwrap();
             if actions.is_empty() {

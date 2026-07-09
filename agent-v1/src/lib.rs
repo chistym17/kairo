@@ -8,3 +8,4 @@ pub mod tools;
 pub mod benchmark;
 pub mod agent;
 pub mod session;
+pub mod context;

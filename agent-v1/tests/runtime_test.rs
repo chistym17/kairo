@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use agent_v1::agent::AgentRuntime;
+use agent_v1::context::LlmRequest;
 use agent_v1::llm::{LlmClient, LlmError};
-use agent_v1::state::step::{Action, Step};
+use agent_v1::state::step::Action;
 use async_trait::async_trait;
 
 struct FakeLlm {
@@ -21,10 +22,7 @@ impl FakeLlm {
 impl LlmClient for FakeLlm {
     async fn next_action(
         &self,
-        _system_prompt: &str,
-        _goal: &str,
-        _history: &[Step],
-        _session_messages: &[agent_v1::session::Message],
+        _request: &LlmRequest,
     ) -> Result<Action, LlmError> {
         let mut actions = self.actions.lock().unwrap();
         if actions.is_empty() {
