@@ -24,6 +24,8 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
         config.agent.tool_use_max_retries,
         config.agent.tool_use_retry_delay_ms,
         system_prompt.clone(),
+        config.agent.max_context_tokens,
+        config.agent.context_reserve_tokens,
     );
 
     println!("[benchmark] tasks: {}", tasks.len());

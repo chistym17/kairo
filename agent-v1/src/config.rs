@@ -32,6 +32,15 @@ pub struct Config {
 
     /// Backoff between tool_use_failed retries.
     pub tool_use_retry_delay_ms: u64,
+
+    /// Soft budget for how much context is sent to the LLM (estimated tokens).
+    /// Phase 6 uses this as a cap for the *view* sent to the model. Session
+    /// storage keeps full history.
+    pub max_context_tokens: usize,
+
+    /// Tokens reserved for the model's response / tool call formatting.
+    /// Effective input budget = max_context_tokens - context_reserve_tokens.
+    pub context_reserve_tokens: usize,
 }
 
 impl Config {
@@ -56,6 +65,12 @@ impl Config {
             tool_use_retry_delay_ms: env_or("TOOL_USE_RETRY_DELAY_MS", "3000")
                 .parse::<u64>()
                 .expect("TOOL_USE_RETRY_DELAY_MS must be a non-negative integer"),
+            max_context_tokens: env_or("MAX_CONTEXT_TOKENS", "16000")
+                .parse::<usize>()
+                .expect("MAX_CONTEXT_TOKENS must be a non-negative integer"),
+            context_reserve_tokens: env_or("CONTEXT_RESERVE_TOKENS", "2048")
+                .parse::<usize>()
+                .expect("CONTEXT_RESERVE_TOKENS must be a non-negative integer"),
         }
     }
 }

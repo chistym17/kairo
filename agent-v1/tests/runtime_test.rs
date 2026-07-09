@@ -61,6 +61,8 @@ async fn runtime_runs_and_reports_changed_files() {
         0,
         0,
         "system",
+        16000,
+        2048,
     );
 
     let result = runtime.run("goal", workspace, None, None).await.unwrap();

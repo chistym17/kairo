@@ -6,7 +6,7 @@ use anyhow::Result;
 use crate::llm::LlmClient;
 use crate::loop_engine;
 use crate::agent::{AgentEvent, AgentObserver};
-use crate::context::ContextBuilder;
+use crate::context::{ContextBuilder, ContextManager};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
 use crate::state::step::Action;
@@ -31,6 +31,7 @@ pub struct AgentRuntime {
     pub tool_use_max_retries: u32,
     pub tool_use_retry_delay_ms: u64,
     context_builder: ContextBuilder,
+    context_manager: ContextManager,
 }
 
 impl AgentRuntime {
@@ -42,6 +43,8 @@ impl AgentRuntime {
         tool_use_max_retries: u32,
         tool_use_retry_delay_ms: u64,
         system_prompt: impl Into<String>,
+        max_context_tokens: usize,
+        context_reserve_tokens: usize,
     ) -> Self {
         Self {
             llm,
@@ -51,6 +54,7 @@ impl AgentRuntime {
             tool_use_max_retries,
             tool_use_retry_delay_ms,
             context_builder: ContextBuilder::new().with_system_prompt(system_prompt),
+            context_manager: ContextManager::new(max_context_tokens, context_reserve_tokens),
         }
     }
 
@@ -96,6 +100,7 @@ impl AgentRuntime {
             &mut state,
             self.llm.as_ref(),
             &self.context_builder,
+            &self.context_manager,
             self.step_delay_ms,
             self.tool_use_max_retries,
             self.tool_use_retry_delay_ms,
@@ -225,6 +230,8 @@ mod tests {
             0,
             0,
             "system",
+            16000,
+            2048,
         );
 
         let result = runtime.run("goal", &workspace, None, None).await.unwrap();

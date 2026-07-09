@@ -153,6 +153,8 @@ fn build_runtime(config: &config::Config) -> AgentRuntime {
         config.tool_use_max_retries,
         config.tool_use_retry_delay_ms,
         default_system_prompt(),
+        config.max_context_tokens,
+        config.context_reserve_tokens,
     )
 }
 

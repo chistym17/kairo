@@ -1,4 +1,4 @@
-use crate::context::ContextBuilder;
+use crate::context::{ContextBuilder, ContextManager};
 use crate::llm::{LlmClient, LlmError};
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Message;
@@ -7,6 +7,7 @@ use crate::state::step::Step;
 use crate::state::stop_reason::StopReason;
 use crate::tools;
 use crate::agent::{AgentEvent, AgentObserver};
+use serde_json::json;
 
 /// Run the agent loop until a stop condition is reached.
 ///
@@ -24,6 +25,7 @@ pub async fn run(
     state: &mut AgentState,
     llm: &dyn LlmClient,
     context_builder: &ContextBuilder,
+    context_manager: &ContextManager,
     step_delay_ms: u64,
     tool_use_max_retries: u32,
     tool_use_retry_delay_ms: u64,
@@ -74,19 +76,26 @@ pub async fn run(
 
         // ── 2. Ask the LLM what to do next ─────────────────────────────
         let action = 'next_action: loop {
-            let (request, stats) = context_builder.build_with_stats(
-                &state.workspace_root,
-                &state.goal,
-                session_messages,
-                &state.history,
-            );
+            let (request, full_stats, bounded_stats, reduction) =
+                context_manager.build_bounded_request(
+                    context_builder,
+                    &state.workspace_root,
+                    &state.goal,
+                    session_messages,
+                    &state.history,
+                );
 
-            write_event(
-                &state.run_id,
-                "context_stats",
-                &stats.to_json_string(),
-                0,
-            );
+            write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
+            if reduction.trimmed {
+                let detail = json!({
+                    "budget_tokens": reduction.budget_tokens,
+                    "dropped_session_messages": reduction.dropped_session_messages,
+                    "full_estimated_tokens": full_stats.estimated_tokens,
+                    "bounded_estimated_tokens": bounded_stats.estimated_tokens
+                })
+                .to_string();
+                write_event(&state.run_id, "context_reduction", &detail, 0);
+            }
 
             match llm.next_action(&request).await
             {
@@ -187,19 +196,31 @@ pub async fn run(
                         ))
                         .await;
 
-                        let (request, stats) = context_builder.build_with_stats(
-                            &state.workspace_root,
-                            &state.goal,
-                            session_messages,
-                            &state.history,
-                        );
+                        let (request, full_stats, bounded_stats, reduction) =
+                            context_manager.build_bounded_request(
+                                context_builder,
+                                &state.workspace_root,
+                                &state.goal,
+                                session_messages,
+                                &state.history,
+                            );
 
                         write_event(
                             &state.run_id,
                             "context_stats",
-                            &stats.to_json_string(),
+                            &bounded_stats.to_json_string(),
                             0,
                         );
+                        if reduction.trimmed {
+                            let detail = json!({
+                                "budget_tokens": reduction.budget_tokens,
+                                "dropped_session_messages": reduction.dropped_session_messages,
+                                "full_estimated_tokens": full_stats.estimated_tokens,
+                                "bounded_estimated_tokens": bounded_stats.estimated_tokens
+                            })
+                            .to_string();
+                            write_event(&state.run_id, "context_reduction", &detail, 0);
+                        }
 
                         match llm.next_action(&request).await
                         {
