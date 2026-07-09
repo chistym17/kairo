@@ -5,4 +5,4 @@ pub mod storage;
 
 pub use manager::SessionManager;
 pub use message::Message;
-pub use session::{Session, SessionSettings};
+pub use session::{CompactionState, Session, SessionSettings};

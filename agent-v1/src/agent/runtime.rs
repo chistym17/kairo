@@ -68,7 +68,7 @@ impl AgentRuntime {
         goal: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
         observer: Option<&dyn AgentObserver>,
-        session: Option<&mut Session>,
+        mut session: Option<&mut Session>,
     ) -> Result<RunResult> {
         let goal = goal.into();
         let workspace_root = workspace_root.into();
@@ -78,11 +78,6 @@ impl AgentRuntime {
             "workspace_root does not exist: {}",
             workspace_root.display()
         );
-
-        let session_messages = session
-            .as_ref()
-            .map(|s| s.messages.as_slice())
-            .unwrap_or(&[]);
 
         let mut state = AgentState::new(
             goal.clone(),
@@ -110,7 +105,7 @@ impl AgentRuntime {
             self.tool_use_max_retries,
             self.tool_use_retry_delay_ms,
             observer,
-            session_messages,
+            session.as_deref_mut(),
         )
         .await;
 

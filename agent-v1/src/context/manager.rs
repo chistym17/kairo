@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::context::{ContextBuilder, ContextStats};
-use crate::session::Message;
+use crate::session::{CompactionState, Message, Session};
 use crate::state::step::Step;
 
 /// What was reduced to fit the budget (Phase 6.2).
@@ -49,6 +49,7 @@ impl ContextManager {
         builder: &ContextBuilder,
         workspace_root: &Path,
         goal: &str,
+        session: Option<&mut Session>,
         session_messages: &[Message],
         step_history: &[Step],
     ) -> (
@@ -59,9 +60,26 @@ impl ContextManager {
     ) {
         let budget = self.budget_tokens();
 
-        // Baseline stats with full session view.
+        // Use persisted compaction view (if present) as the baseline view.
+        let (summary_text, summarized_until) = session
+            .as_ref()
+            .and_then(|s| s.compaction.as_ref())
+            .map(|c| (Some(c.summary.as_str()), c.summarized_until))
+            .unwrap_or((None, 0usize));
+
+        let summarized_until = summarized_until.min(session_messages.len());
+        let base_messages = &session_messages[summarized_until..];
+
+        let mut full_view: Vec<Message> = Vec::new();
+        if let Some(text) = summary_text {
+            if !text.trim().is_empty() {
+                full_view.push(Message::summary(text));
+            }
+        }
+        full_view.extend_from_slice(base_messages);
+
         let (full_request, full_stats) =
-            builder.build_with_stats(workspace_root, goal, session_messages, step_history);
+            builder.build_with_stats(workspace_root, goal, &full_view, step_history);
 
         if full_stats.estimated_tokens <= budget {
             return (
@@ -77,18 +95,20 @@ impl ContextManager {
         }
 
         // Trim: prefer dropping old messages, keep recent messages.
-        let len = session_messages.len();
+        let len = base_messages.len();
         let mut start = len.saturating_sub(self.keep_recent_session_messages);
         let mut best = (full_request.clone(), full_stats.clone(), 0usize);
 
         while start <= len {
-            let dropped_slice = &session_messages[..start];
-            let kept_slice = &session_messages[start..];
+            let dropped_chunk = &base_messages[..start];
+            let kept_slice = &base_messages[start..];
+
+            let chunk_summary = summarize_messages_chunk(dropped_chunk);
+            let merged_summary = merge_summary(summary_text, chunk_summary.as_deref());
 
             let mut view: Vec<Message> = Vec::new();
-            let summary = summarize_dropped_messages(dropped_slice);
-            if !summary.trim().is_empty() {
-                view.push(Message::summary(summary));
+            if !merged_summary.trim().is_empty() {
+                view.push(Message::summary(&merged_summary));
             }
             view.extend_from_slice(kept_slice);
 
@@ -110,6 +130,24 @@ impl ContextManager {
 
         let (request, stats, dropped) = best;
 
+        // Persist compaction state (summary + cutoff) if we trimmed and can mutate session.
+        if dropped > 0 {
+            if let Some(session) = session {
+                let new_summarized_until = (summarized_until + dropped).min(session_messages.len());
+                let chunk = &session_messages[summarized_until..new_summarized_until];
+                let chunk_summary = summarize_messages_chunk(chunk);
+                let merged_summary = merge_summary(
+                    session.compaction.as_ref().map(|c| c.summary.as_str()),
+                    chunk_summary.as_deref(),
+                );
+
+                session.compaction = Some(CompactionState {
+                    summarized_until: new_summarized_until,
+                    summary: merged_summary,
+                });
+            }
+        }
+
         (
             request,
             full_stats,
@@ -123,18 +161,18 @@ impl ContextManager {
     }
 }
 
-fn summarize_dropped_messages(dropped: &[Message]) -> String {
+fn summarize_messages_chunk(chunk: &[Message]) -> Option<String> {
     // Deterministic, simple summary for now (no extra LLM call).
     // Keep it short and bounded.
     const MAX_CHARS: usize = 1200;
     const MAX_LINES: usize = 30;
 
-    if dropped.is_empty() {
-        return String::new();
+    if chunk.is_empty() {
+        return None;
     }
 
     let mut lines: Vec<String> = Vec::new();
-    for msg in dropped {
+    for msg in chunk {
         match msg {
             Message::User { content } => lines.push(format!("User: {}", content.trim())),
             Message::Assistant { content } => {
@@ -157,13 +195,37 @@ fn summarize_dropped_messages(dropped: &[Message]) -> String {
         out.truncate(MAX_CHARS);
         out.push_str("…");
     }
-    out
+    Some(out)
+}
+
+fn merge_summary(existing: Option<&str>, new_chunk: Option<&str>) -> String {
+    let existing = existing.unwrap_or("").trim();
+    let new_chunk = new_chunk.unwrap_or("").trim();
+
+    if existing.is_empty() {
+        return new_chunk.to_string();
+    }
+    if new_chunk.is_empty() {
+        return existing.to_string();
+    }
+
+    let mut merged = String::new();
+    merged.push_str(existing);
+    merged.push_str("\n---\n");
+    merged.push_str(new_chunk);
+
+    const MAX: usize = 2000;
+    if merged.len() > MAX {
+        merged.truncate(MAX);
+        merged.push_str("…");
+    }
+    merged
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Message;
+    use crate::session::{Message, Session, SessionSettings};
 
     #[test]
     fn trims_oldest_session_messages_when_over_budget() {
@@ -177,7 +239,7 @@ mod tests {
         }
 
         let (_req, full, bounded, reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", &msgs, &[]);
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[]);
 
         assert!(full.estimated_tokens > mgr.budget_tokens());
         assert!(bounded.estimated_tokens <= full.estimated_tokens);
@@ -196,8 +258,8 @@ mod tests {
             msgs.push(Message::user(format!("msg {i} - {}", "x".repeat(50))));
         }
 
-        let (req, _full, _bounded, _reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", &msgs, &[]);
+        let (req, _full, _bounded, reduction) =
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[]);
         assert!(reduction.trimmed);
 
         let arr = req.messages.as_array().unwrap();
@@ -229,8 +291,8 @@ mod tests {
         msgs.push(Message::user("RECENT D"));
         msgs.push(Message::user("RECENT E"));
 
-        let (req, _full, _bounded, reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", &msgs, &[]);
+        let (req, _full, _bounded, _reduction) =
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[]);
         // If trimming happens, the policy should prefer keeping the most recent messages.
 
         let arr = req.messages.as_array().unwrap();
@@ -243,6 +305,33 @@ mod tests {
         // Expect recent messages to survive into context view.
         assert!(joined.contains("RECENT A"));
         assert!(joined.contains("RECENT E"));
+    }
+
+    #[test]
+    fn persists_compaction_state_when_session_is_mutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let builder = ContextBuilder::new();
+        let mgr = ContextManager::new(200, 0, 5);
+
+        let mut session = Session::new(dir.path(), SessionSettings::default());
+        for i in 0..50 {
+            session.add_user_message(format!("msg {i} - {}", "x".repeat(50)));
+        }
+
+        let messages_snapshot = session.messages.clone();
+        let (_req, _full, _bounded, reduction) = mgr.build_bounded_request(
+            &builder,
+            dir.path(),
+            "goal",
+            Some(&mut session),
+            &messages_snapshot,
+            &[],
+        );
+
+        assert!(reduction.trimmed);
+        let c = session.compaction.as_ref().unwrap();
+        assert!(c.summarized_until > 0);
+        assert!(!c.summary.trim().is_empty());
     }
 }
 

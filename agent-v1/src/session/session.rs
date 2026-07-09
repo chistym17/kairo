@@ -21,12 +21,22 @@ impl Default for SessionSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompactionState {
+    /// Number of oldest session messages represented by `summary`.
+    pub summarized_until: usize,
+
+    /// Deterministic summary of session history up to `summarized_until`.
+    pub summary: String,
+}
+
 /// Long-lived agent session for a single workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
     pub id: String,
     pub workspace_root: PathBuf,
     pub messages: Vec<Message>,
+    pub compaction: Option<CompactionState>,
     pub settings: SessionSettings,
     pub created_at: String,
     pub updated_at: String,
@@ -39,6 +49,7 @@ impl Session {
             id: Uuid::new_v4().to_string(),
             workspace_root: workspace_root.into(),
             messages: Vec::new(),
+            compaction: None,
             settings,
             created_at: now.clone(),
             updated_at: now,
