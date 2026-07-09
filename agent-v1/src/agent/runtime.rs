@@ -18,6 +18,7 @@ pub struct RunResult {
     pub stop_reason: StopReason,
     pub total_steps: u32,
     pub success: bool,
+    pub summary: Option<String>,
     pub changed_files: Vec<String>,
     pub log_path: PathBuf,
 }
@@ -112,12 +113,14 @@ impl AgentRuntime {
 
         let changed_files = collect_changed_files(&state);
         let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", state.run_id));
+        let summary = finish_summary(&state);
 
         let result = RunResult {
             run_id: state.run_id,
             stop_reason: stop_reason.clone(),
             total_steps: state.step_count,
             success: stop_reason == StopReason::TaskComplete,
+            summary,
             changed_files,
             log_path,
         };

@@ -9,3 +9,4 @@ pub mod benchmark;
 pub mod agent;
 pub mod session;
 pub mod context;
+pub mod chat;
