@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod compressor;
 pub mod instructions;
 pub mod manager;
 pub mod messages;

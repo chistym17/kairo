@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use crate::context::compressor::compress_tool_output;
 use crate::session::Message;
 use crate::state::step::{Action, Step};
 use crate::tools::ToolResult;
@@ -44,7 +45,7 @@ fn session_message_to_groq(msg: &Message) -> Value {
         }),
         Message::Tool { name, result } => json!({
             "role": "tool",
-            "content": format!("[{name}] {result}")
+            "content": compress_tool_output(&format!("[{name}] {result}"))
         }),
     }
 }
@@ -76,7 +77,7 @@ fn tool_result_to_message(action: &Action, result: &ToolResult) -> Value {
                 parts.push(format!("\nDiff:\n{diff}"));
             }
         }
-        parts.join("")
+        compress_tool_output(&parts.join(""))
     } else {
         let mut parts = vec![];
         if !result.output.is_empty() {
@@ -88,7 +89,7 @@ fn tool_result_to_message(action: &Action, result: &ToolResult) -> Value {
         if parts.is_empty() {
             "Tool call failed with no output.".to_string()
         } else {
-            parts.join("\n")
+            compress_tool_output(&parts.join("\n"))
         }
     };
 

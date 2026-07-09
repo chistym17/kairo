@@ -170,6 +170,35 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_is_compressed_in_llm_view() {
+        use crate::state::step::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let big = (0..500).map(|i| format!("line {i}\n")).collect::<String>();
+
+        let step = Step::new(
+            0,
+            Action::RunCommand {
+                cmd: "pytest".to_string(),
+            },
+            ToolResult {
+                success: false,
+                output: big,
+                error: None,
+                diff: None,
+                stop_reason: None,
+            },
+        );
+
+        let request = ContextBuilder::new().build(dir.path(), "goal", &[], &[step]);
+        let messages = request.messages.as_array().unwrap();
+
+        let tool_msg = messages.iter().find(|m| m["role"] == "tool").unwrap();
+        let content = tool_msg["content"].as_str().unwrap();
+        assert!(content.contains("output truncated"));
+    }
+
+    #[test]
     fn build_with_stats_returns_stats() {
         let dir = tempfile::tempdir().unwrap();
         let session = [Message::user("prior")];
