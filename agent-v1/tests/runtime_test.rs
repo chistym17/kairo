@@ -8,13 +8,21 @@ use async_trait::async_trait;
 
 struct FakeLlm {
     actions: std::sync::Mutex<Vec<Action>>,
+    rate_limit_once: std::sync::atomic::AtomicBool,
 }
 
 impl FakeLlm {
     fn new(actions: Vec<Action>) -> Self {
         Self {
             actions: std::sync::Mutex::new(actions),
+            rate_limit_once: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn with_rate_limit_once(self) -> Self {
+        self.rate_limit_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 }
 
@@ -24,6 +32,13 @@ impl LlmClient for FakeLlm {
         &self,
         _request: &LlmRequest,
     ) -> Result<Action, LlmError> {
+        if self
+            .rate_limit_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(LlmError::RateLimited);
+        }
+
         let mut actions = self.actions.lock().unwrap();
         if actions.is_empty() {
             return Ok(Action::Finish {
@@ -75,5 +90,38 @@ async fn runtime_runs_and_reports_changed_files() {
     assert!(result.total_steps >= 1);
     assert!(result.changed_files.iter().any(|p| p.ends_with("hello.txt")));
     assert!(result.log_path.to_string_lossy().contains("logs/run_"));
+}
+
+#[tokio::test]
+async fn rate_limit_does_not_consume_step_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+
+    let llm = FakeLlm::new(vec![
+        Action::RunCommand {
+            cmd: "ls".to_string(),
+        },
+        Action::Finish {
+            summary: "ok".to_string(),
+        },
+    ])
+    .with_rate_limit_once();
+
+    let runtime = AgentRuntime::new(
+        Box::new(llm),
+        "fake",
+        2,
+        0,
+        0,
+        0,
+        "system",
+        16000,
+        2048,
+        20,
+    );
+
+    let result = runtime.run("goal", workspace, None, None).await.unwrap();
+    assert!(result.success);
+    assert_eq!(result.total_steps, 2);
 }
 
