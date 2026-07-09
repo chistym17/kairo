@@ -5,6 +5,7 @@ use crate::state::step::Step;
 
 use super::instructions::load_instructions;
 use super::messages::build_messages;
+use super::stats::ContextStats;
 use super::system::{compose_system_prompt, default_system_prompt};
 use super::tools::build_tools;
 use super::types::{AgentContext, LlmRequest, WorkspaceContext};
@@ -63,6 +64,17 @@ impl ContextBuilder {
         session_messages: &[Message],
         step_history: &[Step],
     ) -> LlmRequest {
+        self.build_with_stats(workspace_root, goal, session_messages, step_history)
+            .0
+    }
+
+    pub fn build_with_stats(
+        &self,
+        workspace_root: &Path,
+        goal: &str,
+        session_messages: &[Message],
+        step_history: &[Step],
+    ) -> (LlmRequest, ContextStats) {
         let context = self.build_context(workspace_root, goal, session_messages, step_history);
         let messages = build_messages(
             &context.system_prompt,
@@ -71,10 +83,14 @@ impl ContextBuilder {
             &context.step_history,
         );
 
-        LlmRequest {
+        let request = LlmRequest {
             messages,
             tools: context.tools,
-        }
+        };
+
+        let stats = ContextStats::from_llm_request(&request.messages, &request.tools);
+
+        (request, stats)
     }
 }
 
@@ -151,5 +167,17 @@ mod tests {
 
         assert_eq!(messages.len(), 4); // system, user goal, assistant tool_call, tool result
         assert_eq!(messages[3]["role"], "tool");
+    }
+
+    #[test]
+    fn build_with_stats_returns_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = [Message::user("prior")];
+
+        let (request, stats) =
+            ContextBuilder::new().build_with_stats(dir.path(), "goal", &session, &[]);
+
+        assert_eq!(stats.message_count, request.messages.as_array().unwrap().len());
+        assert!(stats.estimated_tokens > 0);
     }
 }

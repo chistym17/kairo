@@ -74,11 +74,18 @@ pub async fn run(
 
         // ── 2. Ask the LLM what to do next ─────────────────────────────
         let action = 'next_action: loop {
-            let request = context_builder.build(
+            let (request, stats) = context_builder.build_with_stats(
                 &state.workspace_root,
                 &state.goal,
                 session_messages,
                 &state.history,
+            );
+
+            write_event(
+                &state.run_id,
+                "context_stats",
+                &stats.to_json_string(),
+                0,
             );
 
             match llm.next_action(&request).await
@@ -180,11 +187,18 @@ pub async fn run(
                         ))
                         .await;
 
-                        let request = context_builder.build(
+                        let (request, stats) = context_builder.build_with_stats(
                             &state.workspace_root,
                             &state.goal,
                             session_messages,
                             &state.history,
+                        );
+
+                        write_event(
+                            &state.run_id,
+                            "context_stats",
+                            &stats.to_json_string(),
+                            0,
                         );
 
                         match llm.next_action(&request).await
