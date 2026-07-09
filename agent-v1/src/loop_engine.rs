@@ -316,7 +316,7 @@ pub async fn run(
             },
         );
 
-        let result = match validate_action(&action, &state.history) {
+        let mut result = match validate_action(&action, &state.history) {
             Some(ValidationError { event, message }) => {
                 write_event(&state.run_id, &event, &message, 0);
                 ToolResult {
@@ -329,6 +329,16 @@ pub async fn run(
             }
             None => tools::dispatch(&action, &state.workspace_root),
         };
+
+        if result.success {
+            if let Some(path) = mutating_path(&action) {
+                if let Some(err) = post_edit_sanity_check(&state.workspace_root, &path) {
+                    write_event(&state.run_id, "post_edit_sanity_failed", &err, 0);
+                    result.success = false;
+                    result.error = Some(err);
+                }
+            }
+        }
 
         emit(
             observer,
@@ -548,6 +558,90 @@ fn validate_run_command(cmd: &str) -> Option<ValidationError> {
     }
 
     None
+}
+
+fn post_edit_sanity_check(workspace_root: &std::path::Path, rel_path: &str) -> Option<String> {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let rel = rel_path.trim();
+    if rel.is_empty() {
+        return None;
+    }
+
+    let ext = Path::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    // Only cheap, non-invasive checks.
+    let (program, args): (&str, Vec<String>) = match ext.as_str() {
+        "js" | "cjs" | "mjs" => {
+            // Syntax-only parse, no execution: new Function(source)
+            let script = format!(
+                "const fs=require('fs'); const src=fs.readFileSync({:?},'utf8'); new Function(src); console.log('ok');",
+                rel
+            );
+            ("node", vec!["-e".to_string(), script])
+        }
+        "py" => ("python3", vec!["-m".to_string(), "py_compile".to_string(), rel.to_string()]),
+        _ => return None,
+    };
+
+    let mut child = match Command::new(program)
+        .args(args)
+        .current_dir(workspace_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return Some(format!("sanity check failed to spawn {}: {}", program, e)),
+    };
+
+    let timeout = Duration::from_secs(5);
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Some(format!(
+                        "sanity check timed out ({}s): {} {}",
+                        timeout.as_secs(),
+                        program,
+                        rel
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Some(format!("sanity check wait error: {}", e)),
+        }
+    }
+
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return Some(format!("sanity check output error: {}", e)),
+    };
+
+    if out.status.success() {
+        None
+    } else {
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let msg = if stderr.is_empty() { stdout } else { stderr };
+        Some(format!(
+            "post-edit sanity check failed for {}: {}",
+            rel,
+            msg.trim()
+        ))
+    }
 }
 
 fn mutating_path(action: &crate::state::step::Action) -> Option<String> {
