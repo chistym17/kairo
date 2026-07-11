@@ -72,11 +72,7 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
     match action {
         Action::ReadFile { path } => read_file::execute(path, workspace_root),
 
-        Action::ListFiles {
-            path,
-            max_depth,
-            max_entries,
-        } => list_files::execute(path, *max_depth, *max_entries, workspace_root),
+        Action::ListFiles { path } => list_files::execute(path, workspace_root),
 
         Action::WriteFile { path, content } => write_file::execute(path, content, workspace_root),
 

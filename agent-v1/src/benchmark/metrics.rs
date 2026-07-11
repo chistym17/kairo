@@ -367,7 +367,7 @@ fn tool_name(action: &Action) -> &'static str {
 fn action_path(action: &Action) -> String {
     match action {
         Action::ReadFile { path }
-        | Action::ListFiles { path, .. }
+        | Action::ListFiles { path }
         | Action::WriteFile { path, .. }
         | Action::ApplyPatch { path, .. } => path.to_string_lossy().to_string(),
         Action::RunCommand { .. } | Action::Finish { .. } => String::new(),

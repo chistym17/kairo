@@ -16,12 +16,7 @@ const IGNORED_DIRS: &[&str] = &[
     ".cache",
 ];
 
-pub fn execute(
-    path: &PathBuf,
-    max_depth: u32,
-    max_entries: u32,
-    workspace_root: &Path,
-) -> ToolResult {
+pub fn execute(path: &PathBuf, workspace_root: &Path) -> ToolResult {
     if !workspace_root.exists() {
         return ToolResult::error(format!(
             "workspace_root does not exist: {}",
@@ -44,16 +39,8 @@ pub fn execute(
         ));
     }
 
-    let max_depth = if max_depth == 0 {
-        DEFAULT_MAX_DEPTH
-    } else {
-        max_depth.max(1).min(25)
-    };
-    let max_entries = if max_entries == 0 {
-        DEFAULT_MAX_ENTRIES
-    } else {
-        max_entries.max(1).min(10_000)
-    };
+    let max_depth = DEFAULT_MAX_DEPTH;
+    let max_entries = DEFAULT_MAX_ENTRIES;
 
     let mut out: Vec<String> = Vec::new();
     let mut count: u32 = 0;
@@ -135,4 +122,3 @@ pub fn execute(
         Err(e) => ToolResult::error(format!("failed to list files: {}", e)),
     }
 }
-

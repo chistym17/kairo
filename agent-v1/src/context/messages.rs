@@ -107,18 +107,7 @@ fn tool_result_to_message(action: &Action, result: &ToolResult) -> Value {
 fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
     match action {
         Action::ReadFile { path } => ("read_file", json!({ "path": path.to_string_lossy() })),
-        Action::ListFiles {
-            path,
-            max_depth,
-            max_entries,
-        } => (
-            "list_files",
-            json!({
-                "path": path.to_string_lossy(),
-                "max_depth": max_depth,
-                "max_entries": max_entries
-            }),
-        ),
+        Action::ListFiles { path } => ("list_files", json!({ "path": path.to_string_lossy() })),
         Action::WriteFile { path, content } => (
             "write_file",
             json!({

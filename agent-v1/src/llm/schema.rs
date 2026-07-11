@@ -32,25 +32,13 @@ pub fn build_tools_schema() -> Value {
                     Use this when you are not sure where a file is located. \
                     Path must be relative to the workspace root (e.g. '.', 'src', 'tests'). \
                     Output is a newline-separated list of relative file paths. \
-                    The listing is bounded by max_depth and max_entries and will skip common heavy directories like node_modules and .git.",
+                    Skips common heavy directories like node_modules and .git.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "Relative directory (or file) path from workspace root. Example: '.' or 'src'"
-                        },
-                        "max_depth": {
-                            "type": "integer",
-                            "description": "Maximum recursion depth. Default: 4",
-                            "minimum": 1,
-                            "maximum": 25
-                        },
-                        "max_entries": {
-                            "type": "integer",
-                            "description": "Maximum number of entries to return. Default: 500",
-                            "minimum": 1,
-                            "maximum": 10000
                         }
                     },
                     "required": ["path"]
@@ -174,12 +162,8 @@ pub fn parse_tool_call(
             let path = args["path"]
                 .as_str()
                 .ok_or("list_files missing required arg: path")?;
-            let max_depth = args["max_depth"].as_u64().unwrap_or(4) as u32;
-            let max_entries = args["max_entries"].as_u64().unwrap_or(500) as u32;
             Ok(Action::ListFiles {
                 path: PathBuf::from(path),
-                max_depth,
-                max_entries,
             })
         }
 

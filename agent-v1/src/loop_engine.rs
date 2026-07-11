@@ -486,7 +486,7 @@ fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Opt
 
     match action {
         Action::ReadFile { path } => validate_rel_path("read_file", path),
-        Action::ListFiles { path, .. } => validate_rel_path("list_files", path),
+        Action::ListFiles { path } => validate_rel_path("list_files", path),
         Action::WriteFile { path, .. } => validate_rel_path("write_file", path),
         Action::ApplyPatch { path, diff } => {
             if let Some(e) = validate_rel_path("apply_patch", path) {

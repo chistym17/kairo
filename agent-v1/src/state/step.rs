@@ -8,11 +8,7 @@ use crate::tools::ToolResult;
 pub enum Action {
     ReadFile { path: PathBuf },
 
-    ListFiles {
-        path: PathBuf,
-        max_depth: u32,
-        max_entries: u32,
-    },
+    ListFiles { path: PathBuf },
 
     WriteFile { path: PathBuf, content: String },
 
