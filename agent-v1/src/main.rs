@@ -4,7 +4,7 @@ use agent_v1::agent::AgentRuntime;
 use agent_v1::chat::{open_session, ChatRuntime, SessionArg};
 use agent_v1::config;
 use agent_v1::context::default_system_prompt;
-use agent_v1::llm::groq_client::GroqClient;
+use agent_v1::llm::build_client;
 use agent_v1::session::{Session, SessionManager, SessionSettings};
 use agent_v1::state::stop_reason::StopReason;
 
@@ -144,9 +144,9 @@ fn to_chat_session_arg(arg: OneShotSessionArg) -> SessionArg {
 }
 
 fn build_runtime(config: &config::Config) -> AgentRuntime {
-    let llm = GroqClient::new(&config.groq_api_key, &config.model_id);
+    let llm = build_client(config);
     AgentRuntime::new(
-        Box::new(llm),
+        llm,
         &config.model_id,
         config.max_steps,
         config.step_delay_ms,
@@ -175,6 +175,7 @@ async fn main() {
     }
 
     println!("[agent-v1] starting");
+    println!("[agent-v1] provider: {}", config.llm_provider);
     println!("[agent-v1] workspace: {}", config.workspace_root.display());
     println!("[agent-v1] model: {}", config.model_id);
     println!("[agent-v1] max_steps: {}", config.max_steps);

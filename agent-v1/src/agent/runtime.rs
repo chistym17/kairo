@@ -173,7 +173,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::context::LlmRequest;
-    use crate::llm::{LlmError};
+    use crate::llm::{LlmClient, LlmError, LlmToolCall};
 
     struct FakeLlm {
         actions: std::sync::Mutex<Vec<Action>>,
@@ -192,14 +192,19 @@ mod tests {
         async fn next_action(
             &self,
             _request: &LlmRequest,
-        ) -> std::result::Result<Action, LlmError> {
+        ) -> std::result::Result<LlmToolCall, LlmError> {
             let mut actions = self.actions.lock().unwrap();
-            if actions.is_empty() {
-                return Ok(Action::Finish {
+            let action = if actions.is_empty() {
+                Action::Finish {
                     summary: "done".to_string(),
-                });
-            }
-            Ok(actions.remove(0))
+                }
+            } else {
+                actions.remove(0)
+            };
+            Ok(LlmToolCall {
+                tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
+                action,
+            })
         }
 
         fn model_id(&self) -> &str {

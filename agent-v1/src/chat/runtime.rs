@@ -170,16 +170,19 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::context::LlmRequest;
-    use crate::llm::{LlmClient, LlmError};
+    use crate::llm::{LlmClient, LlmError, LlmToolCall};
     use crate::state::step::Action;
 
     struct FakeLlm;
 
     #[async_trait]
     impl LlmClient for FakeLlm {
-        async fn next_action(&self, _request: &LlmRequest) -> Result<Action, LlmError> {
-            Ok(Action::Finish {
-                summary: "done".to_string(),
+        async fn next_action(&self, _request: &LlmRequest) -> Result<LlmToolCall, LlmError> {
+            Ok(LlmToolCall {
+                tool_call_id: "call_fake_finish".to_string(),
+                action: Action::Finish {
+                    summary: "done".to_string(),
+                },
             })
         }
 

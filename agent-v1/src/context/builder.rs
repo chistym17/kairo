@@ -160,6 +160,7 @@ mod tests {
                 diff: None,
                 stop_reason: None,
             },
+            "call_test_0",
         );
 
         let request = ContextBuilder::new().build(dir.path(), "goal", &[], &[step]);
@@ -188,6 +189,7 @@ mod tests {
                 diff: None,
                 stop_reason: None,
             },
+            "call_test_1",
         );
 
         let request = ContextBuilder::new().build(dir.path(), "goal", &[], &[step]);

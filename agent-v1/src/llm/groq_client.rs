@@ -3,8 +3,7 @@ use serde_json::{json, Value};
 
 use crate::context::LlmRequest;
 use crate::llm::schema::parse_tool_call;
-use crate::llm::{LlmClient, LlmError};
-use crate::state::step::Action;
+use crate::llm::{LlmClient, LlmError, LlmToolCall};
 
 const GROQ_API_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -26,7 +25,7 @@ impl GroqClient {
 
 #[async_trait]
 impl LlmClient for GroqClient {
-    async fn next_action(&self, request: &LlmRequest) -> Result<Action, LlmError> {
+    async fn next_action(&self, request: &LlmRequest) -> Result<LlmToolCall, LlmError> {
         let body = json!({
             "model": self.model,
             "messages": request.messages.clone(),
@@ -80,6 +79,11 @@ impl LlmClient for GroqClient {
                 LlmError::MalformedToolCall("tool_calls array is empty".to_string())
             })?;
 
+            let tool_call_id = tool_call["id"]
+                .as_str()
+                .unwrap_or("call_missing")
+                .to_string();
+
             let tool_name = tool_call["function"]["name"]
                 .as_str()
                 .ok_or_else(|| LlmError::MalformedToolCall("missing function.name".to_string()))?;
@@ -95,7 +99,11 @@ impl LlmClient for GroqClient {
                 ))
             })?;
 
-            parse_tool_call(tool_name, &args).map_err(|e| LlmError::MalformedToolCall(e))
+            let action = parse_tool_call(tool_name, &args).map_err(LlmError::MalformedToolCall)?;
+            Ok(LlmToolCall {
+                action,
+                tool_call_id,
+            })
         } else {
             let text = message["content"]
                 .as_str()

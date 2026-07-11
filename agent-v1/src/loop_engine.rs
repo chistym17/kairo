@@ -76,7 +76,7 @@ pub async fn run(
         }
 
         // ── 2. Ask the LLM what to do next ─────────────────────────────
-        let action = 'next_action: loop {
+        let tool_call = 'next_action: loop {
             let session_messages_snapshot: Vec<crate::session::Message> = session
                 .as_ref()
                 .map(|s| s.messages.clone())
@@ -105,9 +105,9 @@ pub async fn run(
 
             match llm.next_action(&request).await
             {
-                Ok(action) => {
-                    println!("[agent] action: {:?}", action);
-                    break 'next_action action;
+                Ok(tool_call) => {
+                    println!("[agent] action: {:?}", tool_call.action);
+                    break 'next_action tool_call;
                 }
 
                 Err(LlmError::NoToolCall(text)) => {
@@ -235,12 +235,12 @@ pub async fn run(
 
                         match llm.next_action(&request).await
                         {
-                            Ok(action) => {
+                            Ok(tool_call) => {
                                 println!(
                                     "[agent] action (after tool_use_failed retry {}): {:?}",
-                                    attempt, action
+                                    attempt, tool_call.action
                                 );
-                                break 'next_action action;
+                                break 'next_action tool_call;
                             }
                             Err(LlmError::ToolUseFailed(retry_msg)) => {
                                 msg = retry_msg;
@@ -305,6 +305,9 @@ pub async fn run(
                 }
             }
         };
+
+        let action = tool_call.action;
+        let tool_call_id = tool_call.tool_call_id;
 
         // ── 3. Execute the tool ─────────────────────────────────────────
         emit(
@@ -414,7 +417,7 @@ pub async fn run(
         let stop_reason = result.stop_reason.clone();
 
         // ── 5. Build the step record ────────────────────────────────────
-        let step = Step::new(state.step_count, action, result);
+        let step = Step::new(state.step_count, action, result, tool_call_id);
 
         // ── 6. Write to log immediately — before updating state ─────────
         // If we crash between here and record_step(), we lose the in-memory

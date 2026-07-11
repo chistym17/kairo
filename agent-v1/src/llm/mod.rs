@@ -4,12 +4,40 @@ use serde::{Deserialize, Serialize};
 use crate::context::LlmRequest;
 use crate::state::step::Action;
 
+pub mod deepseek_client;
 pub mod groq_client;
 pub mod schema;
 
+use crate::config::Config;
+
+use self::deepseek_client::DeepSeekClient;
+use self::groq_client::GroqClient;
+
+/// One tool call returned by the LLM, including the provider's tool_call_id.
+#[derive(Debug, Clone)]
+pub struct LlmToolCall {
+    pub action: Action,
+    pub tool_call_id: String,
+}
+
+/// Build the configured LLM client (`LLM_PROVIDER=groq|deepseek`).
+pub fn build_client(config: &Config) -> Box<dyn LlmClient> {
+    match config.llm_provider.as_str() {
+        "deepseek" => Box::new(DeepSeekClient::new(
+            &config.deepseek_api_key,
+            &config.model_id,
+        )),
+        "groq" => Box::new(GroqClient::new(&config.groq_api_key, &config.model_id)),
+        other => panic!(
+            "unknown LLM_PROVIDER '{}'. Use 'groq' or 'deepseek'",
+            other
+        ),
+    }
+}
+
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn next_action(&self, request: &LlmRequest) -> Result<Action, LlmError>;
+    async fn next_action(&self, request: &LlmRequest) -> Result<LlmToolCall, LlmError>;
 
     fn model_id(&self) -> &str;
 }
@@ -20,7 +48,7 @@ pub enum LlmError {
 
     ApiError(String),
 
-    /// Groq rejected the model's tool call (HTTP 400, code tool_use_failed).
+    /// Provider rejected the model's tool call (HTTP 400, code tool_use_failed).
     /// Often transient — the model had the right idea but bad formatting.
     ToolUseFailed(String),
 

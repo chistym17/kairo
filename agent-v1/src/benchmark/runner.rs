@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 
 use crate::agent::AgentRuntime;
-use crate::llm::groq_client::GroqClient;
+use crate::llm::build_client;
 
 use super::config::BenchmarkConfig;
 use super::metrics::{self, aggregate, build_trial_result, log_path_for_run, BenchmarkReport};
@@ -15,9 +15,9 @@ use super::worktree;
 pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     let tasks = task::load_tasks(&config.tasks_path)?;
     let system_prompt = prompt::system_prompt();
-    let llm = GroqClient::new(&config.agent.groq_api_key, &config.agent.model_id);
+    let llm = build_client(&config.agent);
     let runtime = AgentRuntime::new(
-        Box::new(llm),
+        llm,
         &config.agent.model_id,
         config.agent.max_steps,
         config.agent.step_delay_ms,

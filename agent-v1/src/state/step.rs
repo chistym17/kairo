@@ -27,15 +27,24 @@ pub struct Step {
 
     pub action: Action,
 
+    /// Provider tool_call_id — must match between assistant tool_calls and tool result.
+    pub tool_call_id: String,
+
     pub result: ToolResult,
 }
 
 impl Step {
-    pub fn new(step_index: u32, action: Action, result: ToolResult) -> Self {
+    pub fn new(
+        step_index: u32,
+        action: Action,
+        result: ToolResult,
+        tool_call_id: impl Into<String>,
+    ) -> Self {
         Self {
             step_index,
             timestamp: chrono::Utc::now().to_rfc3339(),
             action,
+            tool_call_id: tool_call_id.into(),
             result,
         }
     }

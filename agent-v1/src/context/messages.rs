@@ -17,7 +17,7 @@ pub fn build_messages(
     })];
 
     for msg in session_messages {
-        messages.push(session_message_to_groq(msg));
+        messages.push(session_message_to_api(msg));
     }
 
     messages.push(json!({
@@ -26,14 +26,18 @@ pub fn build_messages(
     }));
 
     for step in step_history {
-        messages.push(action_to_assistant_message(&step.action));
-        messages.push(tool_result_to_message(&step.action, &step.result));
+        messages.push(action_to_assistant_message(&step.action, &step.tool_call_id));
+        messages.push(tool_result_to_message(
+            &step.action,
+            &step.result,
+            &step.tool_call_id,
+        ));
     }
 
     json!(messages)
 }
 
-fn session_message_to_groq(msg: &Message) -> Value {
+fn session_message_to_api(msg: &Message) -> Value {
     match msg {
         Message::User { content } => json!({
             "role": "user",
@@ -54,14 +58,14 @@ fn session_message_to_groq(msg: &Message) -> Value {
     }
 }
 
-fn action_to_assistant_message(action: &Action) -> Value {
+fn action_to_assistant_message(action: &Action, tool_call_id: &str) -> Value {
     let (tool_name, args) = action_to_tool_call_parts(action);
 
     json!({
         "role": "assistant",
         "content": null,
         "tool_calls": [{
-            "id": format!("call_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..8].to_string()),
+            "id": tool_call_id,
             "type": "function",
             "function": {
                 "name": tool_name,
@@ -71,9 +75,7 @@ fn action_to_assistant_message(action: &Action) -> Value {
     })
 }
 
-fn tool_result_to_message(action: &Action, result: &ToolResult) -> Value {
-    let (tool_name, _) = action_to_tool_call_parts(action);
-
+fn tool_result_to_message(_action: &Action, result: &ToolResult, tool_call_id: &str) -> Value {
     let content = if result.success {
         let mut parts = vec![result.output.clone()];
         if let Some(diff) = &result.diff {
@@ -99,7 +101,7 @@ fn tool_result_to_message(action: &Action, result: &ToolResult) -> Value {
 
     json!({
         "role": "tool",
-        "tool_call_id": format!("call_{}", &tool_name[..4.min(tool_name.len())]),
+        "tool_call_id": tool_call_id,
         "content": content
     })
 }

@@ -7,55 +7,73 @@ use std::path::PathBuf;
 /// (task file path, number of trials, output directory).
 #[derive(Debug)]
 pub struct Config {
-    /// Grok API key — loaded from GROK_API_KEY in .env
+    /// Which LLM backend to use: `groq` or `deepseek`
+    pub llm_provider: String,
+
+    /// Groq API key — required when LLM_PROVIDER=groq
     pub groq_api_key: String,
 
+    /// DeepSeek API key — required when LLM_PROVIDER=deepseek
+    pub deepseek_api_key: String,
+
     /// Model identifier sent to the API
-    /// e.g. "llama-3.1-70b-versatile" for Groq
-    /// or whichever model string Grok's API uses
+    /// e.g. "llama-3.1-70b-versatile" (Groq) or "deepseek-v4-flash" (DeepSeek)
     pub model_id: String,
 
     /// Hard ceiling on loop iterations per run
-    /// 15 is a good starting point for Phase 1
     pub max_steps: u32,
 
     /// Absolute or relative path to the workspace the agent can touch
-    /// All tool operations are sandboxed inside this directory
     pub workspace_root: PathBuf,
 
     /// Milliseconds to wait before each LLM API call.
-    /// Prevents rate limiting from rapid back-to-back requests.
     pub step_delay_ms: u64,
 
-    /// Retries when Groq returns tool_use_failed (model had right idea, bad format).
+    /// Retries when the provider rejects a malformed tool call.
     pub tool_use_max_retries: u32,
 
     /// Backoff between tool_use_failed retries.
     pub tool_use_retry_delay_ms: u64,
 
     /// Soft budget for how much context is sent to the LLM (estimated tokens).
-    /// Phase 6 uses this as a cap for the *view* sent to the model. Session
-    /// storage keeps full history.
     pub max_context_tokens: usize,
 
     /// Tokens reserved for the model's response / tool call formatting.
-    /// Effective input budget = max_context_tokens - context_reserve_tokens.
     pub context_reserve_tokens: usize,
 
-    /// Prefer keeping at least this many most-recent session messages in the
-    /// LLM context view before dropping older history.
+    /// Prefer keeping at least this many most-recent session messages.
     pub keep_recent_session_messages: usize,
 }
 
 impl Config {
     /// Load config from environment variables.
     /// Call dotenv::dotenv() before this to load .env file.
-    /// Panics with a clear message if any required variable is missing —
-    /// better to fail fast at startup than silently use wrong values.
     pub fn load() -> Self {
+        let llm_provider = env_or("LLM_PROVIDER", "groq").to_ascii_lowercase();
+
+        let groq_api_key = if llm_provider == "groq" {
+            require_env("GROQ_API_KEY")
+        } else {
+            env_or("GROQ_API_KEY", "")
+        };
+
+        let deepseek_api_key = if llm_provider == "deepseek" {
+            require_env("DEEPSEEK_API_KEY")
+        } else {
+            env_or("DEEPSEEK_API_KEY", "")
+        };
+
+        let default_model = if llm_provider == "deepseek" {
+            "deepseek-v4-flash"
+        } else {
+            "llama-3.1-70b-versatile"
+        };
+
         Self {
-            groq_api_key: require_env("GROQ_API_KEY"),
-            model_id: env_or("MODEL_ID", "llama-3.1-70b-versatile"),
+            llm_provider,
+            groq_api_key,
+            deepseek_api_key,
+            model_id: env_or("MODEL_ID", default_model),
             max_steps: env_or("MAX_STEPS", "15")
                 .parse::<u32>()
                 .expect("MAX_STEPS must be a positive integer"),
@@ -82,7 +100,6 @@ impl Config {
     }
 }
 
-/// Get a required env var — panics with a clear message if missing.
 fn require_env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| {
         panic!(
@@ -93,7 +110,6 @@ fn require_env(key: &str) -> String {
     })
 }
 
-/// Get an env var with a fallback default.
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
