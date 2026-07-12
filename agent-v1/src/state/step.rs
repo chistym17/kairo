@@ -10,6 +10,17 @@ pub enum Action {
 
     ListFiles { path: PathBuf },
 
+    /// Case-insensitive content search. `path` scopes the search (default `.`).
+    SearchCode { query: String, path: PathBuf },
+
+    /// Glob file search (e.g. `*.tsx`, `**/routes/*`). `path` scopes the search.
+    FindFiles { pattern: String, path: PathBuf },
+
+    GitStatus,
+
+    /// Working-tree diff vs HEAD. Optional path scopes the diff.
+    GitDiff { path: Option<PathBuf> },
+
     WriteFile { path: PathBuf, content: String },
 
     ApplyPatch { path: PathBuf, diff: String },

@@ -1,20 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use crate::tools::ignore::is_ignored_dir_name;
 use crate::tools::ToolResult;
 
 const DEFAULT_MAX_DEPTH: u32 = 4;
 const DEFAULT_MAX_ENTRIES: u32 = 500;
-
-const IGNORED_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    ".next",
-    ".turbo",
-    ".cache",
-];
 
 pub fn execute(path: &PathBuf, workspace_root: &Path) -> ToolResult {
     if !workspace_root.exists() {
@@ -79,7 +69,7 @@ pub fn execute(path: &PathBuf, workspace_root: &Path) -> ToolResult {
 
             if p.is_dir() {
                 if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if IGNORED_DIRS.contains(&name) {
+                    if is_ignored_dir_name(name) {
                         continue;
                     }
                 }

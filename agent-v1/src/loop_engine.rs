@@ -457,6 +457,10 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
     match action {
         Action::ReadFile { .. } => "read_file",
         Action::ListFiles { .. } => "list_files",
+        Action::SearchCode { .. } => "search_code",
+        Action::FindFiles { .. } => "find_files",
+        Action::GitStatus => "git_status",
+        Action::GitDiff { .. } => "git_diff",
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
@@ -490,6 +494,16 @@ fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Opt
     match action {
         Action::ReadFile { path } => validate_rel_path("read_file", path),
         Action::ListFiles { path } => validate_rel_path("list_files", path),
+        Action::SearchCode { path, .. } => validate_rel_path("search_code", path),
+        Action::FindFiles { path, .. } => validate_rel_path("find_files", path),
+        Action::GitStatus => None,
+        Action::GitDiff { path } => {
+            if let Some(p) = path {
+                validate_rel_path("git_diff", p)
+            } else {
+                None
+            }
+        }
         Action::WriteFile { path, .. } => validate_rel_path("write_file", path),
         Action::ApplyPatch { path, diff } => {
             if let Some(e) = validate_rel_path("apply_patch", path) {

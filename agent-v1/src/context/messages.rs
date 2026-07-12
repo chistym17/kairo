@@ -110,6 +110,28 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
     match action {
         Action::ReadFile { path } => ("read_file", json!({ "path": path.to_string_lossy() })),
         Action::ListFiles { path } => ("list_files", json!({ "path": path.to_string_lossy() })),
+        Action::SearchCode { query, path } => (
+            "search_code",
+            json!({
+                "query": query,
+                "path": path.to_string_lossy()
+            }),
+        ),
+        Action::FindFiles { pattern, path } => (
+            "find_files",
+            json!({
+                "pattern": pattern,
+                "path": path.to_string_lossy()
+            }),
+        ),
+        Action::GitStatus => ("git_status", json!({})),
+        Action::GitDiff { path } => {
+            let mut args = json!({});
+            if let Some(p) = path {
+                args["path"] = json!(p.to_string_lossy());
+            }
+            ("git_diff", args)
+        }
         Action::WriteFile { path, content } => (
             "write_file",
             json!({

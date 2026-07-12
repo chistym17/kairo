@@ -357,6 +357,10 @@ fn tool_name(action: &Action) -> &'static str {
     match action {
         Action::ReadFile { .. } => "read_file",
         Action::ListFiles { .. } => "list_files",
+        Action::SearchCode { .. } => "search_code",
+        Action::FindFiles { .. } => "find_files",
+        Action::GitStatus => "git_status",
+        Action::GitDiff { .. } => "git_diff",
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
@@ -368,9 +372,15 @@ fn action_path(action: &Action) -> String {
     match action {
         Action::ReadFile { path }
         | Action::ListFiles { path }
+        | Action::SearchCode { path, .. }
+        | Action::FindFiles { path, .. }
         | Action::WriteFile { path, .. }
         | Action::ApplyPatch { path, .. } => path.to_string_lossy().to_string(),
-        Action::RunCommand { .. } | Action::Finish { .. } => String::new(),
+        Action::GitDiff { path } => path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        Action::GitStatus | Action::RunCommand { .. } | Action::Finish { .. } => String::new(),
     }
 }
 

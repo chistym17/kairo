@@ -6,9 +6,14 @@ use crate::state::stop_reason::StopReason;
 
 pub mod apply_patch;
 pub mod diff;
+pub mod find_files;
+pub mod git_diff;
+pub mod git_status;
+pub mod ignore;
 pub mod list_files;
 pub mod read_file;
 pub mod run_command;
+pub mod search_code;
 pub mod write_file;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +78,14 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
         Action::ReadFile { path } => read_file::execute(path, workspace_root),
 
         Action::ListFiles { path } => list_files::execute(path, workspace_root),
+
+        Action::SearchCode { query, path } => search_code::execute(query, path, workspace_root),
+
+        Action::FindFiles { pattern, path } => find_files::execute(pattern, path, workspace_root),
+
+        Action::GitStatus => git_status::execute(workspace_root),
+
+        Action::GitDiff { path } => git_diff::execute(path, workspace_root),
 
         Action::WriteFile { path, content } => write_file::execute(path, content, workspace_root),
 

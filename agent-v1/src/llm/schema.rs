@@ -48,6 +48,82 @@ pub fn build_tools_schema() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "search_code",
+                "description": "Search file contents for a text query (case-insensitive). \
+                    Use this to locate symbols, components, or strings (e.g. 'Navbar', 'authMiddleware'). \
+                    Returns matching lines as path:line: snippet. Skips binary files and heavy dirs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Text to search for. Example: 'Navbar' or 'useAuth'"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional relative directory to scope the search. Default: '.'"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_files",
+                "description": "Find files by glob pattern. \
+                    Use this to discover file types or names (e.g. '*.tsx', '**/routes/*', '*test*'). \
+                    Patterns without '/' also match basenames. Skips heavy dirs like node_modules.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern. Examples: '*.tsx', '**/*.test.js', 'package.json'"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional relative directory to scope the search. Default: '.'"
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_status",
+                "description": "Show git status for the workspace (branch and changed files). \
+                    Call this before editing to see existing modifications, and after edits to confirm what changed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": "Show the working-tree git diff (vs HEAD). \
+                    Use after edits to review your changes before finish. \
+                    Optionally pass a path to scope the diff.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional relative file or directory to diff. Omit for full workspace diff."
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "write_file",
                 "description": "Create a new file in the workspace. Only use this when the file does not exist yet. \
                     To edit an existing file, use apply_patch instead.",
@@ -167,6 +243,45 @@ pub fn parse_tool_call(
             })
         }
 
+        "search_code" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or("search_code missing required arg: query")?;
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            Ok(Action::SearchCode {
+                query: query.to_string(),
+                path: PathBuf::from(path),
+            })
+        }
+
+        "find_files" => {
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or("find_files missing required arg: pattern")?;
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            Ok(Action::FindFiles {
+                pattern: pattern.to_string(),
+                path: PathBuf::from(path),
+            })
+        }
+
+        "git_status" => Ok(Action::GitStatus),
+
+        "git_diff" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from);
+            Ok(Action::GitDiff { path })
+        }
+
         "write_file" => {
             let path = args["path"]
                 .as_str()
@@ -212,7 +327,7 @@ pub fn parse_tool_call(
         }
 
         unknown => Err(format!(
-            "unknown tool name: '{}'. Valid tools: read_file, list_files, write_file, apply_patch, run_command, finish",
+            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, git_status, git_diff, write_file, apply_patch, run_command, finish",
             unknown
         )),
     }
