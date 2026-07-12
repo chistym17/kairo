@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// (task file path, number of trials, output directory).
 #[derive(Debug)]
 pub struct Config {
-    /// Which LLM backend to use: `groq` or `deepseek`
+    /// Which LLM backend to use: `groq`, `deepseek`, or `agentrouter`
     pub llm_provider: String,
 
     /// Groq API key — required when LLM_PROVIDER=groq
@@ -16,8 +16,15 @@ pub struct Config {
     /// DeepSeek API key — required when LLM_PROVIDER=deepseek
     pub deepseek_api_key: String,
 
+    /// AgentRouter API key — required when LLM_PROVIDER=agentrouter
+    pub agentrouter_api_key: String,
+
+    /// AgentRouter OpenAI-compatible base URL (…/v1)
+    pub agentrouter_base_url: String,
+
     /// Model identifier sent to the API
-    /// e.g. "llama-3.1-70b-versatile" (Groq) or "deepseek-v4-flash" (DeepSeek)
+    /// e.g. "llama-3.1-70b-versatile" (Groq), "deepseek-v4-flash" (DeepSeek),
+    /// or "deepseek-v3.2" / "glm-4.5" (AgentRouter)
     pub model_id: String,
 
     /// Hard ceiling on loop iterations per run
@@ -63,16 +70,31 @@ impl Config {
             env_or("DEEPSEEK_API_KEY", "")
         };
 
-        let default_model = if llm_provider == "deepseek" {
-            "deepseek-v4-flash"
+        let agentrouter_api_key = if llm_provider == "agentrouter" {
+            require_env("AGENTROUTER_API_KEY")
         } else {
-            "llama-3.1-70b-versatile"
+            env_or("AGENTROUTER_API_KEY", "")
+        };
+
+        let agentrouter_base_url = env_or(
+            "AGENTROUTER_BASE_URL",
+            "https://agentrouter.org/v1",
+        );
+
+        let default_model = match llm_provider.as_str() {
+            "deepseek" => "deepseek-v4-flash",
+            // Live catalog is thin; cheap DeepSeek/GLM-4.x often 503 (no channel).
+            // glm-5.2 is cheapest live option; reasoning model (may use reasoning_content).
+            "agentrouter" => "glm-5.2",
+            _ => "llama-3.1-70b-versatile",
         };
 
         Self {
             llm_provider,
             groq_api_key,
             deepseek_api_key,
+            agentrouter_api_key,
+            agentrouter_base_url,
             model_id: env_or("MODEL_ID", default_model),
             max_steps: env_or("MAX_STEPS", "15")
                 .parse::<u32>()

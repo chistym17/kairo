@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use crate::context::LlmRequest;
 use crate::state::step::Action;
 
+pub mod agentrouter_client;
 pub mod deepseek_client;
 pub mod groq_client;
 pub mod schema;
 
 use crate::config::Config;
 
+use self::agentrouter_client::AgentRouterClient;
 use self::deepseek_client::DeepSeekClient;
 use self::groq_client::GroqClient;
 
@@ -20,7 +22,7 @@ pub struct LlmToolCall {
     pub tool_call_id: String,
 }
 
-/// Build the configured LLM client (`LLM_PROVIDER=groq|deepseek`).
+/// Build the configured LLM client (`LLM_PROVIDER=groq|deepseek|agentrouter`).
 pub fn build_client(config: &Config) -> Box<dyn LlmClient> {
     match config.llm_provider.as_str() {
         "deepseek" => Box::new(DeepSeekClient::new(
@@ -28,8 +30,13 @@ pub fn build_client(config: &Config) -> Box<dyn LlmClient> {
             &config.model_id,
         )),
         "groq" => Box::new(GroqClient::new(&config.groq_api_key, &config.model_id)),
+        "agentrouter" => Box::new(AgentRouterClient::new(
+            &config.agentrouter_api_key,
+            &config.model_id,
+            &config.agentrouter_base_url,
+        )),
         other => panic!(
-            "unknown LLM_PROVIDER '{}'. Use 'groq' or 'deepseek'",
+            "unknown LLM_PROVIDER '{}'. Use 'groq', 'deepseek', or 'agentrouter'",
             other
         ),
     }
