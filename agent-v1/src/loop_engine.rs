@@ -378,7 +378,7 @@ pub async fn run(
             );
         }
 
-        if let crate::state::step::Action::RunCommand { cmd } = &action {
+        if let crate::state::step::Action::RunCommand { cmd, .. } = &action {
             emit(
                 observer,
                 AgentEvent::CommandCompleted {
@@ -519,7 +519,12 @@ fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Opt
             }
             None
         }
-        Action::RunCommand { cmd } => validate_run_command(cmd),
+        Action::RunCommand { cmd, cwd, .. } => {
+            if let Some(e) = validate_run_command(cmd) {
+                return Some(e);
+            }
+            validate_rel_path("run_command.working_directory", cwd)
+        }
         Action::Finish { .. } => {
             if !finish_allowed(history) {
                 Some(ValidationError {

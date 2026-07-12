@@ -224,6 +224,8 @@ mod tests {
             },
             Action::RunCommand {
                 cmd: "ls".to_string(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
             },
             Action::Finish {
                 summary: "ok".to_string(),

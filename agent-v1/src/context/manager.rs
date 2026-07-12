@@ -278,7 +278,7 @@ mod tests {
     fn prefers_keeping_recent_messages() {
         let dir = tempfile::tempdir().unwrap();
         let builder = ContextBuilder::new();
-        let mgr = ContextManager::new(2000, 0, 5); // keep last 5 if possible
+        let mgr = ContextManager::new(4000, 0, 5); // keep last 5 if possible
 
         let mut msgs = Vec::new();
         for i in 0..30 {

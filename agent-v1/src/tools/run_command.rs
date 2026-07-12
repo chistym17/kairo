@@ -1,17 +1,24 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::state::stop_reason::StopReason;
 use crate::tools::{truncate_output, ToolResult};
 
-const COMMAND_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+pub const MAX_TIMEOUT_SECS: u64 = 900;
 
 const ALLOWED_COMMANDS: &[&str] = &[
-    "python", "python3", "pytest", "cargo", "npm", "node", "cat", "ls",
+    "python", "python3", "pytest", "cargo", "npm", "npx", "pnpm", "yarn", "node", "cat", "ls",
+    "make", "jest",
 ];
 
-pub fn execute(cmd: &str, workspace_root: &Path) -> ToolResult {
+pub struct RunCommandOpts<'a> {
+    pub cmd: &'a str,
+    pub cwd: &'a Path,
+    pub timeout_secs: u64,
+}
+
+pub fn execute(opts: RunCommandOpts<'_>, workspace_root: &Path) -> ToolResult {
     if !workspace_root.exists() {
         return ToolResult::error(format!(
             "workspace_root does not exist: {}",
@@ -19,7 +26,7 @@ pub fn execute(cmd: &str, workspace_root: &Path) -> ToolResult {
         ));
     }
 
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let parts: Vec<&str> = opts.cmd.split_whitespace().collect();
     if parts.is_empty() {
         return ToolResult {
             success: false,
@@ -47,9 +54,32 @@ pub fn execute(cmd: &str, workspace_root: &Path) -> ToolResult {
         };
     }
 
+    let timeout_secs = opts.timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
+    let cwd_rel = if opts.cwd.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        opts.cwd.to_path_buf()
+    };
+    let cwd_abs = workspace_root.join(&cwd_rel);
+
+    if !cwd_abs.exists() {
+        return ToolResult::error(format!(
+            "working_directory not found: {} (under workspace {})",
+            cwd_rel.display(),
+            workspace_root.display()
+        ));
+    }
+    if !cwd_abs.is_dir() {
+        return ToolResult::error(format!(
+            "working_directory is not a directory: {}",
+            cwd_rel.display()
+        ));
+    }
+
+    let start = Instant::now();
     let output = Command::new(program)
         .args(args)
-        .current_dir(workspace_root)
+        .current_dir(&cwd_abs)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .env_clear()
@@ -67,8 +97,7 @@ pub fn execute(cmd: &str, workspace_root: &Path) -> ToolResult {
         }
     };
 
-    let timeout = Duration::from_secs(COMMAND_TIMEOUT_SECS);
-    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
 
     loop {
         match child.try_wait() {
@@ -76,13 +105,21 @@ pub fn execute(cmd: &str, workspace_root: &Path) -> ToolResult {
             Ok(None) => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
+                    let duration_ms = start.elapsed().as_millis();
                     return ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: format_structured(
+                            -1,
+                            duration_ms,
+                            &cwd_rel,
+                            timeout_secs,
+                            "",
+                            &format!("timed out after {timeout_secs}s"),
+                        ),
                         diff: None,
                         error: Some(format!(
                             "command '{}' timed out after {}s",
-                            cmd, COMMAND_TIMEOUT_SECS
+                            opts.cmd, timeout_secs
                         )),
                         stop_reason: None,
                     };
@@ -98,20 +135,21 @@ pub fn execute(cmd: &str, workspace_root: &Path) -> ToolResult {
         Err(e) => return ToolResult::error(format!("failed to collect output: {}", e)),
     };
 
+    let duration_ms = start.elapsed().as_millis();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_success = output.status.success();
     let exit_code = output.status.code().unwrap_or(-1);
+    let exit_success = output.status.success();
 
-    let combined = if stderr.is_empty() {
-        stdout
-    } else if stdout.is_empty() {
-        stderr
-    } else {
-        format!("{}\n--- stderr ---\n{}", stdout, stderr)
-    };
-
-    let truncated = truncate_output(&combined);
+    let structured = format_structured(
+        exit_code,
+        duration_ms,
+        &cwd_rel,
+        timeout_secs,
+        &stdout,
+        &stderr,
+    );
+    let truncated = truncate_output(&structured);
 
     if exit_success {
         ToolResult {
@@ -132,6 +170,39 @@ pub fn execute(cmd: &str, workspace_root: &Path) -> ToolResult {
     }
 }
 
+fn format_structured(
+    exit_code: i32,
+    duration_ms: u128,
+    cwd: &Path,
+    timeout_secs: u64,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let mut out = format!(
+        "exit_code: {exit_code}\nduration_ms: {duration_ms}\ncwd: {}\ntimeout_secs: {timeout_secs}\n",
+        cwd.display()
+    );
+    out.push_str("\n--- stdout ---\n");
+    if stdout.is_empty() {
+        out.push_str("(empty)\n");
+    } else {
+        out.push_str(stdout);
+        if !stdout.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str("\n--- stderr ---\n");
+    if stderr.is_empty() {
+        out.push_str("(empty)\n");
+    } else {
+        out.push_str(stderr);
+        if !stderr.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn is_allowed(program: &str) -> bool {
     let base = std::path::Path::new(program)
         .file_name()
@@ -146,26 +217,40 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn run(cmd: &str, workspace: &Path) -> ToolResult {
+        execute(
+            RunCommandOpts {
+                cmd,
+                cwd: Path::new("."),
+                timeout_secs: DEFAULT_TIMEOUT_SECS,
+            },
+            workspace,
+        )
+    }
+
     #[test]
     fn test_successful_command() {
         let dir = tempdir().unwrap();
-        let result = execute("ls", dir.path());
+        let result = run("ls", dir.path());
         assert!(result.success);
+        assert!(result.output.contains("exit_code: 0"));
+        assert!(result.output.contains("duration_ms:"));
         assert!(result.diff.is_none());
     }
 
     #[test]
     fn test_failed_command_not_fatal() {
         let dir = tempdir().unwrap();
-        let result = execute("python3 -c \"import sys; sys.exit(1)\"", dir.path());
+        let result = run("python3 -c \"import sys; sys.exit(1)\"", dir.path());
         assert!(!result.success);
+        assert!(result.output.contains("exit_code: 1"));
         assert!(result.stop_reason.is_none());
     }
 
     #[test]
     fn test_blocked_command() {
         let dir = tempdir().unwrap();
-        let result = execute("rm -rf .", dir.path());
+        let result = run("rm -rf .", dir.path());
         assert!(!result.success);
         assert!(result.error.unwrap().contains("not allowed"));
         assert!(result.stop_reason.is_none());
@@ -174,7 +259,7 @@ mod tests {
     #[test]
     fn test_empty_command() {
         let dir = tempdir().unwrap();
-        let result = execute("", dir.path());
+        let result = run("", dir.path());
         assert!(!result.success);
         assert!(result.stop_reason.is_none());
     }
@@ -183,8 +268,42 @@ mod tests {
     fn test_working_directory_is_workspace() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("test.txt"), "hello").unwrap();
-        let result = execute("ls", dir.path());
+        let result = run("ls", dir.path());
         assert!(result.success);
         assert!(result.output.contains("test.txt"));
+    }
+
+    #[test]
+    fn test_cwd_subdirectory() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("apps").join("api");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("only-here.txt"), "x").unwrap();
+
+        let result = execute(
+            RunCommandOpts {
+                cmd: "ls",
+                cwd: Path::new("apps/api"),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.contains("cwd: apps/api"));
+        assert!(result.output.contains("only-here.txt"));
+    }
+
+    #[test]
+    fn test_missing_cwd_errors() {
+        let dir = tempdir().unwrap();
+        let result = execute(
+            RunCommandOpts {
+                cmd: "ls",
+                cwd: Path::new("nope"),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        assert!(!result.success);
     }
 }

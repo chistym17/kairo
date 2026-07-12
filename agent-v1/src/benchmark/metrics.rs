@@ -376,11 +376,12 @@ fn action_path(action: &Action) -> String {
         | Action::FindFiles { path, .. }
         | Action::WriteFile { path, .. }
         | Action::ApplyPatch { path, .. } => path.to_string_lossy().to_string(),
+        Action::RunCommand { cwd, .. } => cwd.to_string_lossy().to_string(),
         Action::GitDiff { path } => path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default(),
-        Action::GitStatus | Action::RunCommand { .. } | Action::Finish { .. } => String::new(),
+        Action::GitStatus | Action::Finish { .. } => String::new(),
     }
 }
 

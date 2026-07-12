@@ -171,20 +171,29 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command in the workspace directory. \
-                    Use this to run tests and verify your fixes. \
-                    The working directory is always the workspace root. \
-                    Allowed commands: python, python3, pytest, cargo, npm, node, cat, ls. \
-                    Always run the tests after making a fix to confirm it worked. \
-                    A non-zero exit code means the tests failed — read the output carefully.",
+                "description": "Run a shell command in the workspace. \
+                    Use this to run tests, builds, and verify fixes. \
+                    Optional working_directory scopes the command (e.g. 'apps/backend'). \
+                    Optional timeout_secs raises the limit for slow builds (default 30, max 900). \
+                    Returns structured output: exit_code, duration_ms, cwd, stdout, stderr. \
+                    Allowed commands: python, python3, pytest, cargo, npm, npx, pnpm, yarn, node, cat, ls, make, jest. \
+                    A non-zero exit_code means failure — read stderr carefully.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "cmd": {
                             "type": "string",
                             "description": "The command to run. \
-                                Examples: 'pytest test_calc.py', 'python3 -m pytest', 'cargo test'. \
+                                Examples: 'npm test', 'cargo test', 'pytest'. \
                                 Do not use shell operators like &&, ||, |, or >."
+                        },
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Optional relative directory under the workspace. Default: '.' Example: 'apps/frontend'"
+                        },
+                        "timeout_secs": {
+                            "type": "string",
+                            "description": "Optional timeout in seconds as a string (default '30', max '900'). Example: '120'"
                         }
                     },
                     "required": ["cmd"]
@@ -312,8 +321,16 @@ pub fn parse_tool_call(
             let cmd = args["cmd"]
                 .as_str()
                 .ok_or("run_command missing required arg: cmd")?;
+            let cwd = args
+                .get("working_directory")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let timeout_secs = parse_timeout_secs(args.get("timeout_secs"))?;
             Ok(Action::RunCommand {
                 cmd: cmd.to_string(),
+                cwd: PathBuf::from(cwd),
+                timeout_secs,
             })
         }
 
@@ -331,4 +348,37 @@ pub fn parse_tool_call(
             unknown
         )),
     }
+}
+
+fn parse_timeout_secs(value: Option<&Value>) -> Result<u64, String> {
+    use crate::tools::run_command::{DEFAULT_TIMEOUT_SECS, MAX_TIMEOUT_SECS};
+
+    let Some(v) = value else {
+        return Ok(DEFAULT_TIMEOUT_SECS);
+    };
+
+    let parsed = if let Some(n) = v.as_u64() {
+        n
+    } else if let Some(n) = v.as_i64() {
+        if n < 0 {
+            return Err("run_command timeout_secs must be non-negative".to_string());
+        }
+        n as u64
+    } else if let Some(s) = v.as_str() {
+        let s = s.trim();
+        if s.is_empty() {
+            return Ok(DEFAULT_TIMEOUT_SECS);
+        }
+        s.parse::<u64>()
+            .map_err(|_| format!("run_command timeout_secs must be an integer string, got {s:?}"))?
+    } else if v.is_null() {
+        return Ok(DEFAULT_TIMEOUT_SECS);
+    } else {
+        return Err("run_command timeout_secs must be a number or string".to_string());
+    };
+
+    if parsed == 0 {
+        return Err("run_command timeout_secs must be >= 1".to_string());
+    }
+    Ok(parsed.min(MAX_TIMEOUT_SECS))
 }

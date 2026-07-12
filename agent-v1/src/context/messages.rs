@@ -146,7 +146,18 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
                 "diff": diff
             }),
         ),
-        Action::RunCommand { cmd } => ("run_command", json!({ "cmd": cmd })),
+        Action::RunCommand {
+            cmd,
+            cwd,
+            timeout_secs,
+        } => (
+            "run_command",
+            json!({
+                "cmd": cmd,
+                "working_directory": cwd.to_string_lossy(),
+                "timeout_secs": timeout_secs.to_string(),
+            }),
+        ),
         Action::Finish { summary } => ("finish", json!({ "summary": summary })),
     }
 }

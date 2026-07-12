@@ -70,6 +70,8 @@ async fn runtime_runs_and_reports_changed_files() {
         },
         Action::RunCommand {
             cmd: "ls".to_string(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 30,
         },
         Action::Finish {
             summary: "ok".to_string(),
@@ -105,6 +107,8 @@ async fn rate_limit_does_not_consume_step_budget() {
     let llm = FakeLlm::new(vec![
         Action::RunCommand {
             cmd: "ls".to_string(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 30,
         },
         Action::Finish {
             summary: "ok".to_string(),

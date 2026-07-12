@@ -25,7 +25,13 @@ pub enum Action {
 
     ApplyPatch { path: PathBuf, diff: String },
 
-    RunCommand { cmd: String },
+    RunCommand {
+        cmd: String,
+        /// Relative working directory under the workspace (default `.`).
+        cwd: PathBuf,
+        /// Timeout in seconds (default 30, max 900).
+        timeout_secs: u64,
+    },
 
     Finish { summary: String },
 }

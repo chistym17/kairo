@@ -181,6 +181,8 @@ mod tests {
             0,
             Action::RunCommand {
                 cmd: "pytest".to_string(),
+                cwd: std::path::PathBuf::from("."),
+                timeout_secs: 30,
             },
             ToolResult {
                 success: false,
