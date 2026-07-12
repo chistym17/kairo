@@ -364,6 +364,7 @@ fn tool_name(action: &Action) -> &'static str {
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
+        Action::UpdatePlan { .. } => "update_plan",
         Action::Finish { .. } => "finish",
     }
 }
@@ -381,7 +382,7 @@ fn action_path(action: &Action) -> String {
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default(),
-        Action::GitStatus | Action::Finish { .. } => String::new(),
+        Action::GitStatus | Action::UpdatePlan { .. } | Action::Finish { .. } => String::new(),
     }
 }
 

@@ -203,6 +203,30 @@ pub fn build_tools_schema() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "update_plan",
+                "description": "Create or replace the working plan for a multi-step task. \
+                    Use early for non-trivial goals (explore → fix → verify). \
+                    Re-call as you complete steps, marking them [x]. \
+                    The current plan is shown in context on later steps.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "objective": {
+                            "type": "string",
+                            "description": "One-line goal for this plan. Example: 'Fix auth redirect'"
+                        },
+                        "steps": {
+                            "type": "string",
+                            "description": "Newline-separated checklist. Mark done with [x], pending with [ ] or bare text.\nExample:\n[x] Locate auth provider\n[ ] Fix token validation\n[ ] Verify login"
+                        }
+                    },
+                    "required": ["objective", "steps"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "finish",
                 "description": "Signal that the task is complete. \
                     Only call this after you have seen the tests pass. \
@@ -334,6 +358,19 @@ pub fn parse_tool_call(
             })
         }
 
+        "update_plan" => {
+            let objective = args["objective"]
+                .as_str()
+                .ok_or("update_plan missing required arg: objective")?;
+            let steps = args["steps"]
+                .as_str()
+                .ok_or("update_plan missing required arg: steps")?;
+            Ok(Action::UpdatePlan {
+                objective: objective.to_string(),
+                steps: steps.to_string(),
+            })
+        }
+
         "finish" => {
             let summary = args["summary"]
                 .as_str()
@@ -344,7 +381,7 @@ pub fn parse_tool_call(
         }
 
         unknown => Err(format!(
-            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, git_status, git_diff, write_file, apply_patch, run_command, finish",
+            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, git_status, git_diff, write_file, apply_patch, run_command, update_plan, finish",
             unknown
         )),
     }

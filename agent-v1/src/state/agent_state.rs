@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::state::plan::AgentPlan;
 use crate::state::step::Step;
 
 #[derive(Debug)]
@@ -13,6 +14,9 @@ pub struct AgentState {
     pub history: Vec<Step>,
     pub step_count: u32,
     pub max_steps: u32,
+
+    /// Optional working plan for multi-step tasks (Phase 7.3).
+    pub plan: Option<AgentPlan>,
 }
 
 impl AgentState {
@@ -30,6 +34,7 @@ impl AgentState {
             history: Vec::new(),
             step_count: 0,
             max_steps,
+            plan: None,
         }
     }
 

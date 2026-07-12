@@ -81,11 +81,12 @@ pub async fn run(
                 .as_ref()
                 .map(|s| s.messages.clone())
                 .unwrap_or_default();
+            let goal_for_llm = goal_with_plan(state);
             let (request, full_stats, bounded_stats, reduction) =
                 context_manager.build_bounded_request(
                     context_builder,
                     &state.workspace_root,
-                    &state.goal,
+                    &goal_for_llm,
                     session.as_deref_mut(),
                     &session_messages_snapshot,
                     &state.history,
@@ -206,11 +207,12 @@ pub async fn run(
                             .as_ref()
                             .map(|s| s.messages.clone())
                             .unwrap_or_default();
+                        let goal_for_llm = goal_with_plan(state);
                         let (request, full_stats, bounded_stats, reduction) =
                             context_manager.build_bounded_request(
                                 context_builder,
                                 &state.workspace_root,
-                                &state.goal,
+                                &goal_for_llm,
                                 session.as_deref_mut(),
                                 &session_messages_snapshot,
                                 &state.history,
@@ -330,7 +332,34 @@ pub async fn run(
                     stop_reason: None,
                 }
             }
-            None => tools::dispatch(&action, &state.workspace_root),
+            None => match &action {
+                crate::state::step::Action::UpdatePlan { objective, steps } => {
+                    match crate::state::AgentPlan::from_update(objective, steps) {
+                        Ok(plan) => {
+                            let output = format!("Plan updated:\n{}", plan.render());
+                            state.plan = Some(plan);
+                            ToolResult {
+                                success: true,
+                                output,
+                                diff: None,
+                                error: None,
+                                stop_reason: None,
+                            }
+                        }
+                        Err(message) => {
+                            write_event(&state.run_id, "invalid_tool_args", &message, 0);
+                            ToolResult {
+                                success: false,
+                                output: String::new(),
+                                diff: None,
+                                error: Some(message),
+                                stop_reason: None,
+                            }
+                        }
+                    }
+                }
+                _ => tools::dispatch(&action, &state.workspace_root),
+            },
         };
 
         if result.success {
@@ -464,7 +493,19 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
+        Action::UpdatePlan { .. } => "update_plan",
         Action::Finish { .. } => "finish",
+    }
+}
+
+fn goal_with_plan(state: &AgentState) -> String {
+    match &state.plan {
+        Some(plan) => format!(
+            "{}\n\n## Current plan\n{}",
+            state.goal,
+            plan.render()
+        ),
+        None => state.goal.clone(),
     }
 }
 
@@ -524,6 +565,21 @@ fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Opt
                 return Some(e);
             }
             validate_rel_path("run_command.working_directory", cwd)
+        }
+        Action::UpdatePlan { objective, steps } => {
+            if objective.trim().is_empty() {
+                return Some(ValidationError {
+                    event: "invalid_tool_args".to_string(),
+                    message: "update_plan objective must not be empty".to_string(),
+                });
+            }
+            if steps.trim().is_empty() {
+                return Some(ValidationError {
+                    event: "invalid_tool_args".to_string(),
+                    message: "update_plan steps must not be empty".to_string(),
+                });
+            }
+            None
         }
         Action::Finish { .. } => {
             if !finish_allowed(history) {

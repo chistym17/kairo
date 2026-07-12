@@ -158,6 +158,13 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
                 "timeout_secs": timeout_secs.to_string(),
             }),
         ),
+        Action::UpdatePlan { objective, steps } => (
+            "update_plan",
+            json!({
+                "objective": objective,
+                "steps": steps,
+            }),
+        ),
         Action::Finish { summary } => ("finish", json!({ "summary": summary })),
     }
 }

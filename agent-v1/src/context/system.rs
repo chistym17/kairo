@@ -25,6 +25,8 @@ Example (unified diff):
 
 RULE 3: After changes, run the project tests (see project instructions). Repeat until tests pass.
 
+RULE 3.1: For multi-step goals, call update_plan early with an objective and checklist, then refresh it (mark [x]) as you progress. The current plan is re-injected into context each step.
+
 RULE 4: Before finish, review with git_diff (and git_status if useful). Do not call finish unless the latest test run passed (0 failures) and the user goal is satisfied."#
         .to_string()
 }

@@ -104,6 +104,10 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
             workspace_root,
         ),
 
+        Action::UpdatePlan { .. } => ToolResult::error(
+            "update_plan must be handled by the loop engine (internal error)",
+        ),
+
         Action::Finish { summary } => ToolResult {
             success: true,
             output: summary.clone(),
