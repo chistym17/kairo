@@ -102,6 +102,26 @@ pub fn build_tools_schema() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "detect_project_snapshot",
+                "description": "Orient in an unfamiliar repo: detect project units from manifests \
+                    (package.json, manage.py, Cargo.toml, etc.), infer kind/framework, \
+                    suggest commands and likely entry points with confidence/evidence. \
+                    Call early when exploring a new workspace. Does not replace search_code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional relative directory to filter units. Default: '.' (whole workspace)"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "git_status",
                 "description": "Show git status for the workspace (branch and changed files). \
                     Call this before editing to see existing modifications, and after edits to confirm what changed.",
@@ -342,6 +362,16 @@ pub fn parse_tool_call(
             })
         }
 
+        "detect_project_snapshot" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            Ok(Action::DetectProjectSnapshot {
+                path: PathBuf::from(path),
+            })
+        }
+
         "git_status" => Ok(Action::GitStatus),
 
         "git_diff" => {
@@ -437,7 +467,7 @@ pub fn parse_tool_call(
         }
 
         unknown => Err(format!(
-            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, git_status, git_diff, write_file, apply_patch, run_command, run_shell, update_plan, finish",
+            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, detect_project_snapshot, git_status, git_diff, write_file, apply_patch, run_command, run_shell, update_plan, finish",
             unknown
         )),
     }

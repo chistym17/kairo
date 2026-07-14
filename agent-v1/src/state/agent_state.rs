@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::state::plan::AgentPlan;
 use crate::state::step::Step;
+use crate::tools::project_snapshot::ProjectSnapshot;
 
 #[derive(Debug)]
 pub struct AgentState {
@@ -17,6 +18,9 @@ pub struct AgentState {
 
     /// Optional working plan for multi-step tasks (Phase 7.3).
     pub plan: Option<AgentPlan>,
+
+    /// Orientation snapshot (computed once per run; refreshable via tool).
+    pub project_snapshot: Option<ProjectSnapshot>,
 }
 
 impl AgentState {
@@ -35,6 +39,7 @@ impl AgentState {
             step_count: 0,
             max_steps,
             plan: None,
+            project_snapshot: None,
         }
     }
 

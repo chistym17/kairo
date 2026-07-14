@@ -11,6 +11,7 @@ pub mod git_diff;
 pub mod git_status;
 pub mod ignore;
 pub mod list_files;
+pub mod project_snapshot;
 pub mod read_file;
 pub mod run_command;
 pub mod run_shell;
@@ -158,6 +159,10 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
         Action::SearchCode { query, path } => search_code::execute(query, path, workspace_root),
 
         Action::FindFiles { pattern, path } => find_files::execute(pattern, path, workspace_root),
+
+        Action::DetectProjectSnapshot { path } => {
+            project_snapshot::execute(path, workspace_root)
+        }
 
         Action::GitStatus => git_status::execute(workspace_root),
 

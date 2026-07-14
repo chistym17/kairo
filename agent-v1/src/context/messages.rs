@@ -135,6 +135,10 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
                 "path": path.to_string_lossy()
             }),
         ),
+        Action::DetectProjectSnapshot { path } => (
+            "detect_project_snapshot",
+            json!({ "path": path.to_string_lossy() }),
+        ),
         Action::GitStatus => ("git_status", json!({})),
         Action::GitDiff { path } => {
             let mut args = json!({});

@@ -22,6 +22,9 @@ pub enum Action {
     /// Glob file search (e.g. `*.tsx`, `**/routes/*`). `path` scopes the search.
     FindFiles { pattern: String, path: PathBuf },
 
+    /// Compact orientation map of project units (manifests → kind/commands/entry points).
+    DetectProjectSnapshot { path: PathBuf },
+
     GitStatus,
 
     /// Working-tree diff vs HEAD. Optional path scopes the diff.

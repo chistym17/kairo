@@ -361,6 +361,7 @@ fn tool_name(action: &Action) -> &'static str {
         Action::ListFiles { .. } => "list_files",
         Action::SearchCode { .. } => "search_code",
         Action::FindFiles { .. } => "find_files",
+        Action::DetectProjectSnapshot { .. } => "detect_project_snapshot",
         Action::GitStatus => "git_status",
         Action::GitDiff { .. } => "git_diff",
         Action::WriteFile { .. } => "write_file",
@@ -378,6 +379,7 @@ fn action_path(action: &Action) -> String {
         | Action::ListFiles { path }
         | Action::SearchCode { path, .. }
         | Action::FindFiles { path, .. }
+        | Action::DetectProjectSnapshot { path }
         | Action::WriteFile { path, .. }
         | Action::ApplyPatch { path, .. } => path.to_string_lossy().to_string(),
         Action::RunCommand { cwd, .. } | Action::RunShell { cwd, .. } => {

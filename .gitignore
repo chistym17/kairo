@@ -24,3 +24,25 @@ js-complex-repo/
 phase9.md
 ../annotaa
 annotaa
+
+
+
+I can’t log in with the right email and password — it just says invalid.
+
+After I sign in I keep getting kicked out / session expired when I open tasks.
+
+Signup says my password is fine but the server rejects passwords that meet the form rules.
+
+My tasks board is empty for the day even though I know tasks exist.
+
+Changing the date on the board shows the wrong tasks or duplicates weird stuff.
+
+Dragging cards looks ok for a second then they jump back / move fails.
+
+Reordering tasks in the same column comes out scrambled after I refresh.
+
+Loading tasks for a day fails or comes back empty when it shouldn’t.
+
+Drawing a simple triangle shape on an image won’t save.
+
+When I finish a polygon it errors about points / bounds even though it’s clearly on the image.

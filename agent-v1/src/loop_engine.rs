@@ -39,6 +39,17 @@ pub async fn run(
         state.run_id, state.goal, state.model_id, state.max_steps, step_delay_ms
     );
 
+    // Orientation once per run (no step cost). Refreshable via detect_project_snapshot.
+    if state.project_snapshot.is_none() {
+        let snap = tools::project_snapshot::detect(&state.workspace_root);
+        println!(
+            "[agent] project snapshot: {} unit(s){}",
+            snap.units.len(),
+            if snap.truncated { " (truncated)" } else { "" }
+        );
+        state.project_snapshot = Some(snap);
+    }
+
     loop {
         // ── 1. Check step limit before asking the LLM ──────────────────
         if state.is_exhausted() {
@@ -359,6 +370,17 @@ pub async fn run(
                         }
                     }
                 }
+                crate::state::step::Action::DetectProjectSnapshot { path } => {
+                    let result =
+                        tools::project_snapshot::execute(path, &state.workspace_root);
+                    if result.success {
+                        // Always cache full-workspace snapshot for context injection.
+                        state.project_snapshot = Some(tools::project_snapshot::detect(
+                            &state.workspace_root,
+                        ));
+                    }
+                    result
+                }
                 crate::state::step::Action::Finish { summary } => {
                     let verified = finish_allowed(&state.history);
                     let stop_reason = if verified {
@@ -509,6 +531,7 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
         Action::ListFiles { .. } => "list_files",
         Action::SearchCode { .. } => "search_code",
         Action::FindFiles { .. } => "find_files",
+        Action::DetectProjectSnapshot { .. } => "detect_project_snapshot",
         Action::GitStatus => "git_status",
         Action::GitDiff { .. } => "git_diff",
         Action::WriteFile { .. } => "write_file",
@@ -521,14 +544,16 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
 }
 
 fn goal_with_plan(state: &AgentState) -> String {
-    match &state.plan {
-        Some(plan) => format!(
-            "{}\n\n## Current plan\n{}",
-            state.goal,
-            plan.render()
-        ),
-        None => state.goal.clone(),
+    let mut out = state.goal.clone();
+    if let Some(snap) = &state.project_snapshot {
+        out.push_str("\n\n## Project snapshot\n");
+        out.push_str(&snap.render_compact());
     }
+    if let Some(plan) = &state.plan {
+        out.push_str("\n\n## Current plan\n");
+        out.push_str(&plan.render());
+    }
+    out
 }
 
 fn looks_like_unified_diff(diff: &str) -> bool {
@@ -568,6 +593,9 @@ fn validate_action(
         Action::ListFiles { path } => validate_rel_path("list_files", path),
         Action::SearchCode { path, .. } => validate_rel_path("search_code", path),
         Action::FindFiles { path, .. } => validate_rel_path("find_files", path),
+        Action::DetectProjectSnapshot { path } => {
+            validate_rel_path("detect_project_snapshot", path)
+        }
         Action::GitStatus => None,
         Action::GitDiff { path } => {
             if let Some(p) = path {
