@@ -170,7 +170,7 @@ pub fn execute(opts: RunCommandOpts<'_>, workspace_root: &Path) -> ToolResult {
     }
 }
 
-fn format_structured(
+pub fn format_structured(
     exit_code: i32,
     duration_ms: u128,
     cwd: &Path,

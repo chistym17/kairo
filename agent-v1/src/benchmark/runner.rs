@@ -27,7 +27,8 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
         config.agent.max_context_tokens,
         config.agent.context_reserve_tokens,
         config.agent.keep_recent_session_messages,
-    );
+    )
+    .with_verified_finish(true);
 
     println!("[benchmark] tasks: {}", tasks.len());
     println!("[benchmark] trials per task: {}", config.trials);

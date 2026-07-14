@@ -169,6 +169,18 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
                 "timeout_secs": timeout_secs.to_string(),
             }),
         ),
+        Action::RunShell {
+            command,
+            cwd,
+            timeout_secs,
+        } => (
+            "run_shell",
+            json!({
+                "command": command,
+                "working_directory": cwd.to_string_lossy(),
+                "timeout_secs": timeout_secs.to_string(),
+            }),
+        ),
         Action::UpdatePlan { objective, steps } => (
             "update_plan",
             json!({

@@ -23,11 +23,11 @@ Example (unified diff):
 +  return a + b;
  }
 
-RULE 3: After changes, run the project tests (see project instructions). Repeat until tests pass.
+RULE 3: After changes, verify with run_command (simple allowlisted cmds) or run_shell (pipes, &&, venv paths). Repeat until checks pass.
 
 RULE 3.1: For multi-step goals, call update_plan early with an objective and checklist, then refresh it (mark [x]) as you progress. The current plan is re-injected into context each step.
 
-RULE 4: Before finish, review with git_diff (and git_status if useful). Do not call finish unless the latest test run passed (0 failures) and the user goal is satisfied."#
+RULE 4: Prefer verifying before finish (git_diff + a successful test/check run). If you cannot verify (missing deps, env, etc.), still call finish with an honest summary of what changed and what remains unverified."#
         .to_string()
 }
 

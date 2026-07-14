@@ -30,6 +30,8 @@ pub struct AgentRuntime {
     pub step_delay_ms: u64,
     pub tool_use_max_retries: u32,
     pub tool_use_retry_delay_ms: u64,
+    /// When true (benchmarks), finish requires a prior successful run_command/run_shell.
+    pub require_verified_finish: bool,
     context_builder: ContextBuilder,
     context_manager: ContextManager,
 }
@@ -54,6 +56,8 @@ impl AgentRuntime {
             step_delay_ms,
             tool_use_max_retries,
             tool_use_retry_delay_ms,
+            // Developer/default: allow finish without a green verify step.
+            require_verified_finish: false,
             context_builder: ContextBuilder::new().with_system_prompt(system_prompt),
             context_manager: ContextManager::new(
                 max_context_tokens,
@@ -61,6 +65,11 @@ impl AgentRuntime {
                 keep_recent_session_messages,
             ),
         }
+    }
+
+    pub fn with_verified_finish(mut self, require: bool) -> Self {
+        self.require_verified_finish = require;
+        self
     }
 
     pub async fn run(
@@ -104,6 +113,7 @@ impl AgentRuntime {
             self.step_delay_ms,
             self.tool_use_max_retries,
             self.tool_use_retry_delay_ms,
+            self.require_verified_finish,
             observer,
             session.as_deref_mut(),
         )
@@ -124,7 +134,10 @@ impl AgentRuntime {
             run_id: state.run_id,
             stop_reason: stop_reason.clone(),
             total_steps: state.step_count,
-            success: stop_reason == StopReason::TaskComplete,
+            success: matches!(
+                stop_reason,
+                StopReason::TaskComplete | StopReason::CompletedUnverified
+            ),
             summary,
             changed_files,
             log_path,

@@ -290,7 +290,9 @@ fn classify_failure(
     match summary.stop_reason {
         StopReason::MaxStepsExceeded => return FailureCategory::MaxSteps,
         StopReason::ToolError if summary.total_steps <= 1 => return FailureCategory::ApiError,
-        StopReason::TaskComplete if !oracle_passed => return FailureCategory::FalseSuccess,
+        StopReason::TaskComplete | StopReason::CompletedUnverified if !oracle_passed => {
+            return FailureCategory::FalseSuccess
+        }
         StopReason::ModelGaveUp if !oracle_passed => return FailureCategory::GaveUp,
         _ => {}
     }
@@ -364,6 +366,7 @@ fn tool_name(action: &Action) -> &'static str {
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
+        Action::RunShell { .. } => "run_shell",
         Action::UpdatePlan { .. } => "update_plan",
         Action::Finish { .. } => "finish",
     }
@@ -377,7 +380,9 @@ fn action_path(action: &Action) -> String {
         | Action::FindFiles { path, .. }
         | Action::WriteFile { path, .. }
         | Action::ApplyPatch { path, .. } => path.to_string_lossy().to_string(),
-        Action::RunCommand { cwd, .. } => cwd.to_string_lossy().to_string(),
+        Action::RunCommand { cwd, .. } | Action::RunShell { cwd, .. } => {
+            cwd.to_string_lossy().to_string()
+        }
         Action::GitDiff { path } => path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())

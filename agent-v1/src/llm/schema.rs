@@ -179,21 +179,18 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command in the workspace. \
-                    Use this to run tests, builds, and verify fixes. \
-                    Optional working_directory scopes the command (e.g. 'apps/backend'). \
-                    Optional timeout_secs raises the limit for slow builds (default 30, max 900). \
-                    Returns structured output: exit_code, duration_ms, cwd, stdout, stderr. \
-                    Allowed commands: python, python3, pytest, cargo, npm, npx, pnpm, yarn, node, cat, ls, make, jest. \
-                    A non-zero exit_code means failure — read stderr carefully.",
+                "description": "Run a single allowlisted program (no shell operators). \
+                    Prefer for simple tests: 'npm test', 'cargo test', 'pytest'. \
+                    For pipes, &&, or venv paths use run_shell instead. \
+                    Optional working_directory and timeout_secs. \
+                    Returns exit_code, duration_ms, cwd, stdout, stderr. \
+                    Allowed: python, python3, pytest, cargo, npm, npx, pnpm, yarn, node, cat, ls, make, jest.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "cmd": {
                             "type": "string",
-                            "description": "The command to run. \
-                                Examples: 'npm test', 'cargo test', 'pytest'. \
-                                Do not use shell operators like &&, ||, |, or >."
+                            "description": "Allowlisted command only. Examples: 'npm test', 'cargo test'. No &&, ||, |, or >."
                         },
                         "working_directory": {
                             "type": "string",
@@ -205,6 +202,34 @@ pub fn build_tools_schema() -> Value {
                         }
                     },
                     "required": ["cmd"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_shell",
+                "description": "Run a real shell command via sh -c (supports &&, |, redirects, venv binaries). \
+                    Use for real-repo verification, e.g. 'venv/bin/python manage.py test' or 'npm test 2>&1 | tail -50'. \
+                    Prefer run_command for simple allowlisted programs. \
+                    cwd is relative to the workspace. Non-zero exit is an observation — continue fixing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Shell command string. Example: 'venv/bin/python manage.py test accounts'"
+                        },
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Optional relative directory. Default: '.' Example: 'backend'"
+                        },
+                        "timeout_secs": {
+                            "type": "string",
+                            "description": "Optional timeout in seconds (default '30', max '900')"
+                        }
+                    },
+                    "required": ["command"]
                 }
             }
         },
@@ -237,11 +262,10 @@ pub fn build_tools_schema() -> Value {
             "function": {
                 "name": "finish",
                 "description": "Signal that the task is complete. \
-                    Only call this after you have seen the tests pass. \
-                    Do NOT call this if tests are still failing. \
-                    Do NOT call this before running the tests. \
+                    Prefer calling this after a successful verify command. \
+                    If you cannot run checks, call finish anyway with an honest summary of changes and what was not verified. \
                     If you cannot fix the problem after several attempts, \
-                    call this with a summary explaining what you tried and why it failed.",
+                    call this with a summary of what you tried and why it failed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -372,6 +396,24 @@ pub fn parse_tool_call(
             })
         }
 
+        "run_shell" => {
+            let command = args["command"]
+                .as_str()
+                .or_else(|| args["cmd"].as_str())
+                .ok_or("run_shell missing required arg: command")?;
+            let cwd = args
+                .get("working_directory")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let timeout_secs = parse_timeout_secs(args.get("timeout_secs"))?;
+            Ok(Action::RunShell {
+                command: command.to_string(),
+                cwd: PathBuf::from(cwd),
+                timeout_secs,
+            })
+        }
+
         "update_plan" => {
             let objective = args["objective"]
                 .as_str()
@@ -395,7 +437,7 @@ pub fn parse_tool_call(
         }
 
         unknown => Err(format!(
-            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, git_status, git_diff, write_file, apply_patch, run_command, update_plan, finish",
+            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, git_status, git_diff, write_file, apply_patch, run_command, run_shell, update_plan, finish",
             unknown
         )),
     }

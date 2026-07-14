@@ -13,6 +13,7 @@ pub mod ignore;
 pub mod list_files;
 pub mod read_file;
 pub mod run_command;
+pub mod run_shell;
 pub mod search_code;
 pub mod write_file;
 
@@ -104,6 +105,19 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
         } => run_command::execute(
             run_command::RunCommandOpts {
                 cmd,
+                cwd,
+                timeout_secs: *timeout_secs,
+            },
+            workspace_root,
+        ),
+
+        Action::RunShell {
+            command,
+            cwd,
+            timeout_secs,
+        } => run_shell::execute(
+            run_shell::RunShellOpts {
+                command,
                 cwd,
                 timeout_secs: *timeout_secs,
             },

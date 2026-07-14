@@ -39,6 +39,13 @@ pub enum Action {
         timeout_secs: u64,
     },
 
+    /// Real shell (`sh -c`) — allows pipes, &&, venv paths. Prefer for verify workflows.
+    RunShell {
+        command: String,
+        cwd: PathBuf,
+        timeout_secs: u64,
+    },
+
     /// Replace the current working plan (objective + checklist).
     UpdatePlan { objective: String, steps: String },
 

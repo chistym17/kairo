@@ -256,7 +256,9 @@ async fn main() {
             println!("[agent-v1] log: {}", result.log_path.display());
 
             match result.stop_reason {
-                StopReason::TaskComplete => std::process::exit(0),
+                StopReason::TaskComplete | StopReason::CompletedUnverified => {
+                    std::process::exit(0)
+                }
                 _ => std::process::exit(1),
             }
         }

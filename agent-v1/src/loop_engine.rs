@@ -30,6 +30,7 @@ pub async fn run(
     step_delay_ms: u64,
     tool_use_max_retries: u32,
     tool_use_retry_delay_ms: u64,
+    require_verified_finish: bool,
     observer: Option<&dyn AgentObserver>,
     mut session: Option<&mut Session>,
 ) -> StopReason {
@@ -321,7 +322,7 @@ pub async fn run(
             },
         );
 
-        let mut result = match validate_action(&action, &state.history) {
+        let mut result = match validate_action(&action, &state.history, require_verified_finish) {
             Some(ValidationError { event, message }) => {
                 write_event(&state.run_id, &event, &message, 0);
                 ToolResult {
@@ -356,6 +357,21 @@ pub async fn run(
                                 stop_reason: None,
                             }
                         }
+                    }
+                }
+                crate::state::step::Action::Finish { summary } => {
+                    let verified = finish_allowed(&state.history);
+                    let stop_reason = if verified {
+                        StopReason::TaskComplete
+                    } else {
+                        StopReason::CompletedUnverified
+                    };
+                    ToolResult {
+                        success: true,
+                        output: summary.clone(),
+                        diff: None,
+                        error: None,
+                        stop_reason: Some(stop_reason),
                     }
                 }
                 _ => tools::dispatch(&action, &state.workspace_root),
@@ -407,7 +423,12 @@ pub async fn run(
             );
         }
 
-        if let crate::state::step::Action::RunCommand { cmd, .. } = &action {
+        if let crate::state::step::Action::RunCommand { cmd, .. }
+        | crate::state::step::Action::RunShell {
+            command: cmd,
+            ..
+        } = &action
+        {
             emit(
                 observer,
                 AgentEvent::CommandCompleted {
@@ -493,6 +514,7 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
         Action::WriteFile { .. } => "write_file",
         Action::ApplyPatch { .. } => "apply_patch",
         Action::RunCommand { .. } => "run_command",
+        Action::RunShell { .. } => "run_shell",
         Action::UpdatePlan { .. } => "update_plan",
         Action::Finish { .. } => "finish",
     }
@@ -518,8 +540,13 @@ fn looks_like_unified_diff(diff: &str) -> bool {
 
 fn finish_allowed(history: &[Step]) -> bool {
     match history.last() {
-        Some(step) => matches!(step.action, crate::state::step::Action::RunCommand { .. })
-            && step.result.success,
+        Some(step) => {
+            matches!(
+                step.action,
+                crate::state::step::Action::RunCommand { .. }
+                    | crate::state::step::Action::RunShell { .. }
+            ) && step.result.success
+        }
         None => false,
     }
 }
@@ -529,7 +556,11 @@ struct ValidationError {
     message: String,
 }
 
-fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Option<ValidationError> {
+fn validate_action(
+    action: &crate::state::step::Action,
+    history: &[Step],
+    require_verified_finish: bool,
+) -> Option<ValidationError> {
     use crate::state::step::Action;
 
     match action {
@@ -566,6 +597,15 @@ fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Opt
             }
             validate_rel_path("run_command.working_directory", cwd)
         }
+        Action::RunShell { command, cwd, .. } => {
+            if command.trim().is_empty() {
+                return Some(ValidationError {
+                    event: "invalid_tool_args".to_string(),
+                    message: "run_shell command must not be empty".to_string(),
+                });
+            }
+            validate_rel_path("run_shell.working_directory", cwd)
+        }
         Action::UpdatePlan { objective, steps } => {
             if objective.trim().is_empty() {
                 return Some(ValidationError {
@@ -582,7 +622,7 @@ fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Opt
             None
         }
         Action::Finish { .. } => {
-            if !finish_allowed(history) {
+            if require_verified_finish && !finish_allowed(history) {
                 Some(ValidationError {
                     event: "finish_blocked".to_string(),
                     message: "finish blocked: run tests successfully before calling finish"
