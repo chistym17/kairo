@@ -189,13 +189,21 @@ mod tests {
     use crate::llm::{LlmClient, LlmError, LlmToolCall};
 
     struct FakeLlm {
-        actions: std::sync::Mutex<Vec<Action>>,
+        batches: std::sync::Mutex<Vec<Vec<Action>>>,
     }
 
     impl FakeLlm {
         fn new(actions: Vec<Action>) -> Self {
             Self {
-                actions: std::sync::Mutex::new(actions),
+                batches: std::sync::Mutex::new(
+                    actions.into_iter().map(|a| vec![a]).collect(),
+                ),
+            }
+        }
+
+        fn batches(batches: Vec<Vec<Action>>) -> Self {
+            Self {
+                batches: std::sync::Mutex::new(batches),
             }
         }
     }
@@ -206,18 +214,21 @@ mod tests {
             &self,
             _request: &LlmRequest,
         ) -> std::result::Result<Vec<LlmToolCall>, LlmError> {
-            let mut actions = self.actions.lock().unwrap();
-            let action = if actions.is_empty() {
-                Action::Finish {
+            let mut batches = self.batches.lock().unwrap();
+            let actions = if batches.is_empty() {
+                vec![Action::Finish {
                     summary: "done".to_string(),
-                }
+                }]
             } else {
-                actions.remove(0)
+                batches.remove(0)
             };
-            Ok(vec![LlmToolCall {
-                tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
-                action,
-            }])
+            Ok(actions
+                .into_iter()
+                .map(|action| LlmToolCall {
+                    tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
+                    action,
+                })
+                .collect())
         }
 
         fn model_id(&self) -> &str {
@@ -261,6 +272,157 @@ mod tests {
         let result = runtime.run("goal", &workspace, None, None).await.unwrap();
         assert!(result.success);
         assert!(result.changed_files.iter().any(|p| p.ends_with("hello.txt")));
+    }
+
+    #[tokio::test]
+    async fn parallel_readonly_batch_completes() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        std::fs::write(workspace.join("a.txt"), "aaa\n").unwrap();
+        std::fs::write(workspace.join("b.txt"), "bbb\n").unwrap();
+
+        let llm = FakeLlm::batches(vec![
+            vec![
+                Action::ReadFile {
+                    path: PathBuf::from("a.txt"),
+                    offset: 1,
+                    limit: 50,
+                },
+                Action::ReadFile {
+                    path: PathBuf::from("b.txt"),
+                    offset: 1,
+                    limit: 50,
+                },
+                Action::ListFiles {
+                    path: PathBuf::from("."),
+                },
+            ],
+            vec![Action::Finish {
+                summary: "explored".to_string(),
+            }],
+        ]);
+
+        let runtime = AgentRuntime::new(
+            Box::new(llm),
+            "fake",
+            5,
+            0,
+            0,
+            0,
+            "system",
+            16000,
+            2048,
+            20,
+        );
+
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.total_steps, 4); // 3 parallel reads + finish
+
+        let log = std::fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            log.contains("parallel_tool_group"),
+            "expected parallel_tool_group event in log"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_cache_hits_on_identical_reread() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        std::fs::write(workspace.join("a.txt"), "hello cache\n").unwrap();
+
+        let llm = FakeLlm::batches(vec![
+            vec![Action::ReadFile {
+                path: PathBuf::from("a.txt"),
+                offset: 1,
+                limit: 50,
+            }],
+            vec![Action::ReadFile {
+                path: PathBuf::from("a.txt"),
+                offset: 1,
+                limit: 50,
+            }],
+            vec![Action::Finish {
+                summary: "done".to_string(),
+            }],
+        ]);
+
+        let runtime = AgentRuntime::new(
+            Box::new(llm),
+            "fake",
+            5,
+            0,
+            0,
+            0,
+            "system",
+            16000,
+            2048,
+            20,
+        );
+
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        assert!(result.success);
+        let log = std::fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("cache_miss"), "first read should miss");
+        assert!(log.contains("cache_hit"), "second identical read should hit");
+        assert!(log.contains("[cached — same unchanged range as step"));
+    }
+
+    #[tokio::test]
+    async fn read_cache_invalidates_after_write() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        std::fs::write(workspace.join("a.txt"), "v1\n").unwrap();
+
+        let llm = FakeLlm::batches(vec![
+            vec![Action::ReadFile {
+                path: PathBuf::from("a.txt"),
+                offset: 1,
+                limit: 50,
+            }],
+            vec![Action::WriteFile {
+                path: PathBuf::from("a.txt"),
+                content: "v2\n".to_string(),
+            }],
+            vec![Action::ReadFile {
+                path: PathBuf::from("a.txt"),
+                offset: 1,
+                limit: 50,
+            }],
+            vec![Action::Finish {
+                summary: "done".to_string(),
+            }],
+        ]);
+
+        let runtime = AgentRuntime::new(
+            Box::new(llm),
+            "fake",
+            10,
+            0,
+            0,
+            0,
+            "system",
+            16000,
+            2048,
+            20,
+        );
+
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        assert!(result.success);
+        let log = std::fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("cache_invalidate"));
+        let miss_count = log.matches("cache_miss").count();
+        let hit_count = log.matches("cache_hit").count();
+        assert!(
+            miss_count >= 2,
+            "expected miss before and after write, got {miss_count}"
+        );
+        assert_eq!(hit_count, 0, "post-write read must not hit stale cache");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "v2\n"
+        );
     }
 }
 

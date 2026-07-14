@@ -12,6 +12,7 @@ pub mod git_status;
 pub mod ignore;
 pub mod list_files;
 pub mod project_snapshot;
+pub mod read_cache;
 pub mod read_file;
 pub mod run_command;
 pub mod run_shell;

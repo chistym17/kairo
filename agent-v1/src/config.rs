@@ -100,7 +100,9 @@ impl Config {
                 .parse::<u32>()
                 .expect("MAX_STEPS must be a positive integer"),
             workspace_root: PathBuf::from(env_or("WORKSPACE_ROOT", "./test_repo")),
-            step_delay_ms: env_or("STEP_DELAY_MS", "2000")
+            // Default 0: no artificial pacing. Rate limits use their own backoff.
+            // Set STEP_DELAY_MS only if a provider needs gentle pacing.
+            step_delay_ms: env_or("STEP_DELAY_MS", "0")
                 .parse::<u64>()
                 .expect("STEP_DELAY_MS must be a non-negative integer"),
             tool_use_max_retries: env_or("TOOL_USE_MAX_RETRIES", "3")

@@ -179,7 +179,9 @@ async fn main() {
     println!("[agent-v1] workspace: {}", config.workspace_root.display());
     println!("[agent-v1] model: {}", config.model_id);
     println!("[agent-v1] max_steps: {}", config.max_steps);
-    println!("[agent-v1] step_delay: {}ms", config.step_delay_ms);
+    if config.step_delay_ms > 0 {
+        println!("[agent-v1] step_delay: {}ms", config.step_delay_ms);
+    }
 
     let session_settings = SessionSettings {
         model_id: config.model_id.clone(),

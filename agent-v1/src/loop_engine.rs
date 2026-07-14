@@ -1,9 +1,9 @@
 use crate::context::{ContextBuilder, ContextManager};
-use crate::llm::{LlmClient, LlmError};
+use crate::llm::{LlmClient, LlmError, LlmToolCall};
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
-use crate::state::step::Step;
+use crate::state::step::{Action, Step};
 use crate::state::stop_reason::StopReason;
 use crate::tools;
 use crate::tools::ToolResult;
@@ -35,9 +35,12 @@ pub async fn run(
     mut session: Option<&mut Session>,
 ) -> StopReason {
     println!(
-        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] step_delay: {}ms\n",
-        state.run_id, state.goal, state.model_id, state.max_steps, step_delay_ms
+        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n",
+        state.run_id, state.goal, state.model_id, state.max_steps
     );
+    if step_delay_ms > 0 {
+        println!("[agent] step_delay: {}ms (opt-in pacing)", step_delay_ms);
+    }
 
     // Orientation once per run (no step cost). Refreshable via detect_project_snapshot.
     if state.project_snapshot.is_none() {
@@ -368,222 +371,567 @@ pub async fn run(
         let model_turn = state.model_turns;
         state.model_turns += 1;
 
-        // ── 3. Execute every tool call in this turn (serial for 10.1) ───
+        // ── 3. Execute tool calls — consecutive read-only groups in parallel ─
         let mut verified_in_batch = false;
-        for tool_call in tool_calls {
-            let action = tool_call.action;
-            let tool_call_id = tool_call.tool_call_id;
+        let mut call_idx = 0;
+        while call_idx < tool_calls.len() {
+            if is_parallel_readonly(&tool_calls[call_idx].action) {
+                let mut end = call_idx + 1;
+                while end < tool_calls.len()
+                    && is_parallel_readonly(&tool_calls[end].action)
+                {
+                    end += 1;
+                }
+                let group = &tool_calls[call_idx..end];
+                if let Some(reason) = execute_readonly_group(
+                    state,
+                    group,
+                    model_turn,
+                    &mut verified_in_batch,
+                    observer,
+                )
+                .await
+                {
+                    return reason;
+                }
+                call_idx = end;
+            } else {
+                if let Some(reason) = execute_one_tool(
+                    state,
+                    &tool_calls[call_idx],
+                    model_turn,
+                    require_verified_finish,
+                    &mut verified_in_batch,
+                    observer,
+                )
+                .await
+                {
+                    return reason;
+                }
+                call_idx += 1;
+            }
+        }
+    }
+}
 
-            emit(
-                observer,
-                AgentEvent::StepStarted {
-                    run_id: state.run_id.clone(),
-                    step_index: state.step_count,
-                },
-            );
+/// Read-only tools that may run concurrently within a model turn.
+fn is_parallel_readonly(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::ReadFile { .. }
+            | Action::ListFiles { .. }
+            | Action::SearchCode { .. }
+            | Action::FindFiles { .. }
+            | Action::DetectProjectSnapshot { .. }
+            | Action::GitStatus
+            | Action::GitDiff { .. }
+    )
+}
 
-            emit(
-                observer,
-                AgentEvent::ToolStarted {
-                    run_id: state.run_id.clone(),
-                    step_index: state.step_count,
-                    tool: tool_name(&action).to_string(),
-                },
-            );
+/// Execute one tool (mutating or any single tool) and commit it to history.
+async fn execute_one_tool(
+    state: &mut AgentState,
+    tool_call: &LlmToolCall,
+    model_turn: u32,
+    require_verified_finish: bool,
+    verified_in_batch: &mut bool,
+    observer: Option<&dyn AgentObserver>,
+) -> Option<StopReason> {
+    let action = tool_call.action.clone();
+    let tool_call_id = tool_call.tool_call_id.clone();
+    let step_index = state.step_count;
 
-            let verified_for_finish =
-                finish_allowed(&state.history) || verified_in_batch;
+    emit(
+        observer,
+        AgentEvent::StepStarted {
+            run_id: state.run_id.clone(),
+            step_index,
+        },
+    );
+    emit(
+        observer,
+        AgentEvent::ToolStarted {
+            run_id: state.run_id.clone(),
+            step_index,
+            tool: tool_name(&action).to_string(),
+        },
+    );
 
-            let mut result = match validate_action(
-                &action,
-                require_verified_finish,
-                verified_for_finish,
-            ) {
-                Some(ValidationError { event, message }) => {
-                    write_event(&state.run_id, &event, &message, 0);
-                    ToolResult {
+    let verified_for_finish = finish_allowed(&state.history) || *verified_in_batch;
+    let mut result = produce_tool_result(
+        state,
+        &action,
+        require_verified_finish,
+        verified_for_finish,
+    );
+
+    if result.success {
+        if let Some(path) = mutating_path(&action) {
+            if let Some(err) = post_edit_sanity_check(&state.workspace_root, &path) {
+                write_event(&state.run_id, "post_edit_sanity_failed", &err, 0);
+                result.success = false;
+                result.error = Some(err);
+            }
+        }
+    }
+
+    if result.success
+        && matches!(
+            action,
+            Action::RunCommand { .. } | Action::RunShell { .. }
+        )
+    {
+        *verified_in_batch = true;
+    }
+
+    commit_tool_outcome(
+        state,
+        observer,
+        step_index,
+        model_turn,
+        action,
+        tool_call_id,
+        result,
+    )
+}
+
+/// Run a consecutive group of read-only tools concurrently (order preserved in history).
+async fn execute_readonly_group(
+    state: &mut AgentState,
+    group: &[LlmToolCall],
+    model_turn: u32,
+    verified_in_batch: &mut bool,
+    observer: Option<&dyn AgentObserver>,
+) -> Option<StopReason> {
+    if group.len() == 1 {
+        return execute_one_tool(
+            state,
+            &group[0],
+            model_turn,
+            false,
+            verified_in_batch,
+            observer,
+        )
+        .await;
+    }
+
+    println!(
+        "[agent] parallel read-only group ({} tools): {}",
+        group.len(),
+        group
+            .iter()
+            .map(|c| tool_name(&c.action))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    write_event(
+        &state.run_id,
+        "parallel_tool_group",
+        &format!("{} tools", group.len()),
+        0,
+    );
+
+    let base_step = state.step_count;
+    let workspace = state.workspace_root.clone();
+
+    // Emit start events + validate; collect spawn jobs for valid tools.
+    let mut prepared: Vec<(u32, Action, String, Result<(), ValidationError>)> =
+        Vec::with_capacity(group.len());
+
+    for (offset, tool_call) in group.iter().enumerate() {
+        let step_index = base_step + offset as u32;
+        let action = tool_call.action.clone();
+        let tool_call_id = tool_call.tool_call_id.clone();
+
+        emit(
+            observer,
+            AgentEvent::StepStarted {
+                run_id: state.run_id.clone(),
+                step_index,
+            },
+        );
+        emit(
+            observer,
+            AgentEvent::ToolStarted {
+                run_id: state.run_id.clone(),
+                step_index,
+                tool: tool_name(&action).to_string(),
+            },
+        );
+
+        let validation = validate_action(&action, false, false);
+        if let Some(err) = &validation {
+            write_event(&state.run_id, &err.event, &err.message, 0);
+        }
+        prepared.push((
+            step_index,
+            action,
+            tool_call_id,
+            match validation {
+                Some(e) => Err(e),
+                None => Ok(()),
+            },
+        ));
+    }
+
+    // Spawn blocking work for tools that passed validation.
+    // Read-file hits the in-run cache on this thread before spawn.
+    let mut handles = Vec::new();
+    for (i, (step_index, action, tool_call_id, validation)) in prepared.into_iter().enumerate() {
+        match validation {
+            Err(e) => {
+                handles.push((
+                    i,
+                    step_index,
+                    action,
+                    tool_call_id,
+                    Some(ToolResult {
                         success: false,
                         output: String::new(),
                         diff: None,
-                        error: Some(message),
+                        error: Some(e.message),
                         stop_reason: None,
-                    }
-                }
-                None => match &action {
-                    crate::state::step::Action::UpdatePlan { objective, steps } => {
-                        match crate::state::AgentPlan::from_update(objective, steps) {
-                            Ok(plan) => {
-                                let output = format!("Plan updated:\n{}", plan.render());
-                                state.plan = Some(plan);
-                                ToolResult {
-                                    success: true,
-                                    output,
-                                    diff: None,
-                                    error: None,
-                                    stop_reason: None,
-                                }
-                            }
-                            Err(message) => {
-                                write_event(&state.run_id, "invalid_tool_args", &message, 0);
-                                ToolResult {
-                                    success: false,
-                                    output: String::new(),
-                                    diff: None,
-                                    error: Some(message),
-                                    stop_reason: None,
-                                }
-                            }
-                        }
-                    }
-                    crate::state::step::Action::DetectProjectSnapshot { path } => {
-                        let result =
-                            tools::project_snapshot::execute(path, &state.workspace_root);
-                        if result.success {
-                            state.project_snapshot = Some(tools::project_snapshot::detect(
-                                &state.workspace_root,
-                            ));
-                        }
-                        result
-                    }
-                    crate::state::step::Action::Finish { summary } => {
-                        let verified = verified_for_finish;
-                        let stop_reason = if verified {
-                            StopReason::TaskComplete
-                        } else {
-                            StopReason::CompletedUnverified
-                        };
-                        ToolResult {
-                            success: true,
-                            output: summary.clone(),
-                            diff: None,
-                            error: None,
-                            stop_reason: Some(stop_reason),
-                        }
-                    }
-                    _ => tools::dispatch(&action, &state.workspace_root),
-                },
-            };
-
-            if result.success {
-                if let Some(path) = mutating_path(&action) {
-                    if let Some(err) = post_edit_sanity_check(&state.workspace_root, &path) {
-                        write_event(&state.run_id, "post_edit_sanity_failed", &err, 0);
-                        result.success = false;
-                        result.error = Some(err);
-                    }
-                }
+                    }),
+                    None,
+                    false,
+                ));
             }
-
-            if result.success
-                && matches!(
-                    action,
-                    crate::state::step::Action::RunCommand { .. }
-                        | crate::state::step::Action::RunShell { .. }
-                )
-            {
-                verified_in_batch = true;
-            }
-
-            emit(
-                observer,
-                AgentEvent::ToolCompleted {
-                    run_id: state.run_id.clone(),
-                    step_index: state.step_count,
-                    tool: tool_name(&action).to_string(),
-                    success: result.success,
-                },
-            );
-
-            if result.success {
-                if let Some(path) = mutating_path(&action) {
-                    emit(
-                        observer,
-                        AgentEvent::FileModified {
-                            run_id: state.run_id.clone(),
-                            step_index: state.step_count,
-                            path,
-                        },
+            Ok(()) => {
+                if let Action::ReadFile {
+                    path,
+                    offset,
+                    limit,
+                } = &action
+                {
+                    if let Some(hit) =
+                        state
+                            .read_cache
+                            .try_hit(&workspace, path, *offset, *limit)
+                    {
+                        write_event(
+                            &state.run_id,
+                            "cache_hit",
+                            &format!("{} offset={} limit={}", path.display(), offset, limit),
+                            0,
+                        );
+                        handles.push((
+                            i,
+                            step_index,
+                            action,
+                            tool_call_id,
+                            Some(hit),
+                            None,
+                            true,
+                        ));
+                        continue;
+                    }
+                    write_event(
+                        &state.run_id,
+                        "cache_miss",
+                        &format!("{} offset={} limit={}", path.display(), offset, limit),
+                        0,
                     );
                 }
-            } else {
-                emit(
-                    observer,
-                    AgentEvent::Error {
-                        run_id: state.run_id.clone(),
-                        step_index: Some(state.step_count),
-                        message: result
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "tool failed".to_string()),
-                    },
-                );
-            }
 
-            if let crate::state::step::Action::RunCommand { cmd, .. }
-            | crate::state::step::Action::RunShell {
-                command: cmd,
-                ..
+                let root = workspace.clone();
+                let action_for_job = action.clone();
+                let handle =
+                    tokio::task::spawn_blocking(move || tools::dispatch(&action_for_job, &root));
+                handles.push((i, step_index, action, tool_call_id, None, Some(handle), false));
+            }
+        }
+    }
+
+    // Await in original order.
+    let mut outcomes = Vec::with_capacity(handles.len());
+    for (_i, step_index, action, tool_call_id, early, handle, from_cache) in handles {
+        let result = if let Some(r) = early {
+            r
+        } else if let Some(h) = handle {
+            match h.await {
+                Ok(r) => r,
+                Err(e) => ToolResult::error(format!("parallel tool join failed: {e}")),
+            }
+        } else {
+            ToolResult::error("internal error: missing parallel tool result")
+        };
+        outcomes.push((step_index, action, tool_call_id, result, from_cache));
+    }
+
+    for (step_index, action, tool_call_id, result, from_cache) in outcomes {
+        if result.success
+            && matches!(action, Action::DetectProjectSnapshot { .. })
+        {
+            state.project_snapshot =
+                Some(tools::project_snapshot::detect(&state.workspace_root));
+        }
+
+        if result.success && !from_cache {
+            if let Action::ReadFile {
+                path,
+                offset,
+                limit,
             } = &action
             {
-                emit(
-                    observer,
-                    AgentEvent::CommandCompleted {
-                        run_id: state.run_id.clone(),
-                        step_index: state.step_count,
-                        cmd: cmd.clone(),
-                        success: result.success,
-                    },
+                state.read_cache.store(
+                    &state.workspace_root,
+                    path,
+                    *offset,
+                    *limit,
+                    step_index,
+                    &result.output,
                 );
             }
+        }
 
-            println!(
-                "[agent] result: success={} output_len={}{}",
-                result.success,
-                result.output.len(),
-                result
-                    .error
-                    .as_ref()
-                    .map(|e| format!(" error={}", e))
-                    .unwrap_or_default()
-            );
+        if let Some(reason) = commit_tool_outcome(
+            state,
+            observer,
+            step_index,
+            model_turn,
+            action,
+            tool_call_id,
+            result,
+        ) {
+            return Some(reason);
+        }
+    }
 
-            if let Some(diff) = &result.diff {
-                if !diff.is_empty() {
-                    let preview: String = diff.lines().take(10).collect::<Vec<_>>().join("\n");
-                    println!("[agent] diff preview:\n{}", preview);
-                    if diff.lines().count() > 10 {
-                        println!("[agent] ... ({} total diff lines)", diff.lines().count());
+    None
+}
+
+fn produce_tool_result(
+    state: &mut AgentState,
+    action: &Action,
+    require_verified_finish: bool,
+    verified_for_finish: bool,
+) -> ToolResult {
+    match validate_action(action, require_verified_finish, verified_for_finish) {
+        Some(ValidationError { event, message }) => {
+            write_event(&state.run_id, &event, &message, 0);
+            ToolResult {
+                success: false,
+                output: String::new(),
+                diff: None,
+                error: Some(message),
+                stop_reason: None,
+            }
+        }
+        None => match action {
+            Action::UpdatePlan { objective, steps } => {
+                match crate::state::AgentPlan::from_update(objective, steps) {
+                    Ok(plan) => {
+                        let output = format!("Plan updated:\n{}", plan.render());
+                        state.plan = Some(plan);
+                        ToolResult {
+                            success: true,
+                            output,
+                            diff: None,
+                            error: None,
+                            stop_reason: None,
+                        }
+                    }
+                    Err(message) => {
+                        write_event(&state.run_id, "invalid_tool_args", &message, 0);
+                        ToolResult {
+                            success: false,
+                            output: String::new(),
+                            diff: None,
+                            error: Some(message),
+                            stop_reason: None,
+                        }
                     }
                 }
             }
+            Action::DetectProjectSnapshot { path } => {
+                let result = tools::project_snapshot::execute(path, &state.workspace_root);
+                if result.success {
+                    state.project_snapshot =
+                        Some(tools::project_snapshot::detect(&state.workspace_root));
+                }
+                result
+            }
+            Action::Finish { summary } => {
+                let stop_reason = if verified_for_finish {
+                    StopReason::TaskComplete
+                } else {
+                    StopReason::CompletedUnverified
+                };
+                ToolResult {
+                    success: true,
+                    output: summary.clone(),
+                    diff: None,
+                    error: None,
+                    stop_reason: Some(stop_reason),
+                }
+            }
+            Action::ReadFile {
+                path,
+                offset,
+                limit,
+            } => read_file_cached(state, path, *offset, *limit),
+            _ => tools::dispatch(action, &state.workspace_root),
+        },
+    }
+}
 
-            let stop_reason = result.stop_reason.clone();
-            let step = Step::new(state.step_count, model_turn, action, result, tool_call_id);
-            let entry = LogEntry::from_step(&state.run_id, &state.model_id, &step);
-            write_entry(&entry);
-            state.record_step(step);
+fn read_file_cached(
+    state: &mut AgentState,
+    path: &std::path::Path,
+    offset: u32,
+    limit: u32,
+) -> ToolResult {
+    let step_index = state.step_count;
+    if let Some(hit) = state
+        .read_cache
+        .try_hit(&state.workspace_root, path, offset, limit)
+    {
+        write_event(
+            &state.run_id,
+            "cache_hit",
+            &format!("{} offset={} limit={}", path.display(), offset, limit),
+            0,
+        );
+        return hit;
+    }
 
+    write_event(
+        &state.run_id,
+        "cache_miss",
+        &format!("{} offset={} limit={}", path.display(), offset, limit),
+        0,
+    );
+
+    let result = tools::read_file::execute(path, offset, limit, &state.workspace_root);
+    if result.success {
+        state.read_cache.store(
+            &state.workspace_root,
+            path,
+            offset,
+            limit,
+            step_index,
+            &result.output,
+        );
+    }
+    result
+}
+
+/// Log, observe, and record a completed tool. Returns Some(stop) if the run should end.
+fn commit_tool_outcome(
+    state: &mut AgentState,
+    observer: Option<&dyn AgentObserver>,
+    step_index: u32,
+    model_turn: u32,
+    action: Action,
+    tool_call_id: String,
+    result: ToolResult,
+) -> Option<StopReason> {
+    emit(
+        observer,
+        AgentEvent::ToolCompleted {
+            run_id: state.run_id.clone(),
+            step_index,
+            tool: tool_name(&action).to_string(),
+            success: result.success,
+        },
+    );
+
+    if result.success {
+        if let Some(path) = mutating_path(&action) {
+            state.read_cache.invalidate_path(std::path::Path::new(&path));
+            write_event(
+                &state.run_id,
+                "cache_invalidate",
+                &path,
+                0,
+            );
             emit(
                 observer,
-                AgentEvent::StepCompleted {
+                AgentEvent::FileModified {
                     run_id: state.run_id.clone(),
-                    step_index: state.step_count - 1,
-                    stop_reason: stop_reason.as_ref().map(|r| format!("{:?}", r)),
+                    step_index,
+                    path,
                 },
             );
+        }
+    } else {
+        emit(
+            observer,
+            AgentEvent::Error {
+                run_id: state.run_id.clone(),
+                step_index: Some(step_index),
+                message: result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "tool failed".to_string()),
+            },
+        );
+    }
 
-            if let Some(reason) = stop_reason {
-                println!("\n[agent] stopping: {:?}", reason);
-                write_run_summary(
-                    &state.run_id,
-                    &state.model_id,
-                    &reason,
-                    state.step_count,
-                    state.model_turns,
-                );
-                return reason;
+    if let Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } = &action {
+        emit(
+            observer,
+            AgentEvent::CommandCompleted {
+                run_id: state.run_id.clone(),
+                step_index,
+                cmd: cmd.clone(),
+                success: result.success,
+            },
+        );
+    }
+
+    println!(
+        "[agent] result: success={} output_len={}{}",
+        result.success,
+        result.output.len(),
+        result
+            .error
+            .as_ref()
+            .map(|e| format!(" error={}", e))
+            .unwrap_or_default()
+    );
+
+    if let Some(diff) = &result.diff {
+        if !diff.is_empty() {
+            let preview: String = diff.lines().take(10).collect::<Vec<_>>().join("\n");
+            println!("[agent] diff preview:\n{}", preview);
+            if diff.lines().count() > 10 {
+                println!("[agent] ... ({} total diff lines)", diff.lines().count());
             }
         }
+    }
+
+    let stop_reason = result.stop_reason.clone();
+    debug_assert_eq!(
+        step_index, state.step_count,
+        "step_index must match sequential record order"
+    );
+    let step = Step::new(state.step_count, model_turn, action, result, tool_call_id);
+    let entry = LogEntry::from_step(&state.run_id, &state.model_id, &step);
+    write_entry(&entry);
+    state.record_step(step);
+
+    emit(
+        observer,
+        AgentEvent::StepCompleted {
+            run_id: state.run_id.clone(),
+            step_index: state.step_count - 1,
+            stop_reason: stop_reason.as_ref().map(|r| format!("{:?}", r)),
+        },
+    );
+
+    if let Some(reason) = stop_reason {
+        println!("\n[agent] stopping: {:?}", reason);
+        write_run_summary(
+            &state.run_id,
+            &state.model_id,
+            &reason,
+            state.step_count,
+            state.model_turns,
+        );
+        Some(reason)
+    } else {
+        None
     }
 }
 
@@ -895,4 +1243,61 @@ fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
         state.model_turns,
     );
     reason
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn classifies_readonly_vs_mutating() {
+        assert!(is_parallel_readonly(&Action::GitStatus));
+        assert!(is_parallel_readonly(&Action::ReadFile {
+            path: PathBuf::from("a.rs"),
+            offset: 1,
+            limit: 10,
+        }));
+        assert!(is_parallel_readonly(&Action::SearchCode {
+            query: "x".into(),
+            path: PathBuf::from("."),
+        }));
+        assert!(is_parallel_readonly(&Action::FindFiles {
+            pattern: "*.rs".into(),
+            path: PathBuf::from("."),
+        }));
+        assert!(is_parallel_readonly(&Action::ListFiles {
+            path: PathBuf::from("."),
+        }));
+        assert!(is_parallel_readonly(&Action::GitDiff { path: None }));
+        assert!(is_parallel_readonly(&Action::DetectProjectSnapshot {
+            path: PathBuf::from("."),
+        }));
+
+        assert!(!is_parallel_readonly(&Action::WriteFile {
+            path: PathBuf::from("a"),
+            content: String::new(),
+        }));
+        assert!(!is_parallel_readonly(&Action::ApplyPatch {
+            path: PathBuf::from("a"),
+            diff: String::new(),
+        }));
+        assert!(!is_parallel_readonly(&Action::RunCommand {
+            cmd: "ls".into(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 30,
+        }));
+        assert!(!is_parallel_readonly(&Action::RunShell {
+            command: "ls".into(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 30,
+        }));
+        assert!(!is_parallel_readonly(&Action::UpdatePlan {
+            objective: "o".into(),
+            steps: "- [ ] a".into(),
+        }));
+        assert!(!is_parallel_readonly(&Action::Finish {
+            summary: "done".into(),
+        }));
+    }
 }

@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::state::plan::AgentPlan;
 use crate::state::step::Step;
 use crate::tools::project_snapshot::ProjectSnapshot;
+use crate::tools::read_cache::ReadCache;
 
 #[derive(Debug)]
 pub struct AgentState {
@@ -23,6 +24,9 @@ pub struct AgentState {
 
     /// Orientation snapshot (computed once per run; refreshable via tool).
     pub project_snapshot: Option<ProjectSnapshot>,
+
+    /// Successful read_file windows for this run (invalidated on edit).
+    pub read_cache: ReadCache,
 }
 
 impl AgentState {
@@ -43,6 +47,7 @@ impl AgentState {
             max_steps,
             plan: None,
             project_snapshot: None,
+            read_cache: ReadCache::new(),
         }
     }
 
