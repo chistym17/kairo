@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
@@ -28,7 +28,7 @@ pub struct ToolResult {
 
 impl ToolResult {
     /// Failed tool outcome that the model can observe and recover from.
-    /// Does **not** stop the agent loop (Pi-like: ordinary failures are observations).
+    /// Does **not** stop the agent loop (ordinary failures are observations).
     pub fn error(msg: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -53,6 +53,75 @@ pub fn truncate_output(raw: &str) -> String {
             stripped.len()
         )
     }
+}
+
+/// Resolve a relative path as a directory under `workspace_root`.
+/// Canonicalizes both sides and rejects absolute paths, `..`, and escapes
+/// (including via symlinks that leave the workspace).
+pub fn resolve_workspace_cwd(
+    workspace_root: &Path,
+    cwd: &Path,
+) -> Result<(PathBuf /* canonical abs */, PathBuf /* display rel */), String> {
+    let cwd_rel = if cwd.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        cwd.to_path_buf()
+    };
+
+    if cwd_rel.is_absolute() {
+        return Err(format!(
+            "working_directory must be relative (not absolute): {}",
+            cwd_rel.display()
+        ));
+    }
+    if cwd_rel
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!(
+            "working_directory must not contain '..': {}",
+            cwd_rel.display()
+        ));
+    }
+
+    let canonical_root = workspace_root.canonicalize().map_err(|e| {
+        format!(
+            "workspace_root could not be resolved ({}): {e}",
+            workspace_root.display()
+        )
+    })?;
+
+    let joined = workspace_root.join(&cwd_rel);
+    if !joined.exists() {
+        return Err(format!(
+            "working_directory not found: {} (under workspace {})",
+            cwd_rel.display(),
+            workspace_root.display()
+        ));
+    }
+    if !joined.is_dir() {
+        return Err(format!(
+            "working_directory is not a directory: {}",
+            cwd_rel.display()
+        ));
+    }
+
+    let canonical_cwd = joined.canonicalize().map_err(|e| {
+        format!(
+            "working_directory could not be resolved ({}): {e}",
+            cwd_rel.display()
+        )
+    })?;
+
+    if !canonical_cwd.starts_with(&canonical_root) {
+        return Err(format!(
+            "working_directory escape attempt: {} resolves outside workspace {}",
+            cwd_rel.display(),
+            workspace_root.display()
+        ));
+    }
+
+    Ok((canonical_cwd, cwd_rel))
 }
 
 fn strip_ansi(s: &str) -> String {

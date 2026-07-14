@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::tools::run_command::{self, DEFAULT_TIMEOUT_SECS, MAX_TIMEOUT_SECS};
-use crate::tools::{truncate_output, ToolResult};
+use crate::tools::{resolve_workspace_cwd, truncate_output, ToolResult};
 
 pub struct RunShellOpts<'a> {
     pub command: &'a str,
@@ -11,7 +11,12 @@ pub struct RunShellOpts<'a> {
     pub timeout_secs: u64,
 }
 
-/// Run an arbitrary shell string via `sh -c` under the workspace cwd.
+/// Run an arbitrary shell string via `sh -c` under a cwd inside the workspace.
+///
+/// Safety: relative cwd only, no `..`, canonicalize + stay under workspace_root,
+/// timeout enforced, output truncated. Exact command is included in the result
+/// (and the Action is written to JSONL). Benchmark worktrees stay disposable
+/// because cwd cannot escape the task workspace.
 pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
     if !workspace_root.exists() {
         return ToolResult::error(format!(
@@ -26,26 +31,10 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
     }
 
     let timeout_secs = opts.timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
-    let cwd_rel = if opts.cwd.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        opts.cwd.to_path_buf()
+    let (cwd_abs, cwd_rel) = match resolve_workspace_cwd(workspace_root, opts.cwd) {
+        Ok(pair) => pair,
+        Err(message) => return ToolResult::error(message),
     };
-    let cwd_abs = workspace_root.join(&cwd_rel);
-
-    if !cwd_abs.exists() {
-        return ToolResult::error(format!(
-            "working_directory not found: {} (under workspace {})",
-            cwd_rel.display(),
-            workspace_root.display()
-        ));
-    }
-    if !cwd_abs.is_dir() {
-        return ToolResult::error(format!(
-            "working_directory is not a directory: {}",
-            cwd_rel.display()
-        ));
-    }
 
     let start = Instant::now();
     let spawned = Command::new("sh")
@@ -77,7 +66,8 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
                     let duration_ms = start.elapsed().as_millis();
                     return ToolResult {
                         success: false,
-                        output: run_command::format_structured(
+                        output: format_shell_output(
+                            command,
                             -1,
                             duration_ms,
                             &cwd_rel,
@@ -86,9 +76,7 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
                             &format!("timed out after {timeout_secs}s"),
                         ),
                         diff: None,
-                        error: Some(format!(
-                            "command timed out after {timeout_secs}s"
-                        )),
+                        error: Some(format!("command timed out after {timeout_secs}s")),
                         stop_reason: None,
                     };
                 }
@@ -109,19 +97,17 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
     let exit_code = output.status.code().unwrap_or(-1);
     let ok = output.status.success();
 
-    let structured = run_command::format_structured(
-        exit_code,
-        duration_ms,
-        &cwd_rel,
-        timeout_secs,
-        &stdout,
-        &stderr,
-    );
-    let truncated = truncate_output(&structured);
-
     ToolResult {
         success: ok,
-        output: truncated,
+        output: format_shell_output(
+            command,
+            exit_code,
+            duration_ms,
+            &cwd_rel,
+            timeout_secs,
+            &stdout,
+            &stderr,
+        ),
         diff: None,
         error: if ok {
             None
@@ -132,9 +118,30 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
     }
 }
 
+fn format_shell_output(
+    command: &str,
+    exit_code: i32,
+    duration_ms: u128,
+    cwd: &Path,
+    timeout_secs: u64,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let body = run_command::format_structured(
+        exit_code,
+        duration_ms,
+        cwd,
+        timeout_secs,
+        stdout,
+        stderr,
+    );
+    truncate_output(&format!("command: {command}\n{body}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
     #[test]
@@ -149,6 +156,7 @@ mod tests {
             dir.path(),
         );
         assert!(result.success, "{:?}", result.error);
+        assert!(result.output.contains("command: echo a && echo b"));
         assert!(result.output.contains("exit_code: 0"));
         assert!(result.output.contains('a'));
         assert!(result.output.contains('b'));
@@ -168,5 +176,118 @@ mod tests {
         assert!(!result.success);
         assert!(result.stop_reason.is_none());
         assert!(result.output.contains("exit_code: 7"));
+    }
+
+    #[test]
+    fn rejects_parent_dir_escape() {
+        let dir = tempdir().unwrap();
+        let result = execute(
+            RunShellOpts {
+                command: "echo hi",
+                cwd: Path::new("../"),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("must not contain '..'"),
+            "{:?}",
+            result.error
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_cwd() {
+        let dir = tempdir().unwrap();
+        let result = execute(
+            RunShellOpts {
+                command: "echo hi",
+                cwd: Path::new("/tmp"),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("must be relative"),
+            "{:?}",
+            result.error
+        );
+    }
+
+    #[test]
+    fn rejects_symlink_outside_workspace() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let link = dir.path().join("escape");
+        symlink(outside.path(), &link).unwrap();
+
+        let result = execute(
+            RunShellOpts {
+                command: "echo hi",
+                cwd: Path::new("escape"),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("escape attempt"),
+            "{:?}",
+            result.error
+        );
+    }
+
+    #[test]
+    fn timeout_still_applies() {
+        let dir = tempdir().unwrap();
+        let result = execute(
+            RunShellOpts {
+                command: "sleep 5",
+                cwd: Path::new("."),
+                timeout_secs: 1,
+            },
+            dir.path(),
+        );
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out"),
+            "{:?}",
+            result.error
+        );
+        assert!(result.output.contains("command: sleep 5"));
+    }
+
+    #[test]
+    fn large_output_is_bounded() {
+        let dir = tempdir().unwrap();
+        let result = execute(
+            RunShellOpts {
+                command: "python3 -c \"print('x'*5000)\"",
+                cwd: Path::new("."),
+                timeout_secs: 30,
+            },
+            dir.path(),
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.contains("truncated"), "{}", result.output);
+        assert!(result.output.len() < 4000);
     }
 }
