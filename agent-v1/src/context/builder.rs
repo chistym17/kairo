@@ -152,6 +152,8 @@ mod tests {
             0,
             Action::ReadFile {
                 path: "calc.py".into(),
+                offset: 1,
+                limit: 250,
             },
             ToolResult {
                 success: true,

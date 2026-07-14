@@ -77,7 +77,11 @@ fn strip_ansi(s: &str) -> String {
 }
 pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
     match action {
-        Action::ReadFile { path } => read_file::execute(path, workspace_root),
+        Action::ReadFile {
+            path,
+            offset,
+            limit,
+        } => read_file::execute(path, *offset, *limit, workspace_root),
 
         Action::ListFiles { path } => list_files::execute(path, workspace_root),
 

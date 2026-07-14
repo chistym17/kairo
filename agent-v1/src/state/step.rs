@@ -6,7 +6,13 @@ use crate::tools::ToolResult;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "tool", content = "args")]
 pub enum Action {
-    ReadFile { path: PathBuf },
+    ReadFile {
+        path: PathBuf,
+        /// 1-based start line (default 1).
+        offset: u32,
+        /// Max lines to return (default 250).
+        limit: u32,
+    },
 
     ListFiles { path: PathBuf },
 

@@ -371,7 +371,7 @@ fn tool_name(action: &Action) -> &'static str {
 
 fn action_path(action: &Action) -> String {
     match action {
-        Action::ReadFile { path }
+        Action::ReadFile { path, .. }
         | Action::ListFiles { path }
         | Action::SearchCode { path, .. }
         | Action::FindFiles { path, .. }

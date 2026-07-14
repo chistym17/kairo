@@ -201,6 +201,8 @@ mod tests {
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             action: Action::ReadFile {
                 path: PathBuf::from("calc.py"),
+                offset: 1,
+                limit: 250,
             },
             result: ToolResult {
                 success: true,

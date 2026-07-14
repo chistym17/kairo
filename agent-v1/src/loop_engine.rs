@@ -533,7 +533,7 @@ fn validate_action(action: &crate::state::step::Action, history: &[Step]) -> Opt
     use crate::state::step::Action;
 
     match action {
-        Action::ReadFile { path } => validate_rel_path("read_file", path),
+        Action::ReadFile { path, .. } => validate_rel_path("read_file", path),
         Action::ListFiles { path } => validate_rel_path("list_files", path),
         Action::SearchCode { path, .. } => validate_rel_path("search_code", path),
         Action::FindFiles { path, .. } => validate_rel_path("find_files", path),

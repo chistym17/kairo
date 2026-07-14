@@ -6,11 +6,11 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file in the workspace. \
-                    Always read a file before editing it so you know its current content. \
-                    Path must be relative to the workspace root (e.g. 'calc.py', not '/abs/path/calc.py'). \
-                    Returns the file contents as a string. \
-                    If the file does not exist, returns an error — check the path and try again.",
+                "description": "Read a slice of a file by line range. \
+                    Path must be relative to the workspace root. \
+                    Use offset (1-based start line) and limit (max lines, default 250) for large files. \
+                    If the response says more lines remain, call again with the suggested next offset. \
+                    Always read before editing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -18,6 +18,14 @@ pub fn build_tools_schema() -> Value {
                             "type": "string",
                             "description": "Relative path to the file from workspace root. \
                                 Example: 'calc.py' or 'src/main.py'"
+                        },
+                        "offset": {
+                            "type": "string",
+                            "description": "Optional 1-based start line as a string. Default: '1'"
+                        },
+                        "limit": {
+                            "type": "string",
+                            "description": "Optional max lines to return as a string (default '250', max '500')"
                         }
                     },
                     "required": ["path"]
@@ -262,8 +270,14 @@ pub fn parse_tool_call(
             let path = args["path"]
                 .as_str()
                 .ok_or("read_file missing required arg: path")?;
+            let offset = parse_u32_arg(args.get("offset"), crate::tools::read_file::DEFAULT_OFFSET)?;
+            let limit = parse_u32_arg(args.get("limit"), crate::tools::read_file::DEFAULT_LIMIT)?
+                .min(crate::tools::read_file::MAX_LIMIT)
+                .max(1);
             Ok(Action::ReadFile {
                 path: PathBuf::from(path),
+                offset: offset.max(1),
+                limit,
             })
         }
 
@@ -418,4 +432,32 @@ fn parse_timeout_secs(value: Option<&Value>) -> Result<u64, String> {
         return Err("run_command timeout_secs must be >= 1".to_string());
     }
     Ok(parsed.min(MAX_TIMEOUT_SECS))
+}
+
+fn parse_u32_arg(value: Option<&Value>, default: u32) -> Result<u32, String> {
+    let Some(v) = value else {
+        return Ok(default);
+    };
+    if v.is_null() {
+        return Ok(default);
+    }
+    if let Some(n) = v.as_u64() {
+        return Ok(n.min(u32::MAX as u64) as u32);
+    }
+    if let Some(n) = v.as_i64() {
+        if n < 0 {
+            return Err("numeric arg must be non-negative".to_string());
+        }
+        return Ok(n.min(u32::MAX as i64) as u32);
+    }
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        if s.is_empty() {
+            return Ok(default);
+        }
+        return s
+            .parse::<u32>()
+            .map_err(|_| format!("expected integer string, got {s:?}"));
+    }
+    Err("expected number or string".to_string())
 }

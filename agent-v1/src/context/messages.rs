@@ -108,7 +108,18 @@ fn tool_result_to_message(_action: &Action, result: &ToolResult, tool_call_id: &
 
 fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
     match action {
-        Action::ReadFile { path } => ("read_file", json!({ "path": path.to_string_lossy() })),
+        Action::ReadFile {
+            path,
+            offset,
+            limit,
+        } => (
+            "read_file",
+            json!({
+                "path": path.to_string_lossy(),
+                "offset": offset.to_string(),
+                "limit": limit.to_string(),
+            }),
+        ),
         Action::ListFiles { path } => ("list_files", json!({ "path": path.to_string_lossy() })),
         Action::SearchCode { query, path } => (
             "search_code",
