@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::context::LlmRequest;
-use crate::llm::schema::parse_tool_call;
+use crate::llm::parse::{message_has_tool_calls, parse_tool_calls_message};
 use crate::llm::{LlmClient, LlmError, LlmToolCall};
 
 const DEFAULT_DEEPSEEK_API_URL: &str = "https://api.deepseek.com/chat/completions";
@@ -92,7 +92,7 @@ impl DeepSeekClient {
 
 #[async_trait]
 impl LlmClient for DeepSeekClient {
-    async fn next_action(&self, request: &LlmRequest) -> Result<LlmToolCall, LlmError> {
+    async fn next_actions(&self, request: &LlmRequest) -> Result<Vec<LlmToolCall>, LlmError> {
         // V4 thinking mode rejects tool_choice=required; auto + thinking disabled
         // keeps agent tool loops reliable.
         let body = json!({
@@ -112,48 +112,14 @@ impl LlmClient for DeepSeekClient {
             .ok_or_else(|| LlmError::ApiError("response has no choices".to_string()))?;
 
         let message = &choice["message"];
-        let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
 
-        if finish_reason == "tool_calls" || message["tool_calls"].is_array() {
-            let tool_calls = message["tool_calls"].as_array().ok_or_else(|| {
-                LlmError::MalformedToolCall("tool_calls is not an array".to_string())
-            })?;
-
-            let tool_call = tool_calls.first().ok_or_else(|| {
-                LlmError::MalformedToolCall("tool_calls array is empty".to_string())
-            })?;
-
-            let tool_call_id = tool_call["id"]
-                .as_str()
-                .unwrap_or("call_missing")
-                .to_string();
-
-            let tool_name = tool_call["function"]["name"]
-                .as_str()
-                .ok_or_else(|| LlmError::MalformedToolCall("missing function.name".to_string()))?;
-
-            let args_str = tool_call["function"]["arguments"].as_str().ok_or_else(|| {
-                LlmError::MalformedToolCall("missing function.arguments".to_string())
-            })?;
-
-            let args: Value = serde_json::from_str(args_str).map_err(|e| {
-                LlmError::MalformedToolCall(format!(
-                    "arguments is not valid JSON: {} — raw: {}",
-                    e, args_str
-                ))
-            })?;
-
-            let action = parse_tool_call(tool_name, &args).map_err(LlmError::MalformedToolCall)?;
-            Ok(LlmToolCall {
-                action,
-                tool_call_id,
-            })
+        if message_has_tool_calls(choice, message) {
+            parse_tool_calls_message(message)
         } else {
             let text = message["content"]
                 .as_str()
                 .unwrap_or("[no content]")
                 .to_string();
-
             Err(LlmError::NoToolCall(text))
         }
     }

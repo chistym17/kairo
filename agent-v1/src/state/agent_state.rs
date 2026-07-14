@@ -14,6 +14,8 @@ pub struct AgentState {
     pub workspace_root: PathBuf,
     pub history: Vec<Step>,
     pub step_count: u32,
+    /// Number of LLM responses (a turn may include multiple tool calls).
+    pub model_turns: u32,
     pub max_steps: u32,
 
     /// Optional working plan for multi-step tasks (Phase 7.3).
@@ -37,6 +39,7 @@ impl AgentState {
             workspace_root: workspace_root.into(),
             history: Vec::new(),
             step_count: 0,
+            model_turns: 0,
             max_steps,
             plan: None,
             project_snapshot: None,
@@ -44,7 +47,7 @@ impl AgentState {
     }
 
     pub fn is_exhausted(&self) -> bool {
-        self.step_count >= self.max_steps
+        self.model_turns >= self.max_steps
     }
 
     pub fn record_step(&mut self, step: Step) {

@@ -36,6 +36,10 @@ pub struct LogEntry {
     /// With run_id + step_index you can reconstruct any run in order.
     pub step_index: u32,
 
+    /// Model turn that produced this tool call (one turn may yield many steps).
+    #[serde(default)]
+    pub model_turn: u32,
+
     /// ISO 8601 timestamp — when this step completed.
     pub timestamp: String,
 
@@ -53,6 +57,7 @@ impl LogEntry {
             run_id: run_id.to_string(),
             model_id: model_id.to_string(),
             step_index: step.step_index,
+            model_turn: step.model_turn,
             timestamp: step.timestamp.clone(),
             action: step.action.clone(),
             result: step.result.clone(),
@@ -150,6 +155,7 @@ pub fn write_run_summary(
     model_id: &str,
     stop_reason: &crate::state::stop_reason::StopReason,
     total_steps: u32,
+    total_model_turns: u32,
 ) {
     let log_dir = PathBuf::from("logs");
     let log_path = log_dir.join(format!("run_{}.jsonl", run_id));
@@ -160,6 +166,7 @@ pub fn write_run_summary(
         "model_id": model_id,
         "stop_reason": stop_reason,
         "total_steps": total_steps,
+        "total_model_turns": total_model_turns,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
 
@@ -191,13 +198,13 @@ mod tests {
     use crate::state::stop_reason::StopReason;
     use crate::tools::ToolResult;
     use std::path::PathBuf;
-    use tempfile::tempdir;
 
     fn make_test_entry() -> LogEntry {
         LogEntry {
             run_id: "test-run-123".to_string(),
             model_id: "llama-3.1-70b".to_string(),
             step_index: 0,
+            model_turn: 0,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             action: Action::ReadFile {
                 path: PathBuf::from("calc.py"),
@@ -280,6 +287,7 @@ mod tests {
             "llama-3.1-70b",
             &StopReason::TaskComplete,
             5,
+            3,
         );
 
         let log_path = PathBuf::from("logs/run_test-summary-789.jsonl");
@@ -289,5 +297,6 @@ mod tests {
 
         assert_eq!(parsed["record_type"], "run_summary");
         assert_eq!(parsed["total_steps"], 5);
+        assert_eq!(parsed["total_model_turns"], 3);
     }
 }

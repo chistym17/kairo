@@ -59,6 +59,9 @@ pub enum Action {
 pub struct Step {
     pub step_index: u32,
 
+    /// Model turn that produced this tool call (one turn may yield many steps).
+    pub model_turn: u32,
+
     pub timestamp: String,
 
     pub action: Action,
@@ -72,12 +75,14 @@ pub struct Step {
 impl Step {
     pub fn new(
         step_index: u32,
+        model_turn: u32,
         action: Action,
         result: ToolResult,
         tool_call_id: impl Into<String>,
     ) -> Self {
         Self {
             step_index,
+            model_turn,
             timestamp: chrono::Utc::now().to_rfc3339(),
             action,
             tool_call_id: tool_call_id.into(),

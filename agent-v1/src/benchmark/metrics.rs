@@ -412,6 +412,7 @@ mod tests {
             run_id: "test".to_string(),
             model_id: "model".to_string(),
             step_index: 0,
+            model_turn: 0,
             timestamp: "2026-01-01T00:00:00+00:00".to_string(),
             action: Action::ApplyPatch {
                 path: PathBuf::from("test_calc.py"),

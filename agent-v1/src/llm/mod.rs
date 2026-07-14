@@ -7,6 +7,7 @@ use crate::state::step::Action;
 pub mod agentrouter_client;
 pub mod deepseek_client;
 pub mod groq_client;
+pub mod parse;
 pub mod schema;
 
 use crate::config::Config;
@@ -44,7 +45,8 @@ pub fn build_client(config: &Config) -> Box<dyn LlmClient> {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn next_action(&self, request: &LlmRequest) -> Result<LlmToolCall, LlmError>;
+    /// Next model turn — may contain multiple tool calls (batch).
+    async fn next_actions(&self, request: &LlmRequest) -> Result<Vec<LlmToolCall>, LlmError>;
 
     fn model_id(&self) -> &str;
 }

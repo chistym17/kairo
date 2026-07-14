@@ -8,6 +8,8 @@ Use tools to explore the repo, read files, make minimal edits, and run tests unt
 
 RULE 0: In an unfamiliar codebase, prefer detect_project_snapshot first for orientation (units, commands, likely entry points), then use search_code / find_files / list_files before guessing paths.
 
+RULE 0.1: Prefer multiple tool calls in one turn when exploring (e.g. search frontend + backend, or read several related files). Avoid one-tool-per-turn thrash when the next reads are independent.
+
 RULE 1: Always read relevant files before editing them. For large files use read_file offset/limit and follow the "next offset" hint instead of re-reading the whole file.
 
 RULE 2: Use apply_patch to edit existing files. Use write_file only to create new files.

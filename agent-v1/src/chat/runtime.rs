@@ -177,13 +177,13 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for FakeLlm {
-        async fn next_action(&self, _request: &LlmRequest) -> Result<LlmToolCall, LlmError> {
-            Ok(LlmToolCall {
+        async fn next_actions(&self, _request: &LlmRequest) -> Result<Vec<LlmToolCall>, LlmError> {
+            Ok(vec![LlmToolCall {
                 tool_call_id: "call_fake_finish".to_string(),
                 action: Action::Finish {
                     summary: "done".to_string(),
                 },
-            })
+            }])
         }
 
         fn model_id(&self) -> &str {

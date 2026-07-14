@@ -25,13 +25,25 @@ pub fn build_messages(
         "content": goal
     }));
 
-    for step in step_history {
-        messages.push(action_to_assistant_message(&step.action, &step.tool_call_id));
-        messages.push(tool_result_to_message(
-            &step.action,
-            &step.result,
-            &step.tool_call_id,
-        ));
+    // Group consecutive steps from the same model turn into one assistant
+    // message with multiple tool_calls, followed by one tool result each.
+    let mut i = 0;
+    while i < step_history.len() {
+        let turn = step_history[i].model_turn;
+        let mut j = i + 1;
+        while j < step_history.len() && step_history[j].model_turn == turn {
+            j += 1;
+        }
+        let group = &step_history[i..j];
+        messages.push(steps_to_assistant_message(group));
+        for step in group {
+            messages.push(tool_result_to_message(
+                &step.action,
+                &step.result,
+                &step.tool_call_id,
+            ));
+        }
+        i = j;
     }
 
     json!(messages)
@@ -58,20 +70,26 @@ fn session_message_to_api(msg: &Message) -> Value {
     }
 }
 
-fn action_to_assistant_message(action: &Action, tool_call_id: &str) -> Value {
-    let (tool_name, args) = action_to_tool_call_parts(action);
+fn steps_to_assistant_message(steps: &[Step]) -> Value {
+    let tool_calls: Vec<Value> = steps
+        .iter()
+        .map(|step| {
+            let (tool_name, args) = action_to_tool_call_parts(&step.action);
+            json!({
+                "id": step.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": serde_json::to_string(&args).unwrap_or_default()
+                }
+            })
+        })
+        .collect();
 
     json!({
         "role": "assistant",
         "content": null,
-        "tool_calls": [{
-            "id": tool_call_id,
-            "type": "function",
-            "function": {
-                "name": tool_name,
-                "arguments": serde_json::to_string(&args).unwrap_or_default()
-            }
-        }]
+        "tool_calls": tool_calls
     })
 }
 
@@ -193,5 +211,64 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
             }),
         ),
         Action::Finish { summary } => ("finish", json!({ "summary": summary })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ToolResult;
+    use std::path::PathBuf;
+
+    fn ok_result(out: &str) -> ToolResult {
+        ToolResult {
+            success: true,
+            output: out.to_string(),
+            diff: None,
+            error: None,
+            stop_reason: None,
+        }
+    }
+
+    #[test]
+    fn groups_same_model_turn_into_one_assistant_message() {
+        let s0 = Step::new(
+            0,
+            0,
+            Action::SearchCode {
+                query: "a".into(),
+                path: PathBuf::from("."),
+            },
+            ok_result("hit a"),
+            "call_a",
+        );
+        let s1 = Step::new(
+            1,
+            0,
+            Action::ReadFile {
+                path: PathBuf::from("x.rs"),
+                offset: 1,
+                limit: 50,
+            },
+            ok_result("code"),
+            "call_b",
+        );
+        let s2 = Step::new(
+            2,
+            1,
+            Action::GitStatus,
+            ok_result("clean"),
+            "call_c",
+        );
+
+        let messages = build_messages("sys", &[], "goal", &[s0, s1, s2]);
+        let arr = messages.as_array().unwrap();
+        // system, user, assistant(batch2), tool, tool, assistant(1), tool
+        assert_eq!(arr.len(), 7);
+        assert_eq!(arr[2]["role"], "assistant");
+        assert_eq!(arr[2]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(arr[3]["tool_call_id"], "call_a");
+        assert_eq!(arr[4]["tool_call_id"], "call_b");
+        assert_eq!(arr[5]["tool_calls"].as_array().unwrap().len(), 1);
     }
 }

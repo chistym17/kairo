@@ -28,10 +28,10 @@ impl FakeLlm {
 
 #[async_trait]
 impl LlmClient for FakeLlm {
-    async fn next_action(
+    async fn next_actions(
         &self,
         _request: &LlmRequest,
-    ) -> Result<LlmToolCall, LlmError> {
+    ) -> Result<Vec<LlmToolCall>, LlmError> {
         if self
             .rate_limit_once
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -47,10 +47,10 @@ impl LlmClient for FakeLlm {
         } else {
             actions.remove(0)
         };
-        Ok(LlmToolCall {
+        Ok(vec![LlmToolCall {
             tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
             action,
-        })
+        }])
     }
 
     fn model_id(&self) -> &str {

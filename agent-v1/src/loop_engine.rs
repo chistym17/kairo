@@ -54,41 +54,42 @@ pub async fn run(
         // ── 1. Check step limit before asking the LLM ──────────────────
         if state.is_exhausted() {
             println!(
-                "\n[agent] max steps ({}) reached — stopping",
-                state.max_steps
+                "\n[agent] max model turns ({}) reached — stopping ({} tool calls)",
+                state.max_steps, state.step_count
             );
             let reason = StopReason::MaxStepsExceeded;
-            write_run_summary(&state.run_id, &state.model_id, &reason, state.step_count);
+            write_run_summary(
+                &state.run_id,
+                &state.model_id,
+                &reason,
+                state.step_count,
+                state.model_turns,
+            );
             return reason;
         }
 
         println!(
-            "\n[agent] ── step {} ──────────────────────────────",
-            state.step_count
-        );
-
-        emit(
-            observer,
-            AgentEvent::StepStarted {
-                run_id: state.run_id.clone(),
-                step_index: state.step_count,
-            },
+            "\n[agent] ── model turn {} (tool calls so far: {}) ──────────",
+            state.model_turns, state.step_count
         );
 
         // ── 1.5. Throttle: wait before hitting the API ─────────────────
-        if step_delay_ms > 0 && state.step_count > 0 {
+        if step_delay_ms > 0 && state.model_turns > 0 {
             println!("[agent] waiting {}ms before next API call", step_delay_ms);
             write_event(
                 &state.run_id,
                 "step_delay",
-                &format!("waiting {}ms before step {}", step_delay_ms, state.step_count),
+                &format!(
+                    "waiting {}ms before model turn {}",
+                    step_delay_ms, state.model_turns
+                ),
                 step_delay_ms,
             );
             tokio::time::sleep(tokio::time::Duration::from_millis(step_delay_ms)).await;
         }
 
-        // ── 2. Ask the LLM what to do next ─────────────────────────────
-        let tool_call = 'next_action: loop {
+        // ── 2. Ask the LLM (one turn → zero or more tool calls) ────────
+        let tool_calls = 'next_actions: loop {
             let session_messages_snapshot: Vec<crate::session::Message> = session
                 .as_ref()
                 .map(|s| s.messages.clone())
@@ -116,11 +117,33 @@ pub async fn run(
                 write_event(&state.run_id, "context_reduction", &detail, 0);
             }
 
-            match llm.next_action(&request).await
-            {
-                Ok(tool_call) => {
-                    println!("[agent] action: {:?}", tool_call.action);
-                    break 'next_action tool_call;
+            match llm.next_actions(&request).await {
+                Ok(calls) if calls.is_empty() => {
+                    let msg = "model returned empty tool_calls".to_string();
+                    println!("[agent] {}", msg);
+                    write_event(&state.run_id, "malformed_tool_call", &msg, 0);
+                    state.model_turns += 1;
+                    emit(
+                        observer,
+                        AgentEvent::Error {
+                            run_id: state.run_id.clone(),
+                            step_index: Some(state.step_count),
+                            message: msg,
+                        },
+                    );
+                    continue;
+                }
+                Ok(calls) => {
+                    println!(
+                        "[agent] {} tool call(s): {}",
+                        calls.len(),
+                        calls
+                            .iter()
+                            .map(|c| tool_name(&c.action))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    break 'next_actions calls;
                 }
 
                 Err(LlmError::NoToolCall(text)) => {
@@ -134,7 +157,7 @@ pub async fn run(
                         &text[..text.len().min(200)],
                         0,
                     );
-                    state.step_count += 1;
+                    state.model_turns += 1;
                     emit(
                         observer,
                         AgentEvent::Error {
@@ -149,7 +172,7 @@ pub async fn run(
                 Err(LlmError::MalformedToolCall(msg)) => {
                     println!("[agent] malformed tool call: {}", msg);
                     write_event(&state.run_id, "malformed_tool_call", &msg, 0);
-                    state.step_count += 1;
+                    state.model_turns += 1;
                     emit(
                         observer,
                         AgentEvent::Error {
@@ -171,7 +194,7 @@ pub async fn run(
                         wait_ms,
                     );
                     tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
-                    continue 'next_action;
+                    continue 'next_actions;
                 }
 
                 Err(LlmError::ToolUseFailed(mut msg)) => {
@@ -189,6 +212,7 @@ pub async fn run(
                             &state.model_id,
                             &reason,
                             state.step_count,
+                            state.model_turns,
                         );
                         return reason;
                     }
@@ -247,14 +271,34 @@ pub async fn run(
                             write_event(&state.run_id, "context_reduction", &detail, 0);
                         }
 
-                        match llm.next_action(&request).await
-                        {
-                            Ok(tool_call) => {
+                        match llm.next_actions(&request).await {
+                            Ok(calls) if !calls.is_empty() => {
                                 println!(
-                                    "[agent] action (after tool_use_failed retry {}): {:?}",
-                                    attempt, tool_call.action
+                                    "[agent] {} tool call(s) after tool_use_failed retry {}",
+                                    calls.len(),
+                                    attempt
                                 );
-                                break 'next_action tool_call;
+                                break 'next_actions calls;
+                            }
+                            Ok(_) => {
+                                msg = "model returned empty tool_calls".to_string();
+                                if attempt == tool_use_max_retries {
+                                    write_event(
+                                        &state.run_id,
+                                        "tool_use_failed",
+                                        &msg,
+                                        0,
+                                    );
+                                    let reason = StopReason::ToolError;
+                                    write_run_summary(
+                                        &state.run_id,
+                                        &state.model_id,
+                                        &reason,
+                                        state.step_count,
+                                        state.model_turns,
+                                    );
+                                    return reason;
+                                }
                             }
                             Err(LlmError::ToolUseFailed(retry_msg)) => {
                                 msg = retry_msg;
@@ -275,6 +319,7 @@ pub async fn run(
                                         &state.model_id,
                                         &reason,
                                         state.step_count,
+                                        state.model_turns,
                                     );
                                     return reason;
                                 }
@@ -320,200 +365,224 @@ pub async fn run(
             }
         };
 
-        let action = tool_call.action;
-        let tool_call_id = tool_call.tool_call_id;
+        let model_turn = state.model_turns;
+        state.model_turns += 1;
 
-        // ── 3. Execute the tool ─────────────────────────────────────────
-        emit(
-            observer,
-            AgentEvent::ToolStarted {
-                run_id: state.run_id.clone(),
-                step_index: state.step_count,
-                tool: tool_name(&action).to_string(),
-            },
-        );
+        // ── 3. Execute every tool call in this turn (serial for 10.1) ───
+        let mut verified_in_batch = false;
+        for tool_call in tool_calls {
+            let action = tool_call.action;
+            let tool_call_id = tool_call.tool_call_id;
 
-        let mut result = match validate_action(&action, &state.history, require_verified_finish) {
-            Some(ValidationError { event, message }) => {
-                write_event(&state.run_id, &event, &message, 0);
-                ToolResult {
-                    success: false,
-                    output: String::new(),
-                    diff: None,
-                    error: Some(message),
-                    stop_reason: None,
-                }
-            }
-            None => match &action {
-                crate::state::step::Action::UpdatePlan { objective, steps } => {
-                    match crate::state::AgentPlan::from_update(objective, steps) {
-                        Ok(plan) => {
-                            let output = format!("Plan updated:\n{}", plan.render());
-                            state.plan = Some(plan);
-                            ToolResult {
-                                success: true,
-                                output,
-                                diff: None,
-                                error: None,
-                                stop_reason: None,
-                            }
-                        }
-                        Err(message) => {
-                            write_event(&state.run_id, "invalid_tool_args", &message, 0);
-                            ToolResult {
-                                success: false,
-                                output: String::new(),
-                                diff: None,
-                                error: Some(message),
-                                stop_reason: None,
-                            }
-                        }
-                    }
-                }
-                crate::state::step::Action::DetectProjectSnapshot { path } => {
-                    let result =
-                        tools::project_snapshot::execute(path, &state.workspace_root);
-                    if result.success {
-                        // Always cache full-workspace snapshot for context injection.
-                        state.project_snapshot = Some(tools::project_snapshot::detect(
-                            &state.workspace_root,
-                        ));
-                    }
-                    result
-                }
-                crate::state::step::Action::Finish { summary } => {
-                    let verified = finish_allowed(&state.history);
-                    let stop_reason = if verified {
-                        StopReason::TaskComplete
-                    } else {
-                        StopReason::CompletedUnverified
-                    };
-                    ToolResult {
-                        success: true,
-                        output: summary.clone(),
-                        diff: None,
-                        error: None,
-                        stop_reason: Some(stop_reason),
-                    }
-                }
-                _ => tools::dispatch(&action, &state.workspace_root),
-            },
-        };
-
-        if result.success {
-            if let Some(path) = mutating_path(&action) {
-                if let Some(err) = post_edit_sanity_check(&state.workspace_root, &path) {
-                    write_event(&state.run_id, "post_edit_sanity_failed", &err, 0);
-                    result.success = false;
-                    result.error = Some(err);
-                }
-            }
-        }
-
-        emit(
-            observer,
-            AgentEvent::ToolCompleted {
-                run_id: state.run_id.clone(),
-                step_index: state.step_count,
-                tool: tool_name(&action).to_string(),
-                success: result.success,
-            },
-        );
-
-        if result.success {
-            if let Some(path) = mutating_path(&action) {
-                emit(
-                    observer,
-                    AgentEvent::FileModified {
-                        run_id: state.run_id.clone(),
-                        step_index: state.step_count,
-                        path,
-                    },
-                );
-            }
-        } else {
             emit(
                 observer,
-                AgentEvent::Error {
-                    run_id: state.run_id.clone(),
-                    step_index: Some(state.step_count),
-                    message: result
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "tool failed".to_string()),
-                },
-            );
-        }
-
-        if let crate::state::step::Action::RunCommand { cmd, .. }
-        | crate::state::step::Action::RunShell {
-            command: cmd,
-            ..
-        } = &action
-        {
-            emit(
-                observer,
-                AgentEvent::CommandCompleted {
+                AgentEvent::StepStarted {
                     run_id: state.run_id.clone(),
                     step_index: state.step_count,
-                    cmd: cmd.clone(),
+                },
+            );
+
+            emit(
+                observer,
+                AgentEvent::ToolStarted {
+                    run_id: state.run_id.clone(),
+                    step_index: state.step_count,
+                    tool: tool_name(&action).to_string(),
+                },
+            );
+
+            let verified_for_finish =
+                finish_allowed(&state.history) || verified_in_batch;
+
+            let mut result = match validate_action(
+                &action,
+                require_verified_finish,
+                verified_for_finish,
+            ) {
+                Some(ValidationError { event, message }) => {
+                    write_event(&state.run_id, &event, &message, 0);
+                    ToolResult {
+                        success: false,
+                        output: String::new(),
+                        diff: None,
+                        error: Some(message),
+                        stop_reason: None,
+                    }
+                }
+                None => match &action {
+                    crate::state::step::Action::UpdatePlan { objective, steps } => {
+                        match crate::state::AgentPlan::from_update(objective, steps) {
+                            Ok(plan) => {
+                                let output = format!("Plan updated:\n{}", plan.render());
+                                state.plan = Some(plan);
+                                ToolResult {
+                                    success: true,
+                                    output,
+                                    diff: None,
+                                    error: None,
+                                    stop_reason: None,
+                                }
+                            }
+                            Err(message) => {
+                                write_event(&state.run_id, "invalid_tool_args", &message, 0);
+                                ToolResult {
+                                    success: false,
+                                    output: String::new(),
+                                    diff: None,
+                                    error: Some(message),
+                                    stop_reason: None,
+                                }
+                            }
+                        }
+                    }
+                    crate::state::step::Action::DetectProjectSnapshot { path } => {
+                        let result =
+                            tools::project_snapshot::execute(path, &state.workspace_root);
+                        if result.success {
+                            state.project_snapshot = Some(tools::project_snapshot::detect(
+                                &state.workspace_root,
+                            ));
+                        }
+                        result
+                    }
+                    crate::state::step::Action::Finish { summary } => {
+                        let verified = verified_for_finish;
+                        let stop_reason = if verified {
+                            StopReason::TaskComplete
+                        } else {
+                            StopReason::CompletedUnverified
+                        };
+                        ToolResult {
+                            success: true,
+                            output: summary.clone(),
+                            diff: None,
+                            error: None,
+                            stop_reason: Some(stop_reason),
+                        }
+                    }
+                    _ => tools::dispatch(&action, &state.workspace_root),
+                },
+            };
+
+            if result.success {
+                if let Some(path) = mutating_path(&action) {
+                    if let Some(err) = post_edit_sanity_check(&state.workspace_root, &path) {
+                        write_event(&state.run_id, "post_edit_sanity_failed", &err, 0);
+                        result.success = false;
+                        result.error = Some(err);
+                    }
+                }
+            }
+
+            if result.success
+                && matches!(
+                    action,
+                    crate::state::step::Action::RunCommand { .. }
+                        | crate::state::step::Action::RunShell { .. }
+                )
+            {
+                verified_in_batch = true;
+            }
+
+            emit(
+                observer,
+                AgentEvent::ToolCompleted {
+                    run_id: state.run_id.clone(),
+                    step_index: state.step_count,
+                    tool: tool_name(&action).to_string(),
                     success: result.success,
                 },
             );
-        }
 
-        println!(
-            "[agent] result: success={} output_len={}{}",
-            result.success,
-            result.output.len(),
-            result
-                .error
-                .as_ref()
-                .map(|e| format!(" error={}", e))
-                .unwrap_or_default()
-        );
+            if result.success {
+                if let Some(path) = mutating_path(&action) {
+                    emit(
+                        observer,
+                        AgentEvent::FileModified {
+                            run_id: state.run_id.clone(),
+                            step_index: state.step_count,
+                            path,
+                        },
+                    );
+                }
+            } else {
+                emit(
+                    observer,
+                    AgentEvent::Error {
+                        run_id: state.run_id.clone(),
+                        step_index: Some(state.step_count),
+                        message: result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "tool failed".to_string()),
+                    },
+                );
+            }
 
-        // If there's a diff, show a preview in the terminal
-        if let Some(diff) = &result.diff {
-            if !diff.is_empty() {
-                let preview: String = diff.lines().take(10).collect::<Vec<_>>().join("\n");
-                println!("[agent] diff preview:\n{}", preview);
-                if diff.lines().count() > 10 {
-                    println!("[agent] ... ({} total diff lines)", diff.lines().count());
+            if let crate::state::step::Action::RunCommand { cmd, .. }
+            | crate::state::step::Action::RunShell {
+                command: cmd,
+                ..
+            } = &action
+            {
+                emit(
+                    observer,
+                    AgentEvent::CommandCompleted {
+                        run_id: state.run_id.clone(),
+                        step_index: state.step_count,
+                        cmd: cmd.clone(),
+                        success: result.success,
+                    },
+                );
+            }
+
+            println!(
+                "[agent] result: success={} output_len={}{}",
+                result.success,
+                result.output.len(),
+                result
+                    .error
+                    .as_ref()
+                    .map(|e| format!(" error={}", e))
+                    .unwrap_or_default()
+            );
+
+            if let Some(diff) = &result.diff {
+                if !diff.is_empty() {
+                    let preview: String = diff.lines().take(10).collect::<Vec<_>>().join("\n");
+                    println!("[agent] diff preview:\n{}", preview);
+                    if diff.lines().count() > 10 {
+                        println!("[agent] ... ({} total diff lines)", diff.lines().count());
+                    }
                 }
             }
-        }
 
-        // ── 4. Check if this action should stop the loop ────────────────
-        // Capture stop reason before consuming result into Step
-        let stop_reason = result.stop_reason.clone();
+            let stop_reason = result.stop_reason.clone();
+            let step = Step::new(state.step_count, model_turn, action, result, tool_call_id);
+            let entry = LogEntry::from_step(&state.run_id, &state.model_id, &step);
+            write_entry(&entry);
+            state.record_step(step);
 
-        // ── 5. Build the step record ────────────────────────────────────
-        let step = Step::new(state.step_count, action, result, tool_call_id);
+            emit(
+                observer,
+                AgentEvent::StepCompleted {
+                    run_id: state.run_id.clone(),
+                    step_index: state.step_count - 1,
+                    stop_reason: stop_reason.as_ref().map(|r| format!("{:?}", r)),
+                },
+            );
 
-        // ── 6. Write to log immediately — before updating state ─────────
-        // If we crash between here and record_step(), we lose the in-memory
-        // history entry but keep the log entry. Acceptable tradeoff.
-        let entry = LogEntry::from_step(&state.run_id, &state.model_id, &step);
-        write_entry(&entry);
-
-        // ── 7. Push to history so LLM sees it next turn ─────────────────
-        state.record_step(step);
-
-        emit(
-            observer,
-            AgentEvent::StepCompleted {
-                run_id: state.run_id.clone(),
-                step_index: state.step_count - 1,
-                stop_reason: stop_reason.as_ref().map(|r| format!("{:?}", r)),
-            },
-        );
-
-        // ── 8. Stop if the action signalled termination ─────────────────
-        if let Some(reason) = stop_reason {
-            println!("\n[agent] stopping: {:?}", reason);
-            write_run_summary(&state.run_id, &state.model_id, &reason, state.step_count);
-            return reason;
+            if let Some(reason) = stop_reason {
+                println!("\n[agent] stopping: {:?}", reason);
+                write_run_summary(
+                    &state.run_id,
+                    &state.model_id,
+                    &reason,
+                    state.step_count,
+                    state.model_turns,
+                );
+                return reason;
+            }
         }
     }
 }
@@ -583,8 +652,8 @@ struct ValidationError {
 
 fn validate_action(
     action: &crate::state::step::Action,
-    history: &[Step],
     require_verified_finish: bool,
+    verified_for_finish: bool,
 ) -> Option<ValidationError> {
     use crate::state::step::Action;
 
@@ -650,7 +719,7 @@ fn validate_action(
             None
         }
         Action::Finish { .. } => {
-            if require_verified_finish && !finish_allowed(history) {
+            if require_verified_finish && !verified_for_finish {
                 Some(ValidationError {
                     event: "finish_blocked".to_string(),
                     message: "finish blocked: run tests successfully before calling finish"
@@ -823,6 +892,7 @@ fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
         &state.model_id,
         &reason,
         state.step_count,
+        state.model_turns,
     );
     reason
 }

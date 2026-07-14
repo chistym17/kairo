@@ -150,6 +150,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let step = Step::new(
             0,
+            0,
             Action::ReadFile {
                 path: "calc.py".into(),
                 offset: 1,
@@ -180,6 +181,7 @@ mod tests {
         let big = (0..500).map(|i| format!("line {i}\n")).collect::<String>();
 
         let step = Step::new(
+            0,
             0,
             Action::RunCommand {
                 cmd: "pytest".to_string(),

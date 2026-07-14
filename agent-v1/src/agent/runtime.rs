@@ -202,10 +202,10 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for FakeLlm {
-        async fn next_action(
+        async fn next_actions(
             &self,
             _request: &LlmRequest,
-        ) -> std::result::Result<LlmToolCall, LlmError> {
+        ) -> std::result::Result<Vec<LlmToolCall>, LlmError> {
             let mut actions = self.actions.lock().unwrap();
             let action = if actions.is_empty() {
                 Action::Finish {
@@ -214,10 +214,10 @@ mod tests {
             } else {
                 actions.remove(0)
             };
-            Ok(LlmToolCall {
+            Ok(vec![LlmToolCall {
                 tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
                 action,
-            })
+            }])
         }
 
         fn model_id(&self) -> &str {
