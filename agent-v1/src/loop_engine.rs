@@ -627,11 +627,11 @@ fn validate_run_command(cmd: &str) -> Option<ValidationError> {
         });
     }
 
-    let banned = ["&&", "||", "|", ">", "<", ";"];
+    let banned = ["&&", "||", "|", ">", "<"];
     if banned.iter().any(|b| trimmed.contains(b)) {
         return Some(ValidationError {
             event: "invalid_tool_args".to_string(),
-            message: "run_command cmd must not contain shell operators (&&, ||, |, >, <, ;)".to_string(),
+            message: "run_command cmd must not contain shell operators (&&, ||, |, >, <)".to_string(),
         });
     }
 

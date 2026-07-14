@@ -26,13 +26,15 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    /// Failed tool outcome that the model can observe and recover from.
+    /// Does **not** stop the agent loop (Pi-like: ordinary failures are observations).
     pub fn error(msg: impl Into<String>) -> Self {
         Self {
             success: false,
             output: String::new(),
             diff: None,
             error: Some(msg.into()),
-            stop_reason: Some(StopReason::ToolError),
+            stop_reason: None,
         }
     }
 }

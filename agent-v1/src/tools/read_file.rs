@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use crate::tools::{truncate_output, ToolResult};
+use crate::tools::ToolResult;
+
+/// Allow full medium source files; still cap huge dumps.
+const READ_FILE_MAX_CHARS: usize = 50_000;
 
 pub fn execute(path: &Path, workspace_root: &Path) -> ToolResult {
     let full_path = workspace_root.join(path);
@@ -40,13 +43,24 @@ pub fn execute(path: &Path, workspace_root: &Path) -> ToolResult {
     }
 
     match std::fs::read_to_string(&canonical_path) {
-        Ok(contents) => ToolResult {
-            success: true,
-            output: truncate_output(&contents),
-            diff: None,
-            error: None,
-            stop_reason: None,
-        },
+        Ok(contents) => {
+            let output = if contents.len() <= READ_FILE_MAX_CHARS {
+                contents
+            } else {
+                format!(
+                    "{}\n...[truncated — {} total chars]",
+                    &contents[..READ_FILE_MAX_CHARS],
+                    contents.len()
+                )
+            };
+            ToolResult {
+                success: true,
+                output,
+                diff: None,
+                error: None,
+                stop_reason: None,
+            }
+        }
         Err(e) => ToolResult::error(format!("failed to read {}: {}", path.display(), e)),
     }
 }
