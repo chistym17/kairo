@@ -3,6 +3,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::state::efficiency::RunEfficiency;
+use crate::state::exploration::ExplorationTracker;
 use crate::state::plan::AgentPlan;
 use crate::state::step::Step;
 use crate::tools::project_snapshot::ProjectSnapshot;
@@ -34,6 +35,9 @@ pub struct AgentState {
     /// Dedup / hard-cap for identical run_shell / run_command since last edit.
     pub shell_cache: ShellCommandCache,
 
+    /// Serial exploration + soft no-edit budget tracking.
+    pub exploration: ExplorationTracker,
+
     /// Wall-clock start of this run (for duration / time-to-* metrics).
     pub run_started: Instant,
     /// Count of parallel read-only groups (size ≥ 2) executed.
@@ -62,6 +66,7 @@ impl AgentState {
             project_snapshot: None,
             read_cache: ReadCache::new(),
             shell_cache: ShellCommandCache::new(),
+            exploration: ExplorationTracker::new(),
             run_started: Instant::now(),
             parallel_tool_groups: 0,
             ms_to_first_edit: None,
@@ -88,6 +93,10 @@ impl AgentState {
             time_to_first_edit_ms: self.ms_to_first_edit,
             time_to_first_verification_ms: self.ms_to_first_verification,
             duration_ms: self.run_started.elapsed().as_millis() as u64,
+            exploration_turns: self.exploration.exploration_turns,
+            readonly_tools_in_exploration: self.exploration.readonly_tools_in_exploration,
+            serial_batch_nudges: self.exploration.serial_batch_nudges,
+            no_edit_nudges: self.exploration.no_edit_nudges,
         }
     }
 
@@ -97,6 +106,7 @@ impl AgentState {
         }
         // Verifies after an edit are meaningful again.
         self.shell_cache.clear();
+        self.exploration.note_edit();
     }
 
     pub fn note_verification(&mut self) {

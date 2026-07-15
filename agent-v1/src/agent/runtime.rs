@@ -192,6 +192,7 @@ mod tests {
 
     use crate::context::LlmRequest;
     use crate::llm::{LlmClient, LlmError, LlmToolCall};
+    use crate::tools::shell_cache;
 
     struct FakeLlm {
         batches: std::sync::Mutex<Vec<Vec<Action>>>,
@@ -539,6 +540,53 @@ mod tests {
             !log.contains("shell_cache_hit") && !log.contains("shell_repeat_blocked"),
             "re-run after edit must execute live, got hits/blocks in log"
         );
+    }
+
+    #[tokio::test]
+    async fn explore_shell_budget_blocks_git_thrash_after_edit() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        std::fs::write(workspace.join("a.txt"), "v1\n").unwrap();
+
+        let mut batches = vec![vec![Action::WriteFile {
+            path: PathBuf::from("a.txt"),
+            content: "v2\n".to_string(),
+        }]];
+        // One over the explore budget with distinct git pathspecs.
+        for i in 0..(shell_cache::MAX_EXPLORE_SHELLS_SINCE_EDIT + 2) {
+            batches.push(vec![Action::RunShell {
+                command: format!("git log --oneline -1 -- path{i}.ts"),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }]);
+        }
+        batches.push(vec![Action::Finish {
+            summary: "done".to_string(),
+        }]);
+
+        let llm = FakeLlm::batches(batches);
+        let runtime = AgentRuntime::new(
+            Box::new(llm),
+            "fake",
+            40,
+            0,
+            0,
+            0,
+            "system",
+            16000,
+            2048,
+            20,
+        );
+
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        assert!(result.success);
+        let log = std::fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            log.contains("shell_explore_budget_blocked"),
+            "expected explore budget block after {} git shells",
+            shell_cache::MAX_EXPLORE_SHELLS_SINCE_EDIT
+        );
+        assert!(log.contains("explore-shell budget"));
     }
 }
 

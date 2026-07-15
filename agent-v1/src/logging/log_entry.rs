@@ -170,8 +170,16 @@ pub fn write_run_summary(
         "cache_hits": efficiency.cache_hits,
         "cache_misses": efficiency.cache_misses,
         "duration_ms": efficiency.duration_ms,
+        "exploration_turns": efficiency.exploration_turns,
+        "readonly_tools_in_exploration": efficiency.readonly_tools_in_exploration,
+        "serial_batch_nudges": efficiency.serial_batch_nudges,
+        "no_edit_nudges": efficiency.no_edit_nudges,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
+    if let Some(avg) = efficiency.avg_readonly_per_exploration_turn() {
+        summary["avg_readonly_per_exploration_turn"] =
+            serde_json::json!((avg * 100.0).round() / 100.0);
+    }
     if let Some(ms) = efficiency.time_to_first_edit_ms {
         summary["time_to_first_edit_ms"] = serde_json::json!(ms);
     }
@@ -304,6 +312,10 @@ mod tests {
                 time_to_first_edit_ms: Some(100),
                 time_to_first_verification_ms: Some(200),
                 duration_ms: 500,
+                exploration_turns: 2,
+                readonly_tools_in_exploration: 5,
+                serial_batch_nudges: 1,
+                no_edit_nudges: 0,
             },
         );
 
@@ -319,5 +331,7 @@ mod tests {
         assert_eq!(parsed["cache_hits"], 2);
         assert_eq!(parsed["duration_ms"], 500);
         assert_eq!(parsed["time_to_first_edit_ms"], 100);
+        assert_eq!(parsed["serial_batch_nudges"], 1);
+        assert_eq!(parsed["avg_readonly_per_exploration_turn"], 2.5);
     }
 }

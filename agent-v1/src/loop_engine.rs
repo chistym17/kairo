@@ -140,6 +140,8 @@ pub async fn run(
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
+                    let actions: Vec<_> = calls.iter().map(|c| c.action.clone()).collect();
+                    state.exploration.observe_turn(&actions);
                     break 'next_actions calls;
                 }
 
@@ -155,6 +157,9 @@ pub async fn run(
                         0,
                     );
                     state.model_turns += 1;
+                    state.exploration.model_turns_since_edit =
+                        state.exploration.model_turns_since_edit.saturating_add(1);
+                    state.exploration.consecutive_single_readonly_turns = 0;
                     emit(
                         observer,
                         AgentEvent::Error {
@@ -269,6 +274,9 @@ pub async fn run(
                                     calls.len(),
                                     attempt
                                 );
+                                let actions: Vec<_> =
+                                    calls.iter().map(|c| c.action.clone()).collect();
+                                state.exploration.observe_turn(&actions);
                                 break 'next_actions calls;
                             }
                             Ok(_) => {
@@ -768,6 +776,16 @@ fn run_shell_deduped(
     cwd: &std::path::Path,
     timeout_secs: u64,
 ) -> ToolResult {
+    if let Some(blocked) = state.shell_cache.before_explore_budget(command) {
+        write_event(
+            &state.run_id,
+            "shell_explore_budget_blocked",
+            &format!("run_shell cwd={} cmd={}", cwd.display(), command),
+            0,
+        );
+        return blocked;
+    }
+
     if let Some(cached) = state
         .shell_cache
         .before_execute("run_shell", command, cwd)
@@ -794,6 +812,7 @@ fn run_shell_deduped(
         },
         &state.workspace_root,
     );
+    state.shell_cache.note_explore_executed(command);
     state.shell_cache.store_live(
         "run_shell",
         command,
@@ -810,6 +829,16 @@ fn run_command_deduped(
     cwd: &std::path::Path,
     timeout_secs: u64,
 ) -> ToolResult {
+    if let Some(blocked) = state.shell_cache.before_explore_budget(cmd) {
+        write_event(
+            &state.run_id,
+            "shell_explore_budget_blocked",
+            &format!("run_command cwd={} cmd={}", cwd.display(), cmd),
+            0,
+        );
+        return blocked;
+    }
+
     if let Some(cached) = state
         .shell_cache
         .before_execute("run_command", cmd, cwd)
@@ -836,6 +865,7 @@ fn run_command_deduped(
         },
         &state.workspace_root,
     );
+    state.shell_cache.note_explore_executed(cmd);
     state.shell_cache.store_live(
         "run_command",
         cmd,
@@ -1041,7 +1071,7 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
     }
 }
 
-fn goal_with_plan(state: &AgentState) -> String {
+fn goal_with_plan(state: &mut AgentState) -> String {
     let mut out = state.goal.clone();
     if let Some(snap) = &state.project_snapshot {
         out.push_str("\n\n## Project snapshot\n");
@@ -1050,6 +1080,20 @@ fn goal_with_plan(state: &AgentState) -> String {
     if let Some(plan) = &state.plan {
         out.push_str("\n\n## Current plan\n");
         out.push_str(&plan.render());
+    }
+    if let Some(nudge) = state.exploration.nudge_for_injection() {
+        let event = if nudge.contains("exploring inefficiently")
+            && nudge.contains("No file edit")
+        {
+            "exploration_nudge"
+        } else if nudge.contains("exploring inefficiently") {
+            "exploration_batch_nudge"
+        } else {
+            "no_edit_budget_nudge"
+        };
+        write_event(&state.run_id, event, &nudge[..nudge.len().min(400)], 0);
+        out.push_str("\n\n## Runtime guidance\n");
+        out.push_str(&nudge);
     }
     out
 }
