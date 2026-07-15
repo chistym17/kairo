@@ -46,6 +46,20 @@ impl FailureCategory {
 pub struct RunSummary {
     pub stop_reason: StopReason,
     pub total_steps: u32,
+    #[serde(default)]
+    pub total_model_turns: u32,
+    #[serde(default)]
+    pub parallel_tool_groups: u32,
+    #[serde(default)]
+    pub cache_hits: u32,
+    #[serde(default)]
+    pub cache_misses: u32,
+    #[serde(default)]
+    pub time_to_first_edit_ms: Option<u64>,
+    #[serde(default)]
+    pub time_to_first_verification_ms: Option<u64>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     pub model_id: String,
     pub timestamp: String,
 }
@@ -68,6 +82,12 @@ pub struct TrialResult {
     pub model_id: String,
     pub stop_reason: StopReason,
     pub total_steps: u32,
+    pub total_model_turns: u32,
+    pub parallel_tool_groups: u32,
+    pub cache_hits: u32,
+    pub cache_misses: u32,
+    pub time_to_first_edit_ms: Option<u64>,
+    pub time_to_first_verification_ms: Option<u64>,
     pub oracle_passed: bool,
     pub benchmark_passed: bool,
     pub failure_category: Option<FailureCategory>,
@@ -107,6 +127,13 @@ pub fn parse_run_log(path: &Path) -> Result<ParsedRunLog> {
                 total_steps: value["total_steps"]
                     .as_u64()
                     .context("run_summary missing total_steps")? as u32,
+                total_model_turns: value["total_model_turns"].as_u64().unwrap_or(0) as u32,
+                parallel_tool_groups: value["parallel_tool_groups"].as_u64().unwrap_or(0) as u32,
+                cache_hits: value["cache_hits"].as_u64().unwrap_or(0) as u32,
+                cache_misses: value["cache_misses"].as_u64().unwrap_or(0) as u32,
+                time_to_first_edit_ms: value["time_to_first_edit_ms"].as_u64(),
+                time_to_first_verification_ms: value["time_to_first_verification_ms"].as_u64(),
+                duration_ms: value["duration_ms"].as_u64(),
                 model_id: value["model_id"]
                     .as_str()
                     .context("run_summary missing model_id")?
@@ -172,6 +199,13 @@ pub fn build_trial_result(
     let summary = parsed.summary.clone().unwrap_or(RunSummary {
         stop_reason: StopReason::ToolError,
         total_steps: 0,
+        total_model_turns: 0,
+        parallel_tool_groups: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+        time_to_first_edit_ms: None,
+        time_to_first_verification_ms: None,
+        duration_ms: None,
         model_id: "unknown".to_string(),
         timestamp: String::new(),
     });
@@ -204,10 +238,19 @@ pub fn build_trial_result(
         model_id: summary.model_id.clone(),
         stop_reason: summary.stop_reason.clone(),
         total_steps: summary.total_steps,
+        total_model_turns: summary.total_model_turns,
+        parallel_tool_groups: summary.parallel_tool_groups,
+        cache_hits: summary.cache_hits,
+        cache_misses: summary.cache_misses,
+        time_to_first_edit_ms: summary.time_to_first_edit_ms,
+        time_to_first_verification_ms: summary.time_to_first_verification_ms,
         oracle_passed,
         benchmark_passed,
         failure_category,
-        duration_secs: duration_between(&parsed.first_timestamp, &parsed.last_timestamp),
+        duration_secs: summary
+            .duration_ms
+            .map(|ms| ms as f64 / 1000.0)
+            .or_else(|| duration_between(&parsed.first_timestamp, &parsed.last_timestamp)),
         edited_test_file: parsed.edited_test_file,
         diff_preview,
     }

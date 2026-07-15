@@ -61,13 +61,7 @@ pub async fn run(
                 state.max_steps, state.step_count
             );
             let reason = StopReason::MaxStepsExceeded;
-            write_run_summary(
-                &state.run_id,
-                &state.model_id,
-                &reason,
-                state.step_count,
-                state.model_turns,
-            );
+            write_summary(state, &reason);
             return reason;
         }
 
@@ -210,13 +204,7 @@ pub async fn run(
                             0,
                         );
                         let reason = StopReason::ToolError;
-                        write_run_summary(
-                            &state.run_id,
-                            &state.model_id,
-                            &reason,
-                            state.step_count,
-                            state.model_turns,
-                        );
+                        write_summary(state, &reason);
                         return reason;
                     }
 
@@ -293,13 +281,7 @@ pub async fn run(
                                         0,
                                     );
                                     let reason = StopReason::ToolError;
-                                    write_run_summary(
-                                        &state.run_id,
-                                        &state.model_id,
-                                        &reason,
-                                        state.step_count,
-                                        state.model_turns,
-                                    );
+                                    write_summary(state, &reason);
                                     return reason;
                                 }
                             }
@@ -317,13 +299,7 @@ pub async fn run(
                                         0,
                                     );
                                     let reason = StopReason::ToolError;
-                                    write_run_summary(
-                                        &state.run_id,
-                                        &state.model_id,
-                                        &reason,
-                                        state.step_count,
-                                        state.model_turns,
-                                    );
+                                    write_summary(state, &reason);
                                     return reason;
                                 }
                             }
@@ -515,6 +491,7 @@ async fn execute_readonly_group(
         .await;
     }
 
+    state.parallel_tool_groups += 1;
     println!(
         "[agent] parallel read-only group ({} tools): {}",
         group.len(),
@@ -770,9 +747,103 @@ fn produce_tool_result(
                 offset,
                 limit,
             } => read_file_cached(state, path, *offset, *limit),
+            Action::RunShell {
+                command,
+                cwd,
+                timeout_secs,
+            } => run_shell_deduped(state, command, cwd, *timeout_secs),
+            Action::RunCommand {
+                cmd,
+                cwd,
+                timeout_secs,
+            } => run_command_deduped(state, cmd, cwd, *timeout_secs),
             _ => tools::dispatch(action, &state.workspace_root),
         },
     }
+}
+
+fn run_shell_deduped(
+    state: &mut AgentState,
+    command: &str,
+    cwd: &std::path::Path,
+    timeout_secs: u64,
+) -> ToolResult {
+    if let Some(cached) = state
+        .shell_cache
+        .before_execute("run_shell", command, cwd)
+    {
+        let event = if cached.success {
+            "shell_cache_hit"
+        } else {
+            "shell_repeat_blocked"
+        };
+        write_event(
+            &state.run_id,
+            event,
+            &format!("run_shell cwd={} cmd={}", cwd.display(), command),
+            0,
+        );
+        return cached;
+    }
+
+    let result = tools::run_shell::execute(
+        tools::run_shell::RunShellOpts {
+            command,
+            cwd,
+            timeout_secs,
+        },
+        &state.workspace_root,
+    );
+    state.shell_cache.store_live(
+        "run_shell",
+        command,
+        cwd,
+        state.step_count,
+        &result,
+    );
+    result
+}
+
+fn run_command_deduped(
+    state: &mut AgentState,
+    cmd: &str,
+    cwd: &std::path::Path,
+    timeout_secs: u64,
+) -> ToolResult {
+    if let Some(cached) = state
+        .shell_cache
+        .before_execute("run_command", cmd, cwd)
+    {
+        let event = if cached.success {
+            "shell_cache_hit"
+        } else {
+            "shell_repeat_blocked"
+        };
+        write_event(
+            &state.run_id,
+            event,
+            &format!("run_command cwd={} cmd={}", cwd.display(), cmd),
+            0,
+        );
+        return cached;
+    }
+
+    let result = tools::run_command::execute(
+        tools::run_command::RunCommandOpts {
+            cmd,
+            cwd,
+            timeout_secs,
+        },
+        &state.workspace_root,
+    );
+    state.shell_cache.store_live(
+        "run_command",
+        cmd,
+        cwd,
+        state.step_count,
+        &result,
+    );
+    result
 }
 
 fn read_file_cached(
@@ -838,6 +909,7 @@ fn commit_tool_outcome(
 
     if result.success {
         if let Some(path) = mutating_path(&action) {
+            state.note_edit();
             state.read_cache.invalidate_path(std::path::Path::new(&path));
             write_event(
                 &state.run_id,
@@ -853,6 +925,12 @@ fn commit_tool_outcome(
                     path,
                 },
             );
+        }
+        if matches!(
+            action,
+            Action::RunCommand { .. } | Action::RunShell { .. }
+        ) {
+            state.note_verification();
         }
     } else {
         emit(
@@ -922,17 +1000,20 @@ fn commit_tool_outcome(
 
     if let Some(reason) = stop_reason {
         println!("\n[agent] stopping: {:?}", reason);
-        write_run_summary(
-            &state.run_id,
-            &state.model_id,
-            &reason,
-            state.step_count,
-            state.model_turns,
-        );
+        write_summary(state, &reason);
         Some(reason)
     } else {
         None
     }
+}
+
+fn write_summary(state: &AgentState, reason: &StopReason) {
+    write_run_summary(
+        &state.run_id,
+        &state.model_id,
+        reason,
+        &state.efficiency_snapshot(),
+    );
 }
 
 fn emit(observer: Option<&dyn AgentObserver>, event: AgentEvent) {
@@ -1235,13 +1316,7 @@ fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
     }
 
     let reason = StopReason::ToolError;
-    write_run_summary(
-        &state.run_id,
-        &state.model_id,
-        &reason,
-        state.step_count,
-        state.model_turns,
-    );
+    write_summary(state, &reason);
     reason
 }
 

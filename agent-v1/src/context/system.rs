@@ -29,6 +29,8 @@ RULE 3: After changes, verify with run_command (simple allowlisted cmds) or run_
 
 RULE 3.1: For multi-step goals, call update_plan early with an objective and checklist, then refresh it (mark [x]) as you progress. The current plan is re-injected into context each step.
 
+RULE 3.2: Never re-run the exact same run_shell / run_command after an unchanged workspace. If a check already succeeded, call finish. If it failed, edit code or run a different check — identical retries are blocked by the runtime.
+
 RULE 4: Prefer verifying before finish (git_diff + a successful test/check run). If you cannot verify (missing deps, env, etc.), still call finish with an honest summary of what changed and what remains unverified."#
         .to_string()
 }

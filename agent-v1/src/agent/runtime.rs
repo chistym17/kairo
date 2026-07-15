@@ -17,10 +17,12 @@ pub struct RunResult {
     pub run_id: String,
     pub stop_reason: StopReason,
     pub total_steps: u32,
+    pub total_model_turns: u32,
     pub success: bool,
     pub summary: Option<String>,
     pub changed_files: Vec<String>,
     pub log_path: PathBuf,
+    pub efficiency: crate::state::RunEfficiency,
 }
 
 pub struct AgentRuntime {
@@ -129,11 +131,13 @@ impl AgentRuntime {
         let changed_files = collect_changed_files(&state);
         let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", state.run_id));
         let summary = finish_summary(&state);
+        let efficiency = state.efficiency_snapshot();
 
         let result = RunResult {
             run_id: state.run_id,
             stop_reason: stop_reason.clone(),
-            total_steps: state.step_count,
+            total_steps: efficiency.total_steps,
+            total_model_turns: efficiency.total_model_turns,
             success: matches!(
                 stop_reason,
                 StopReason::TaskComplete | StopReason::CompletedUnverified
@@ -141,6 +145,7 @@ impl AgentRuntime {
             summary,
             changed_files,
             log_path,
+            efficiency,
         };
 
         if let Some(obs) = observer {
@@ -318,12 +323,15 @@ mod tests {
         let result = runtime.run("goal", &workspace, None, None).await.unwrap();
         assert!(result.success);
         assert_eq!(result.total_steps, 4); // 3 parallel reads + finish
+        assert_eq!(result.efficiency.parallel_tool_groups, 1);
+        assert_eq!(result.total_model_turns, 2);
 
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(
             log.contains("parallel_tool_group"),
             "expected parallel_tool_group event in log"
         );
+        assert!(log.contains("\"parallel_tool_groups\":1") || log.contains("\"parallel_tool_groups\": 1"));
     }
 
     #[tokio::test]
@@ -364,9 +372,11 @@ mod tests {
         let result = runtime.run("goal", &workspace, None, None).await.unwrap();
         assert!(result.success);
         let log = std::fs::read_to_string(&result.log_path).unwrap();
-        assert!(log.contains("cache_miss"), "first read should miss");
-        assert!(log.contains("cache_hit"), "second identical read should hit");
+        assert!(log.contains("\"event\":\"cache_miss\"") || log.contains("\"event\": \"cache_miss\""));
+        assert!(log.contains("\"event\":\"cache_hit\"") || log.contains("\"event\": \"cache_hit\""));
         assert!(log.contains("[cached — same unchanged range as step"));
+        assert_eq!(result.efficiency.cache_hits, 1);
+        assert!(result.efficiency.cache_misses >= 1);
     }
 
     #[tokio::test]
@@ -412,8 +422,10 @@ mod tests {
         assert!(result.success);
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("cache_invalidate"));
-        let miss_count = log.matches("cache_miss").count();
-        let hit_count = log.matches("cache_hit").count();
+        let miss_count = log.matches("\"event\":\"cache_miss\"").count()
+            + log.matches("\"event\": \"cache_miss\"").count();
+        let hit_count = log.matches("\"event\":\"cache_hit\"").count()
+            + log.matches("\"event\": \"cache_hit\"").count();
         assert!(
             miss_count >= 2,
             "expected miss before and after write, got {miss_count}"
@@ -422,6 +434,110 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
             "v2\n"
+        );
+        assert!(result.efficiency.time_to_first_edit_ms.is_some());
+        assert_eq!(result.efficiency.cache_hits, 0);
+    }
+
+    #[tokio::test]
+    async fn identical_shell_is_cached_then_blocked() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+
+        let llm = FakeLlm::batches(vec![
+            vec![Action::RunShell {
+                command: "echo hello-shell-dedup".to_string(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }],
+            vec![Action::RunShell {
+                command: "echo hello-shell-dedup".to_string(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }],
+            vec![Action::RunShell {
+                command: "echo hello-shell-dedup".to_string(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }],
+            vec![Action::Finish {
+                summary: "stop after blocked repeat".to_string(),
+            }],
+        ]);
+
+        let runtime = AgentRuntime::new(
+            Box::new(llm),
+            "fake",
+            10,
+            0,
+            0,
+            0,
+            "system",
+            16000,
+            2048,
+            20,
+        );
+
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        assert!(result.success);
+        let log = std::fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            log.contains("shell_cache_hit"),
+            "second identical shell should hit cache"
+        );
+        assert!(
+            log.contains("shell_repeat_blocked"),
+            "third identical shell should be blocked"
+        );
+        assert!(log.contains("[shell-cache"));
+        assert!(log.contains("Blocked: identical"));
+    }
+
+    #[tokio::test]
+    async fn shell_cache_clears_after_edit() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        std::fs::write(workspace.join("a.txt"), "v1\n").unwrap();
+
+        let llm = FakeLlm::batches(vec![
+            vec![Action::RunShell {
+                command: "echo after-edit-ok".to_string(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }],
+            vec![Action::WriteFile {
+                path: PathBuf::from("a.txt"),
+                content: "v2\n".to_string(),
+            }],
+            vec![Action::RunShell {
+                command: "echo after-edit-ok".to_string(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }],
+            vec![Action::Finish {
+                summary: "ok".to_string(),
+            }],
+        ]);
+
+        let runtime = AgentRuntime::new(
+            Box::new(llm),
+            "fake",
+            10,
+            0,
+            0,
+            0,
+            "system",
+            16000,
+            2048,
+            20,
+        );
+
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        assert!(result.success);
+        let log = std::fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            !log.contains("shell_cache_hit") && !log.contains("shell_repeat_blocked"),
+            "re-run after edit must execute live, got hits/blocks in log"
         );
     }
 }

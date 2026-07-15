@@ -112,7 +112,7 @@ impl ChatRuntime {
         println!("\n[agent-v1] ── run complete ──────────────────────────");
         println!("[agent-v1] run_id: {}", result.run_id);
         println!("[agent-v1] stop reason: {:?}", result.stop_reason);
-        println!("[agent-v1] total steps: {}", result.total_steps);
+        println!("[agent-v1] {}", result.efficiency.render_compact());
         if let Some(summary) = &result.summary {
             println!("[agent-v1] summary: {summary}");
         }

@@ -154,21 +154,30 @@ pub fn write_run_summary(
     run_id: &str,
     model_id: &str,
     stop_reason: &crate::state::stop_reason::StopReason,
-    total_steps: u32,
-    total_model_turns: u32,
+    efficiency: &crate::state::RunEfficiency,
 ) {
     let log_dir = PathBuf::from("logs");
     let log_path = log_dir.join(format!("run_{}.jsonl", run_id));
 
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "record_type": "run_summary",
         "run_id": run_id,
         "model_id": model_id,
         "stop_reason": stop_reason,
-        "total_steps": total_steps,
-        "total_model_turns": total_model_turns,
+        "total_steps": efficiency.total_steps,
+        "total_model_turns": efficiency.total_model_turns,
+        "parallel_tool_groups": efficiency.parallel_tool_groups,
+        "cache_hits": efficiency.cache_hits,
+        "cache_misses": efficiency.cache_misses,
+        "duration_ms": efficiency.duration_ms,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
+    if let Some(ms) = efficiency.time_to_first_edit_ms {
+        summary["time_to_first_edit_ms"] = serde_json::json!(ms);
+    }
+    if let Some(ms) = efficiency.time_to_first_verification_ms {
+        summary["time_to_first_verification_ms"] = serde_json::json!(ms);
+    }
 
     let line = match serde_json::to_string(&summary) {
         Ok(s) => s,
@@ -286,8 +295,16 @@ mod tests {
             "test-summary-789",
             "llama-3.1-70b",
             &StopReason::TaskComplete,
-            5,
-            3,
+            &crate::state::RunEfficiency {
+                total_steps: 5,
+                total_model_turns: 3,
+                parallel_tool_groups: 1,
+                cache_hits: 2,
+                cache_misses: 4,
+                time_to_first_edit_ms: Some(100),
+                time_to_first_verification_ms: Some(200),
+                duration_ms: 500,
+            },
         );
 
         let log_path = PathBuf::from("logs/run_test-summary-789.jsonl");
@@ -298,5 +315,9 @@ mod tests {
         assert_eq!(parsed["record_type"], "run_summary");
         assert_eq!(parsed["total_steps"], 5);
         assert_eq!(parsed["total_model_turns"], 3);
+        assert_eq!(parsed["parallel_tool_groups"], 1);
+        assert_eq!(parsed["cache_hits"], 2);
+        assert_eq!(parsed["duration_ms"], 500);
+        assert_eq!(parsed["time_to_first_edit_ms"], 100);
     }
 }
