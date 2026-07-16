@@ -174,6 +174,13 @@ pub fn write_run_summary(
         "readonly_tools_in_exploration": efficiency.readonly_tools_in_exploration,
         "serial_batch_nudges": efficiency.serial_batch_nudges,
         "no_edit_nudges": efficiency.no_edit_nudges,
+        "governance_rejections": efficiency.governance_rejections,
+        "repeated_actions_blocked": efficiency.repeated_actions_blocked,
+        "verification_families_blocked": efficiency.verification_families_blocked,
+        "review_or_finish_transitions": efficiency.review_or_finish_transitions,
+        "no_progress_terminations": efficiency.no_progress_terminations,
+        "turns_after_last_edit": efficiency.turns_after_last_edit,
+        "governance_mode": efficiency.governance_mode,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
     if let Some(avg) = efficiency.avg_readonly_per_exploration_turn() {
@@ -316,6 +323,13 @@ mod tests {
                 readonly_tools_in_exploration: 5,
                 serial_batch_nudges: 1,
                 no_edit_nudges: 0,
+                governance_rejections: 0,
+                repeated_actions_blocked: 0,
+                verification_families_blocked: 0,
+                review_or_finish_transitions: 0,
+                no_progress_terminations: 0,
+                turns_after_last_edit: 0,
+                governance_mode: String::new(),
             },
         );
 

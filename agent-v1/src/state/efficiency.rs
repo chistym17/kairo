@@ -21,6 +21,20 @@ pub struct RunEfficiency {
     pub serial_batch_nudges: u32,
     #[serde(default)]
     pub no_edit_nudges: u32,
+    #[serde(default)]
+    pub governance_rejections: u32,
+    #[serde(default)]
+    pub repeated_actions_blocked: u32,
+    #[serde(default)]
+    pub verification_families_blocked: u32,
+    #[serde(default)]
+    pub review_or_finish_transitions: u32,
+    #[serde(default)]
+    pub no_progress_terminations: u32,
+    #[serde(default)]
+    pub turns_after_last_edit: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub governance_mode: String,
 }
 
 impl RunEfficiency {
@@ -52,6 +66,12 @@ impl RunEfficiency {
         }
         if self.no_edit_nudges > 0 {
             parts.push(format!("no_edit_nudges={}", self.no_edit_nudges));
+        }
+        if self.governance_rejections > 0 {
+            parts.push(format!("gov_reject={}", self.governance_rejections));
+        }
+        if self.review_or_finish_transitions > 0 {
+            parts.push(format!("review_finish={}", self.review_or_finish_transitions));
         }
         if let Some(ms) = self.time_to_first_edit_ms {
             parts.push(format!("ttfe_ms={ms}"));

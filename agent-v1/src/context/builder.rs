@@ -7,8 +7,9 @@ use super::instructions::load_instructions;
 use super::messages::build_messages;
 use super::stats::ContextStats;
 use super::system::{compose_system_prompt, default_system_prompt};
-use super::tools::build_tools;
+use super::tools::{build_tools, build_tools_for_policy};
 use super::types::{AgentContext, LlmRequest, WorkspaceContext};
+use crate::governance::ToolPolicy;
 
 /// Assembles the full context sent to the LLM for each decision.
 #[derive(Debug, Clone)]
@@ -39,10 +40,24 @@ impl ContextBuilder {
         session_messages: &[Message],
         step_history: &[Step],
     ) -> AgentContext {
+        self.build_context_with_policy(workspace_root, goal, session_messages, step_history, None)
+    }
+
+    pub fn build_context_with_policy(
+        &self,
+        workspace_root: &Path,
+        goal: &str,
+        session_messages: &[Message],
+        step_history: &[Step],
+        tool_policy: Option<&ToolPolicy>,
+    ) -> AgentContext {
         let instructions = load_instructions(workspace_root);
         let system_prompt =
             compose_system_prompt(&self.system_prompt, instructions.as_deref());
-        let tools = build_tools();
+        let tools = match tool_policy {
+            Some(policy) => build_tools_for_policy(policy),
+            None => build_tools(),
+        };
 
         AgentContext {
             system_prompt,
@@ -75,7 +90,30 @@ impl ContextBuilder {
         session_messages: &[Message],
         step_history: &[Step],
     ) -> (LlmRequest, ContextStats) {
-        let context = self.build_context(workspace_root, goal, session_messages, step_history);
+        self.build_with_stats_and_policy(
+            workspace_root,
+            goal,
+            session_messages,
+            step_history,
+            None,
+        )
+    }
+
+    pub fn build_with_stats_and_policy(
+        &self,
+        workspace_root: &Path,
+        goal: &str,
+        session_messages: &[Message],
+        step_history: &[Step],
+        tool_policy: Option<&ToolPolicy>,
+    ) -> (LlmRequest, ContextStats) {
+        let context = self.build_context_with_policy(
+            workspace_root,
+            goal,
+            session_messages,
+            step_history,
+            tool_policy,
+        );
         let messages = build_messages(
             &context.system_prompt,
             &context.session_messages,

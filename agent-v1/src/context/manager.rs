@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::context::{ContextBuilder, ContextStats};
+use crate::governance::ToolPolicy;
 use crate::session::{CompactionState, Message, Session};
 use crate::state::step::Step;
 
@@ -52,6 +53,7 @@ impl ContextManager {
         session: Option<&mut Session>,
         session_messages: &[Message],
         step_history: &[Step],
+        tool_policy: Option<&ToolPolicy>,
     ) -> (
         crate::context::LlmRequest,
         ContextStats,
@@ -79,7 +81,7 @@ impl ContextManager {
         full_view.extend_from_slice(base_messages);
 
         let (full_request, full_stats) =
-            builder.build_with_stats(workspace_root, goal, &full_view, step_history);
+            builder.build_with_stats_and_policy(workspace_root, goal, &full_view, step_history, tool_policy);
 
         if full_stats.estimated_tokens <= budget {
             return (
@@ -113,7 +115,7 @@ impl ContextManager {
             view.extend_from_slice(kept_slice);
 
             let (req, stats) =
-                builder.build_with_stats(workspace_root, goal, &view, step_history);
+                builder.build_with_stats_and_policy(workspace_root, goal, &view, step_history, tool_policy);
 
             let dropped = start;
             best = (req, stats.clone(), dropped);
@@ -239,7 +241,7 @@ mod tests {
         }
 
         let (_req, full, bounded, reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[]);
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None);
 
         assert!(full.estimated_tokens > mgr.budget_tokens());
         assert!(bounded.estimated_tokens <= full.estimated_tokens);
@@ -259,7 +261,7 @@ mod tests {
         }
 
         let (req, _full, _bounded, reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[]);
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None);
         assert!(reduction.trimmed);
 
         let arr = req.messages.as_array().unwrap();
@@ -292,7 +294,7 @@ mod tests {
         msgs.push(Message::user("RECENT E"));
 
         let (req, _full, _bounded, _reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[]);
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None);
         // If trimming happens, the policy should prefer keeping the most recent messages.
 
         let arr = req.messages.as_array().unwrap();
@@ -326,6 +328,7 @@ mod tests {
             Some(&mut session),
             &messages_snapshot,
             &[],
+            None,
         );
 
         assert!(reduction.trimmed);

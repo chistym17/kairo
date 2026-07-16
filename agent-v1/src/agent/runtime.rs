@@ -588,5 +588,57 @@ mod tests {
         );
         assert!(log.contains("explore-shell budget"));
     }
+
+    #[tokio::test]
+    async fn governance_stops_grep_spiral_after_edit() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        std::fs::write(workspace.join("api.ts"), "export const x = 1;\n").unwrap();
+
+        let mut batches = vec![vec![Action::WriteFile {
+            path: PathBuf::from("api.ts"),
+            content: "export const x = 2;\n".to_string(),
+        }]];
+        for _ in 0..12 {
+            batches.push(vec![Action::RunCommand {
+                cmd: "grep position api.ts".to_string(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }]);
+        }
+        batches.push(vec![Action::Finish {
+            summary: "done".to_string(),
+        }]);
+
+        let llm = FakeLlm::batches(batches);
+        let runtime = AgentRuntime::new(
+            Box::new(llm),
+            "fake",
+            30,
+            0,
+            0,
+            0,
+            "system",
+            16000,
+            2048,
+            20,
+        );
+
+        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let log = std::fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            log.contains("governance_rejected") || log.contains("governance_terminate"),
+            "expected governance to stop grep spiral"
+        );
+        assert!(
+            !log.contains("MaxStepsExceeded"),
+            "should not burn full step budget"
+        );
+        assert!(
+            result.total_model_turns < 25,
+            "expected early stop, got {} turns",
+            result.total_model_turns
+        );
+    }
 }
 

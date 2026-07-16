@@ -1,4 +1,5 @@
 use crate::context::{ContextBuilder, ContextManager};
+use crate::governance::{classify_progress, GovernanceDecision};
 use crate::llm::{LlmClient, LlmError, LlmToolCall};
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Session;
@@ -92,6 +93,7 @@ pub async fn run(
                 .map(|s| s.messages.clone())
                 .unwrap_or_default();
             let goal_for_llm = goal_with_plan(state);
+            let tool_policy = state.governance.tool_policy();
             let (request, full_stats, bounded_stats, reduction) =
                 context_manager.build_bounded_request(
                     context_builder,
@@ -100,6 +102,7 @@ pub async fn run(
                     session.as_deref_mut(),
                     &session_messages_snapshot,
                     &state.history,
+                    Some(&tool_policy),
                 );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
@@ -240,6 +243,7 @@ pub async fn run(
                             .map(|s| s.messages.clone())
                             .unwrap_or_default();
                         let goal_for_llm = goal_with_plan(state);
+                        let tool_policy = state.governance.tool_policy();
                         let (request, full_stats, bounded_stats, reduction) =
                             context_manager.build_bounded_request(
                                 context_builder,
@@ -248,6 +252,7 @@ pub async fn run(
                                 session.as_deref_mut(),
                                 &session_messages_snapshot,
                                 &state.history,
+                                Some(&tool_policy),
                             );
 
                         write_event(
@@ -395,6 +400,8 @@ pub async fn run(
                 call_idx += 1;
             }
         }
+
+        state.governance.end_turn(model_turn);
     }
 }
 
@@ -442,6 +449,26 @@ async fn execute_one_tool(
     );
 
     let verified_for_finish = finish_allowed(&state.history) || *verified_in_batch;
+
+    match apply_governance_preflight(state, &action, model_turn) {
+        GovernancePreflightOutcome::Proceed => {}
+        GovernancePreflightOutcome::Rejected(result) => {
+            return commit_tool_outcome(
+                state,
+                observer,
+                step_index,
+                model_turn,
+                action,
+                tool_call_id,
+                result,
+            );
+        }
+        GovernancePreflightOutcome::Terminate(reason) => {
+            write_summary(state, &reason);
+            return Some(reason);
+        }
+    }
+
     let mut result = produce_tool_result(
         state,
         &action,
@@ -520,7 +547,13 @@ async fn execute_readonly_group(
     let workspace = state.workspace_root.clone();
 
     // Emit start events + validate; collect spawn jobs for valid tools.
-    let mut prepared: Vec<(u32, Action, String, Result<(), ValidationError>)> =
+    enum PreparedOutcome {
+        Early(ToolResult),
+        Invalid(ValidationError),
+        Execute,
+    }
+
+    let mut prepared: Vec<(u32, Action, String, PreparedOutcome)> =
         Vec::with_capacity(group.len());
 
     for (offset, tool_call) in group.iter().enumerate() {
@@ -544,6 +577,18 @@ async fn execute_readonly_group(
             },
         );
 
+        match apply_governance_preflight(state, &action, model_turn) {
+            GovernancePreflightOutcome::Proceed => {}
+            GovernancePreflightOutcome::Rejected(result) => {
+                prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(result)));
+                continue;
+            }
+            GovernancePreflightOutcome::Terminate(reason) => {
+                write_summary(state, &reason);
+                return Some(reason);
+            }
+        }
+
         let validation = validate_action(&action, false, false);
         if let Some(err) = &validation {
             write_event(&state.run_id, &err.event, &err.message, 0);
@@ -553,8 +598,8 @@ async fn execute_readonly_group(
             action,
             tool_call_id,
             match validation {
-                Some(e) => Err(e),
-                None => Ok(()),
+                Some(e) => PreparedOutcome::Invalid(e),
+                None => PreparedOutcome::Execute,
             },
         ));
     }
@@ -562,9 +607,12 @@ async fn execute_readonly_group(
     // Spawn blocking work for tools that passed validation.
     // Read-file hits the in-run cache on this thread before spawn.
     let mut handles = Vec::new();
-    for (i, (step_index, action, tool_call_id, validation)) in prepared.into_iter().enumerate() {
-        match validation {
-            Err(e) => {
+    for (i, (step_index, action, tool_call_id, outcome)) in prepared.into_iter().enumerate() {
+        match outcome {
+            PreparedOutcome::Early(result) => {
+                handles.push((i, step_index, action, tool_call_id, Some(result), None, false));
+            }
+            PreparedOutcome::Invalid(e) => {
                 handles.push((
                     i,
                     step_index,
@@ -581,7 +629,7 @@ async fn execute_readonly_group(
                     false,
                 ));
             }
-            Ok(()) => {
+            PreparedOutcome::Execute => {
                 if let Action::ReadFile {
                     path,
                     offset,
@@ -939,7 +987,7 @@ fn commit_tool_outcome(
 
     if result.success {
         if let Some(path) = mutating_path(&action) {
-            state.note_edit();
+            state.note_edit(model_turn);
             state.read_cache.invalidate_path(std::path::Path::new(&path));
             write_event(
                 &state.run_id,
@@ -1014,6 +1062,11 @@ fn commit_tool_outcome(
         step_index, state.step_count,
         "step_index must match sequential record order"
     );
+
+    let read_cache_hit = matches!(action, Action::ReadFile { .. })
+        && result.output.starts_with("[cached");
+    record_governance_after(state, &action, &result, model_turn, read_cache_hit);
+
     let step = Step::new(state.step_count, model_turn, action, result, tool_call_id);
     let entry = LogEntry::from_step(&state.run_id, &state.model_id, &step);
     write_entry(&entry);
@@ -1095,7 +1148,67 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Runtime guidance\n");
         out.push_str(&nudge);
     }
+    if let Some(guidance) = state.governance.take_pending_guidance() {
+        write_event(
+            &state.run_id,
+            "governance_guidance",
+            &guidance[..guidance.len().min(400)],
+            0,
+        );
+        out.push_str("\n\n## Runtime guidance\n");
+        out.push_str(&guidance);
+    }
     out
+}
+
+enum GovernancePreflightOutcome {
+    Proceed,
+    Rejected(ToolResult),
+    Terminate(StopReason),
+}
+
+fn apply_governance_preflight(
+    state: &mut AgentState,
+    action: &Action,
+    model_turn: u32,
+) -> GovernancePreflightOutcome {
+    match state.governance.before_action(action, model_turn) {
+        GovernanceDecision::Allow => GovernancePreflightOutcome::Proceed,
+        GovernanceDecision::Reject { message, .. } => {
+            write_event(&state.run_id, "governance_rejected", &message, 0);
+            let result = ToolResult {
+                success: false,
+                output: String::new(),
+                diff: None,
+                error: Some(message),
+                stop_reason: None,
+            };
+            record_governance_after(state, action, &result, model_turn, false);
+            GovernancePreflightOutcome::Rejected(result)
+        }
+        GovernanceDecision::Terminate(reason) => {
+            write_event(
+                &state.run_id,
+                "governance_terminate",
+                &format!("{reason:?}"),
+                0,
+            );
+            GovernancePreflightOutcome::Terminate(reason)
+        }
+    }
+}
+
+fn record_governance_after(
+    state: &mut AgentState,
+    action: &Action,
+    result: &ToolResult,
+    model_turn: u32,
+    read_cache_hit: bool,
+) {
+    let progress = classify_progress(action, result, read_cache_hit);
+    state
+        .governance
+        .after_action(action, result, progress, model_turn);
 }
 
 fn looks_like_unified_diff(diff: &str) -> bool {

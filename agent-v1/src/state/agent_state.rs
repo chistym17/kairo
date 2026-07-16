@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::governance::GovernanceState;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
 use crate::state::plan::AgentPlan;
@@ -38,6 +39,9 @@ pub struct AgentState {
     /// Serial exploration + soft no-edit budget tracking.
     pub exploration: ExplorationTracker,
 
+    /// Runtime governance — progress, deadlock detection, tool gating.
+    pub governance: GovernanceState,
+
     /// Wall-clock start of this run (for duration / time-to-* metrics).
     pub run_started: Instant,
     /// Count of parallel read-only groups (size ≥ 2) executed.
@@ -67,6 +71,7 @@ impl AgentState {
             read_cache: ReadCache::new(),
             shell_cache: ShellCommandCache::new(),
             exploration: ExplorationTracker::new(),
+            governance: GovernanceState::new(),
             run_started: Instant::now(),
             parallel_tool_groups: 0,
             ms_to_first_edit: None,
@@ -97,16 +102,23 @@ impl AgentState {
             readonly_tools_in_exploration: self.exploration.readonly_tools_in_exploration,
             serial_batch_nudges: self.exploration.serial_batch_nudges,
             no_edit_nudges: self.exploration.no_edit_nudges,
+            governance_rejections: self.governance.metrics.governance_rejections,
+            repeated_actions_blocked: self.governance.metrics.repeated_actions_blocked,
+            verification_families_blocked: self.governance.metrics.verification_families_blocked,
+            review_or_finish_transitions: self.governance.metrics.review_or_finish_transitions,
+            no_progress_terminations: self.governance.metrics.no_progress_terminations,
+            turns_after_last_edit: self.governance.turns_since_edit,
+            governance_mode: format!("{:?}", self.governance.mode),
         }
     }
 
-    pub fn note_edit(&mut self) {
+    pub fn note_edit(&mut self, model_turn: u32) {
         if self.ms_to_first_edit.is_none() {
             self.ms_to_first_edit = Some(self.run_started.elapsed().as_millis() as u64);
         }
-        // Verifies after an edit are meaningful again.
         self.shell_cache.clear();
         self.exploration.note_edit();
+        self.governance.note_edit(model_turn);
     }
 
     pub fn note_verification(&mut self) {
