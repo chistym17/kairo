@@ -26,6 +26,28 @@ phase9.md
 annotaa
 
 
+The tasks Kanban board is empty after sign-in even though tasks exist in the database for today. Backend is Django at /api/tasks/. Fix the frontend so loading tasks for a selected date works.
+
+
+
+
+
+
+On the tasks board, dragging a card to another column or reordering within a column looks fine briefly, then the card jumps back or order is wrong after refresh. Fix the frontend API call for saving task moves.
+
+
+
+On the annotations page, drawing a triangle on an image fails to save — sometimes a points/bounds error when closing the shape. Fix the coordinate conversion from stage to image coordinates.
+
+
+Tasks board: signed-in users see no tasks for the selected date, and drag-and-drop doesn't persist. Annotations: finishing a polygon on an image fails to save. Find and fix the frontend bugs (backend is in backend/, frontend in frontend-v2/).
+
+
+
+
+
+
+
 
 I can’t log in with the right email and password — it just says invalid.
 

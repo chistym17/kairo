@@ -9,6 +9,7 @@ pub fn build_messages(
     system_prompt: &str,
     session_messages: &[Message],
     goal: &str,
+    run_summary: Option<&str>,
     step_history: &[Step],
 ) -> Value {
     let mut messages = vec![json!({
@@ -24,6 +25,15 @@ pub fn build_messages(
         "role": "user",
         "content": goal
     }));
+
+    if let Some(summary) = run_summary {
+        if !summary.trim().is_empty() {
+            messages.push(json!({
+                "role": "assistant",
+                "content": summary
+            }));
+        }
+    }
 
     // Group consecutive steps from the same model turn into one assistant
     // message with multiple tool_calls, followed by one tool result each.
@@ -261,7 +271,7 @@ mod tests {
             "call_c",
         );
 
-        let messages = build_messages("sys", &[], "goal", &[s0, s1, s2]);
+        let messages = build_messages("sys", &[], "goal", None, &[s0, s1, s2]);
         let arr = messages.as_array().unwrap();
         // system, user, assistant(batch2), tool, tool, assistant(1), tool
         assert_eq!(arr.len(), 7);

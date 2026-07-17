@@ -18,6 +18,7 @@ pub struct AgentContext {
     pub system_prompt: String,
     pub session_messages: Vec<Message>,
     pub goal: String,
+    pub run_summary: Option<String>,
     pub step_history: Vec<Step>,
     pub tools: Value,
     pub workspace: WorkspaceContext,

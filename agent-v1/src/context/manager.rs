@@ -3,7 +3,8 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::context::{ContextBuilder, ContextStats};
-use crate::governance::ToolPolicy;
+use crate::context::run_context::build_run_context_view;
+use crate::governance::{ToolPolicy, KEEP_RECENT_STEPS};
 use crate::session::{CompactionState, Message, Session};
 use crate::state::step::Step;
 
@@ -62,6 +63,10 @@ impl ContextManager {
     ) {
         let budget = self.budget_tokens();
 
+        let run_view = build_run_context_view(step_history, KEEP_RECENT_STEPS);
+        let steps_for_context = &run_view.recent_steps;
+        let run_summary = run_view.run_summary.as_deref();
+
         // Use persisted compaction view (if present) as the baseline view.
         let (summary_text, summarized_until) = session
             .as_ref()
@@ -80,8 +85,14 @@ impl ContextManager {
         }
         full_view.extend_from_slice(base_messages);
 
-        let (full_request, full_stats) =
-            builder.build_with_stats_and_policy(workspace_root, goal, &full_view, step_history, tool_policy);
+        let (full_request, full_stats) = builder.build_with_stats_and_policy(
+            workspace_root,
+            goal,
+            &full_view,
+            run_summary,
+            steps_for_context,
+            tool_policy,
+        );
 
         if full_stats.estimated_tokens <= budget {
             return (
@@ -95,8 +106,6 @@ impl ContextManager {
                 },
             );
         }
-
-        // Trim: prefer dropping old messages, keep recent messages.
         let len = base_messages.len();
         let mut start = len.saturating_sub(self.keep_recent_session_messages);
         let mut best = (full_request.clone(), full_stats.clone(), 0usize);
@@ -114,8 +123,14 @@ impl ContextManager {
             }
             view.extend_from_slice(kept_slice);
 
-            let (req, stats) =
-                builder.build_with_stats_and_policy(workspace_root, goal, &view, step_history, tool_policy);
+            let (req, stats) = builder.build_with_stats_and_policy(
+                workspace_root,
+                goal,
+                &view,
+                run_summary,
+                steps_for_context,
+                tool_policy,
+            );
 
             let dropped = start;
             best = (req, stats.clone(), dropped);

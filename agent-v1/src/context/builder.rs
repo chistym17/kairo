@@ -40,7 +40,7 @@ impl ContextBuilder {
         session_messages: &[Message],
         step_history: &[Step],
     ) -> AgentContext {
-        self.build_context_with_policy(workspace_root, goal, session_messages, step_history, None)
+        self.build_context_with_policy(workspace_root, goal, session_messages, None, step_history, None)
     }
 
     pub fn build_context_with_policy(
@@ -48,6 +48,7 @@ impl ContextBuilder {
         workspace_root: &Path,
         goal: &str,
         session_messages: &[Message],
+        run_summary: Option<&str>,
         step_history: &[Step],
         tool_policy: Option<&ToolPolicy>,
     ) -> AgentContext {
@@ -63,6 +64,7 @@ impl ContextBuilder {
             system_prompt,
             session_messages: session_messages.to_vec(),
             goal: goal.to_string(),
+            run_summary: run_summary.map(str::to_string),
             step_history: step_history.to_vec(),
             tools,
             workspace: WorkspaceContext {
@@ -94,6 +96,7 @@ impl ContextBuilder {
             workspace_root,
             goal,
             session_messages,
+            None,
             step_history,
             None,
         )
@@ -104,6 +107,7 @@ impl ContextBuilder {
         workspace_root: &Path,
         goal: &str,
         session_messages: &[Message],
+        run_summary: Option<&str>,
         step_history: &[Step],
         tool_policy: Option<&ToolPolicy>,
     ) -> (LlmRequest, ContextStats) {
@@ -111,6 +115,7 @@ impl ContextBuilder {
             workspace_root,
             goal,
             session_messages,
+            run_summary,
             step_history,
             tool_policy,
         );
@@ -118,6 +123,7 @@ impl ContextBuilder {
             &context.system_prompt,
             &context.session_messages,
             &context.goal,
+            context.run_summary.as_deref(),
             &context.step_history,
         );
 

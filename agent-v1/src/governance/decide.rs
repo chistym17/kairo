@@ -14,6 +14,7 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GovernanceBlockCode {
     RepeatedBlockedAction,
+    RepeatedRead,
     ToolNotAllowedInMode,
     VerificationFamilyExhausted,
     ReviewModeViolation,
@@ -64,7 +65,7 @@ impl GovernanceState {
                 code: GovernanceBlockCode::ToolNotAllowedInMode,
                 message: format!(
                     "Governance: {:?} is not available in the current runtime mode ({:?}). \
-                     Allowed: edit, git_diff/git_status, a different verification, or finish.",
+                     Allowed tools are restricted for this phase.",
                     tool_name(action),
                     self.mode
                 ),
@@ -119,9 +120,7 @@ impl GovernanceState {
         let fp_hash = fingerprint_hash(&fp);
 
         match progress {
-            ActionProgress::Edit => {
-                // note_edit is called from AgentState::note_edit
-            }
+            ActionProgress::Edit => {}
             ActionProgress::UniqueInfo => self.note_unique_info(model_turn),
             ActionProgress::SuccessfulVerify => self.note_successful_verify(model_turn),
             ActionProgress::ReviewOnly | ActionProgress::NoProgress | ActionProgress::Failed => {}
@@ -150,7 +149,6 @@ impl GovernanceState {
                 self.verify_family_failures.remove(&family);
             }
         }
-
     }
 }
 
@@ -162,6 +160,7 @@ fn is_blocked_result(result: &ToolResult) -> bool {
                 || e.contains("explore-shell budget")
                 || e.contains("blocked: identical")
                 || e.contains("blocked: explore")
+                || e.contains("repeated read blocked")
             {
                 return true;
             }
@@ -191,11 +190,26 @@ pub fn classify_progress(
         | Action::FindFiles { .. }
         | Action::ListFiles { .. }
         | Action::DetectProjectSnapshot { .. } => ActionProgress::UniqueInfo,
-        Action::RunCommand { .. } | Action::RunShell { .. } => ActionProgress::SuccessfulVerify,
+        Action::RunCommand { .. } | Action::RunShell { .. } => {
+            if result.success && looks_like_verify_success(action, result) {
+                ActionProgress::SuccessfulVerify
+            } else {
+                ActionProgress::UniqueInfo
+            }
+        }
         Action::GitStatus | Action::GitDiff { .. } => ActionProgress::ReviewOnly,
         Action::UpdatePlan { .. } => ActionProgress::ReviewOnly,
         Action::Finish { .. } => ActionProgress::ReviewOnly,
     }
+}
+
+fn looks_like_verify_success(action: &Action, result: &ToolResult) -> bool {
+    use super::fingerprint::verification_family_for_command;
+    let cmd = match action {
+        Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } => cmd,
+        _ => return false,
+    };
+    verification_family_for_command(cmd).is_some() && result.output.contains("exit_code: 0")
 }
 
 fn terminate_reason(state: &GovernanceState) -> StopReason {

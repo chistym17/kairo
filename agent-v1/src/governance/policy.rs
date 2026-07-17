@@ -18,10 +18,14 @@ impl ToolPolicy {
         let mut allowed: HashSet<&'static str> = ALL_TOOLS.iter().copied().collect();
         let blocked_verification_families = state.blocked_verification_families.clone();
 
-        if state.mode == RuntimeMode::ReviewOrFinish {
-            allowed.retain(|t| REVIEW_OR_FINISH_TOOLS.contains(t));
-            // run_command / run_shell stay available for non-explore verify only;
-            // post-hoc rejection still applies in before_action.
+        match state.mode {
+            RuntimeMode::ReviewOrFinish => {
+                allowed.retain(|t| REVIEW_OR_FINISH_TOOLS.contains(t));
+            }
+            RuntimeMode::EditOrJustify => {
+                allowed.retain(|t| EDIT_OR_JUSTIFY_TOOLS.contains(t));
+            }
+            RuntimeMode::Normal => {}
         }
 
         Self {
@@ -42,6 +46,20 @@ impl ToolPolicy {
         }
         if self.mode == RuntimeMode::ReviewOrFinish && is_explore_action(action) {
             return false;
+        }
+        if self.mode == RuntimeMode::EditOrJustify {
+            match action {
+                Action::ListFiles { .. }
+                | Action::SearchCode { .. }
+                | Action::FindFiles { .. }
+                | Action::DetectProjectSnapshot { .. } => return false,
+                Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } => {
+                    if crate::tools::shell_cache::is_explore_shell(cmd) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
         }
         if let Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } = action {
             if let Some(family) = verification_family_for_command(cmd) {
@@ -77,6 +95,16 @@ const REVIEW_OR_FINISH_TOOLS: &[&str] = &[
     "git_status",
     "run_command",
     "run_shell",
+    "update_plan",
+    "finish",
+];
+
+const EDIT_OR_JUSTIFY_TOOLS: &[&str] = &[
+    "read_file",
+    "apply_patch",
+    "write_file",
+    "git_diff",
+    "git_status",
     "update_plan",
     "finish",
 ];

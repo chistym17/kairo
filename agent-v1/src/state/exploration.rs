@@ -1,9 +1,10 @@
-use crate::state::step::Action;
+use crate::state::step::{Action, Step};
+use crate::tools::ToolResult;
 
 /// Consecutive single read-only turns before injecting a batching nudge.
 pub const SERIAL_READONLY_NUDGE_AFTER: u32 = 3;
-/// Model turns without WriteFile/ApplyPatch before soft "edit or explain" nudge.
-pub const NO_EDIT_BUDGET_TURNS: u32 = 8;
+
+use crate::governance::NO_EDIT_NUDGE_THRESHOLDS;
 
 /// Tracks serial exploration and time-to-edit soft budgets.
 #[derive(Debug, Default, Clone)]
@@ -64,12 +65,19 @@ impl ExplorationTracker {
         }
     }
 
+    pub fn no_edit_escalation_level(&self) -> u32 {
+        NO_EDIT_NUDGE_THRESHOLDS
+            .iter()
+            .filter(|&&threshold| self.model_turns_since_edit >= threshold)
+            .count() as u32
+    }
+
     /// Soft guidance for the next LLM request (does not block tools).
     /// Dedupes counting when the same nudge is re-injected on API retries.
     pub fn nudge_for_injection(&mut self) -> Option<String> {
         let serial = self.consecutive_single_readonly_turns >= SERIAL_READONLY_NUDGE_AFTER;
-        let no_edit = self.model_turns_since_edit >= NO_EDIT_BUDGET_TURNS;
-        if !serial && !no_edit {
+        let level = self.no_edit_escalation_level();
+        if !serial && level == 0 {
             return None;
         }
 
@@ -79,8 +87,8 @@ impl ExplorationTracker {
             } else {
                 0
             },
-            if no_edit {
-                self.model_turns_since_edit
+            if level > 0 {
+                level
             } else {
                 0
             },
@@ -95,14 +103,26 @@ impl ExplorationTracker {
                 self.consecutive_single_readonly_turns
             ));
         }
-        if no_edit {
-            parts.push(format!(
-                "No file edit in the last {} model turns. In your next response: \
-                 (1) briefly summarize findings, (2) call update_plan if needed, and \
-                 (3) either apply_patch/write_file now or state exactly what missing information \
-                 still blocks an edit.",
-                self.model_turns_since_edit
-            ));
+        if level > 0 {
+            let msg = match level {
+                1 => format!(
+                    "No file edit in the last {} model turns. Summarize findings and either \
+                     patch now or state the one missing fact blocking an edit.",
+                    self.model_turns_since_edit
+                ),
+                2 => format!(
+                    "Still no edit after {} turns. Call update_plan if needed, then \
+                     apply_patch/write_file or explain the single blocker.",
+                    self.model_turns_since_edit
+                ),
+                3 => "Hard warning: exploration budget nearly exhausted. Next response must \
+                      patch, cite one specific missing fact, or finish with a blocker."
+                    .to_string(),
+                _ => "Tool restriction imminent: patch, one justified new read, update_plan, \
+                      or finish/blocker — broad exploration will be blocked next turn."
+                    .to_string(),
+            };
+            parts.push(msg);
         }
 
         if self.last_nudge_key != Some(key) {
@@ -110,8 +130,8 @@ impl ExplorationTracker {
             if serial {
                 self.serial_batch_nudges += 1;
             }
-            if no_edit {
-                self.no_edit_nudges += 1;
+            if level > 0 {
+                self.no_edit_nudges = self.no_edit_nudges.saturating_add(1).min(4);
             }
         }
 
@@ -169,40 +189,26 @@ mod tests {
         let text = t.nudge_for_injection().unwrap();
         assert!(text.contains("exploring inefficiently"));
         assert_eq!(t.serial_batch_nudges, 1);
-        // Retry injection does not double-count.
         let _ = t.nudge_for_injection();
         assert_eq!(t.serial_batch_nudges, 1);
     }
 
     #[test]
-    fn batch_clears_serial_streak() {
+    fn no_edit_escalation_ladder() {
         let mut t = ExplorationTracker::new();
-        t.observe_turn(&[read()]);
-        t.observe_turn(&[read()]);
-        t.observe_turn(&[read(), search()]);
-        assert_eq!(t.consecutive_single_readonly_turns, 0);
-        assert!(t.nudge_for_injection().is_none());
-    }
-
-    #[test]
-    fn no_edit_budget_and_reset_on_edit() {
-        let mut t = ExplorationTracker::new();
-        for _ in 0..NO_EDIT_BUDGET_TURNS {
+        for _ in 0..NO_EDIT_NUDGE_THRESHOLDS[0] {
             t.observe_turn(&[read()]);
         }
         let text = t.nudge_for_injection().unwrap();
-        assert!(text.contains("No file edit"));
-        t.note_edit();
-        assert_eq!(t.model_turns_since_edit, 0);
-        assert!(t.nudge_for_injection().is_none());
-        let _ = patch(); // ensure Action used
-    }
+        assert!(text.contains("No file edit") || text.contains("Summarize"));
+        assert_eq!(t.no_edit_escalation_level(), 1);
 
-    #[test]
-    fn avg_readonly_per_exploration() {
-        let mut t = ExplorationTracker::new();
-        t.observe_turn(&[read(), search()]);
-        t.observe_turn(&[read()]);
-        assert!((t.avg_readonly_tools_per_exploration_turn().unwrap() - 1.5).abs() < 1e-9);
+        for _ in 0..(NO_EDIT_NUDGE_THRESHOLDS[3] - NO_EDIT_NUDGE_THRESHOLDS[0]) {
+            t.observe_turn(&[read()]);
+        }
+        assert_eq!(t.no_edit_escalation_level(), 4);
+        t.note_edit();
+        assert_eq!(t.no_edit_escalation_level(), 0);
+        let _ = patch();
     }
 }

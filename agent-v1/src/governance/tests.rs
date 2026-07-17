@@ -46,6 +46,32 @@ mod tests {
     }
 
     #[test]
+    fn edit_or_justify_blocks_broad_search() {
+        let mut gov = GovernanceState::new();
+        gov.enter_edit_or_justify("test");
+        assert_eq!(gov.mode, RuntimeMode::EditOrJustify);
+
+        let search = Action::SearchCode {
+            query: "foo".into(),
+            path: PathBuf::from("."),
+        };
+        assert!(matches!(
+            gov.before_action(&search, 1),
+            GovernanceDecision::Reject { .. }
+        ));
+
+        let read = Action::ReadFile {
+            path: PathBuf::from("src/lib/api.ts"),
+            offset: 1,
+            limit: 50,
+        };
+        assert!(matches!(
+            gov.before_action(&read, 1),
+            GovernanceDecision::Allow
+        ));
+    }
+
+    #[test]
     fn review_or_finish_blocks_explore_reads() {
         let mut gov = GovernanceState::new();
         gov.enter_review_or_finish("test");

@@ -145,6 +145,9 @@ pub async fn run(
                     );
                     let actions: Vec<_> = calls.iter().map(|c| c.action.clone()).collect();
                     state.exploration.observe_turn(&actions);
+                    state.governance.note_tool_turn();
+                    let level = state.exploration.no_edit_escalation_level();
+                    state.governance.set_no_edit_escalation_level(level);
                     break 'next_actions calls;
                 }
 
@@ -163,6 +166,24 @@ pub async fn run(
                     state.exploration.model_turns_since_edit =
                         state.exploration.model_turns_since_edit.saturating_add(1);
                     state.exploration.consecutive_single_readonly_turns = 0;
+                    state.governance.note_no_tool_turn();
+                    if state.governance.consecutive_no_tool_turns
+                        >= crate::governance::MAX_NO_TOOL_TURNS
+                    {
+                        state.governance.pending_guidance = Some(
+                            "You did not request a tool or finish the task. \
+                             Next response must choose one: apply_patch/write_file, one justified \
+                             read_file, update_plan, or finish with a blocker."
+                                .to_string(),
+                        );
+                        if state.governance.consecutive_no_tool_turns
+                            > crate::governance::MAX_NO_TOOL_TURNS
+                        {
+                            state.governance.enter_edit_or_justify(
+                                "consecutive text-only turns with no action.",
+                            );
+                        }
+                    }
                     emit(
                         observer,
                         AgentEvent::Error {
@@ -401,7 +422,20 @@ pub async fn run(
             }
         }
 
-        state.governance.end_turn(model_turn);
+        state.governance.end_turn(
+            model_turn,
+            state
+                .history
+                .iter()
+                .rev()
+                .take_while(|s| s.model_turn == model_turn)
+                .any(|s| {
+                    matches!(
+                        s.action,
+                        Action::ApplyPatch { .. } | Action::WriteFile { .. }
+                    ) && s.result.success
+                }),
+        );
     }
 }
 
@@ -756,6 +790,10 @@ fn produce_tool_result(
                     Ok(plan) => {
                         let output = format!("Plan updated:\n{}", plan.render());
                         state.plan = Some(plan);
+                        state
+                            .governance
+                            .pre_edit
+                            .observe_plan(steps);
                         ToolResult {
                             success: true,
                             output,
@@ -803,6 +841,17 @@ fn produce_tool_result(
                 offset,
                 limit,
             } => read_file_cached(state, path, *offset, *limit),
+            Action::GitDiff { path } => {
+                let ctx = tools::git_diff::GitDiffContext {
+                    files_ever_modified: state
+                        .governance
+                        .files_ever_modified
+                        .iter()
+                        .cloned()
+                        .collect(),
+                };
+                tools::git_diff::execute(path, &state.workspace_root, Some(&ctx))
+            }
             Action::RunShell {
                 command,
                 cwd,
@@ -824,6 +873,20 @@ fn run_shell_deduped(
     cwd: &std::path::Path,
     timeout_secs: u64,
 ) -> ToolResult {
+    if let Some(intent) = tools::shell_read::detect_shell_file_read(command) {
+        if let Some(blocked) =
+            tools::shell_read::apply_read_governance_to_shell(&mut state.read_cache, &state.workspace_root, &intent)
+        {
+            write_event(
+                &state.run_id,
+                "shell_read_governance",
+                &format!("run_shell cwd={} cmd={}", cwd.display(), command),
+                0,
+            );
+            return blocked;
+        }
+    }
+
     if let Some(blocked) = state.shell_cache.before_explore_budget(command) {
         write_event(
             &state.run_id,
@@ -877,6 +940,20 @@ fn run_command_deduped(
     cwd: &std::path::Path,
     timeout_secs: u64,
 ) -> ToolResult {
+    if let Some(intent) = tools::shell_read::detect_shell_file_read(cmd) {
+        if let Some(blocked) =
+            tools::shell_read::apply_read_governance_to_shell(&mut state.read_cache, &state.workspace_root, &intent)
+        {
+            write_event(
+                &state.run_id,
+                "shell_read_governance",
+                &format!("run_command cwd={} cmd={}", cwd.display(), cmd),
+                0,
+            );
+            return blocked;
+        }
+    }
+
     if let Some(blocked) = state.shell_cache.before_explore_budget(cmd) {
         write_event(
             &state.run_id,
@@ -935,12 +1012,21 @@ fn read_file_cached(
         .read_cache
         .try_hit(&state.workspace_root, path, offset, limit)
     {
-        write_event(
-            &state.run_id,
-            "cache_hit",
-            &format!("{} offset={} limit={}", path.display(), offset, limit),
-            0,
-        );
+        if hit.success {
+            write_event(
+                &state.run_id,
+                "cache_hit",
+                &format!("{} offset={} limit={}", path.display(), offset, limit),
+                0,
+            );
+        } else {
+            write_event(
+                &state.run_id,
+                "repeated_read_blocked",
+                &format!("{} offset={} limit={}", path.display(), offset, limit),
+                0,
+            );
+        }
         return hit;
     }
 
@@ -988,6 +1074,7 @@ fn commit_tool_outcome(
     if result.success {
         if let Some(path) = mutating_path(&action) {
             state.note_edit(model_turn);
+            state.governance.note_file_modified(&path);
             state.read_cache.invalidate_path(std::path::Path::new(&path));
             write_event(
                 &state.run_id,
@@ -1065,6 +1152,15 @@ fn commit_tool_outcome(
 
     let read_cache_hit = matches!(action, Action::ReadFile { .. })
         && result.output.starts_with("[cached");
+    if result.success {
+        match &action {
+            Action::ReadFile { path, .. } => state.governance.pre_edit.observe_read(
+                &path.to_string_lossy().replace('\\', "/"),
+            ),
+            Action::SearchCode { .. } => state.governance.pre_edit.observe_search(),
+            _ => {}
+        }
+    }
     record_governance_after(state, &action, &result, model_turn, read_cache_hit);
 
     let step = Step::new(state.step_count, model_turn, action, result, tool_call_id);
@@ -1134,6 +1230,8 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Current plan\n");
         out.push_str(&plan.render());
     }
+    let level = state.exploration.no_edit_escalation_level();
+    state.governance.set_no_edit_escalation_level(level);
     if let Some(nudge) = state.exploration.nudge_for_injection() {
         let event = if nudge.contains("exploring inefficiently")
             && nudge.contains("No file edit")
