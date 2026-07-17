@@ -200,7 +200,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::context::LlmRequest;
-    use crate::llm::{LlmClient, LlmError, LlmToolCall};
+    use crate::llm::{AgentResponse, LlmClient, LlmError, LlmToolCall};
     use crate::tools::shell_cache;
 
     struct FakeLlm {
@@ -225,10 +225,10 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for FakeLlm {
-        async fn next_actions(
+        async fn respond(
             &self,
             _request: &LlmRequest,
-        ) -> std::result::Result<Vec<LlmToolCall>, LlmError> {
+        ) -> std::result::Result<AgentResponse, LlmError> {
             let mut batches = self.batches.lock().unwrap();
             let actions = if batches.is_empty() {
                 vec![Action::Finish {
@@ -237,13 +237,15 @@ mod tests {
             } else {
                 batches.remove(0)
             };
-            Ok(actions
-                .into_iter()
-                .map(|action| LlmToolCall {
-                    tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
-                    action,
-                })
-                .collect())
+            Ok(AgentResponse::ToolCalls(
+                actions
+                    .into_iter()
+                    .map(|action| LlmToolCall {
+                        tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
+                        action,
+                    })
+                    .collect(),
+            ))
         }
 
         fn model_id(&self) -> &str {

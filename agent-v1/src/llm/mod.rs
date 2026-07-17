@@ -8,7 +8,10 @@ pub mod agentrouter_client;
 pub mod deepseek_client;
 pub mod groq_client;
 pub mod parse;
+pub mod protocol;
 pub mod schema;
+
+pub use protocol::{AgentResponse, ProtocolError};
 
 use crate::config::Config;
 
@@ -45,8 +48,16 @@ pub fn build_client(config: &Config) -> Box<dyn LlmClient> {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    /// Next model turn — may contain multiple tool calls (batch).
-    async fn next_actions(&self, request: &LlmRequest) -> Result<Vec<LlmToolCall>, LlmError>;
+    /// Provider-normalized model turn.
+    ///
+    /// Transport failures (`ApiError`, `RateLimited`, `ToolUseFailed` from HTTP)
+    /// remain as `Err`. Model outcomes are always an [`AgentResponse`].
+    async fn respond(&self, request: &LlmRequest) -> Result<AgentResponse, LlmError>;
+
+    /// Legacy adapter for the loop engine — maps [`AgentResponse`] to the old Result shape.
+    async fn next_actions(&self, request: &LlmRequest) -> Result<Vec<LlmToolCall>, LlmError> {
+        self.respond(request).await?.into_llm_result()
+    }
 
     fn model_id(&self) -> &str;
 }

@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::context::LlmRequest;
-use crate::llm::parse::{message_has_tool_calls, parse_tool_calls_message};
-use crate::llm::{LlmClient, LlmError, LlmToolCall};
+use crate::llm::protocol::{normalize_openai_chat_choice, AgentResponse};
+use crate::llm::{LlmClient, LlmError};
 
 const DEFAULT_DEEPSEEK_API_URL: &str = "https://api.deepseek.com/chat/completions";
 
@@ -92,7 +92,7 @@ impl DeepSeekClient {
 
 #[async_trait]
 impl LlmClient for DeepSeekClient {
-    async fn next_actions(&self, request: &LlmRequest) -> Result<Vec<LlmToolCall>, LlmError> {
+    async fn respond(&self, request: &LlmRequest) -> Result<AgentResponse, LlmError> {
         // V4 thinking mode rejects tool_choice=required; auto + thinking disabled
         // keeps agent tool loops reliable.
         let body = json!({
@@ -111,17 +111,7 @@ impl LlmClient for DeepSeekClient {
             .get(0)
             .ok_or_else(|| LlmError::ApiError("response has no choices".to_string()))?;
 
-        let message = &choice["message"];
-
-        if message_has_tool_calls(choice, message) {
-            parse_tool_calls_message(message)
-        } else {
-            let text = message["content"]
-                .as_str()
-                .unwrap_or("[no content]")
-                .to_string();
-            Err(LlmError::NoToolCall(text))
-        }
+        Ok(normalize_openai_chat_choice(choice))
     }
 
     fn model_id(&self) -> &str {
