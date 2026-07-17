@@ -33,8 +33,12 @@ pub struct GovernanceMetrics {
     pub edit_or_justify_transitions: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GovernanceState {
+    /// When false (default), semantic mode gating / rejections are disabled.
+    /// Code remains for comparison; see phasev2.md Phase A.
+    pub semantic_policy: bool,
+
     pub workspace_revision: u64,
 
     pub last_edit_turn: Option<u32>,
@@ -65,12 +69,49 @@ pub struct GovernanceState {
     pub pending_guidance: Option<String>,
 }
 
+impl Default for GovernanceState {
+    fn default() -> Self {
+        Self {
+            semantic_policy: false,
+            workspace_revision: 0,
+            last_edit_turn: None,
+            last_successful_verify_turn: None,
+            last_unique_info_turn: None,
+            turns_since_edit: 0,
+            turns_since_unique_info: 0,
+            turns_since_successful_verify: 0,
+            consecutive_blocked_actions: 0,
+            repeated_action_counts: HashMap::new(),
+            verify_family_failures: HashMap::new(),
+            blocked_verification_families: HashSet::new(),
+            escalation: EscalationLevel::None,
+            mode: RuntimeMode::Normal,
+            review_mode_violations: 0,
+            has_successful_edit: false,
+            files_ever_modified: HashSet::new(),
+            pre_edit: PreEditTracker::new(),
+            consecutive_no_tool_turns: 0,
+            no_edit_escalation_level: 0,
+            metrics: GovernanceMetrics::default(),
+            pending_guidance: None,
+        }
+    }
+}
+
 impl GovernanceState {
     pub fn new() -> Self {
         Self::default()
     }
 
+    pub fn with_semantic_policy(mut self, enabled: bool) -> Self {
+        self.semantic_policy = enabled;
+        self
+    }
+
     pub fn tool_policy(&self) -> super::policy::ToolPolicy {
+        if !self.semantic_policy {
+            return super::policy::ToolPolicy::unrestricted();
+        }
         super::policy::ToolPolicy::from_state(self)
     }
 
@@ -123,6 +164,9 @@ impl GovernanceState {
 
     pub fn set_no_edit_escalation_level(&mut self, level: u32) {
         self.no_edit_escalation_level = level;
+        if !self.semantic_policy {
+            return;
+        }
         if level >= 4 && self.mode == RuntimeMode::Normal {
             self.enter_edit_or_justify(
                 "no-edit budget exhausted — patch, one justified new read, update plan, or finish.",
@@ -148,6 +192,9 @@ impl GovernanceState {
     }
 
     pub fn enter_edit_or_justify(&mut self, reason: &str) {
+        if !self.semantic_policy {
+            return;
+        }
         if self.mode == RuntimeMode::Normal {
             self.metrics.edit_or_justify_transitions += 1;
         }
@@ -161,6 +208,9 @@ impl GovernanceState {
     }
 
     pub fn enter_review_or_finish(&mut self, reason: &str) {
+        if !self.semantic_policy {
+            return;
+        }
         if self.mode != RuntimeMode::ReviewOrFinish {
             self.metrics.review_or_finish_transitions += 1;
         }
@@ -174,6 +224,9 @@ impl GovernanceState {
     }
 
     pub fn escalate_from_repeats(&mut self, blocked_count: u32) {
+        if !self.semantic_policy {
+            return;
+        }
         self.escalation = match blocked_count {
             0..=1 => EscalationLevel::None,
             2 => EscalationLevel::Warn,
@@ -194,14 +247,6 @@ impl GovernanceState {
     }
 
     pub fn end_turn(&mut self, model_turn: u32, edited_this_turn: bool) {
-        self.pre_edit.end_turn(model_turn, edited_this_turn);
-
-        if self.pre_edit.should_enter_edit_or_justify() && self.mode == RuntimeMode::Normal {
-            self.enter_edit_or_justify(
-                "enough evidence exists to edit — pre-edit stagnation window expired.",
-            );
-        }
-
         if self.last_edit_turn.is_some() && !edited_this_turn {
             self.turns_since_edit = self.turns_since_edit.saturating_add(1);
         }
@@ -211,6 +256,19 @@ impl GovernanceState {
         if self.last_successful_verify_turn.is_some() {
             self.turns_since_successful_verify =
                 self.turns_since_successful_verify.saturating_add(1);
+        }
+
+        if !self.semantic_policy {
+            let _ = model_turn;
+            return;
+        }
+
+        self.pre_edit.end_turn(model_turn, edited_this_turn);
+
+        if self.pre_edit.should_enter_edit_or_justify() && self.mode == RuntimeMode::Normal {
+            self.enter_edit_or_justify(
+                "enough evidence exists to edit — pre-edit stagnation window expired.",
+            );
         }
 
         let edited = self.last_edit_turn.is_some();

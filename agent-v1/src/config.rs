@@ -50,6 +50,10 @@ pub struct Config {
 
     /// Prefer keeping at least this many most-recent session messages.
     pub keep_recent_session_messages: usize,
+
+    /// When true, enable semantic runtime modes (EditOrJustify / ReviewOrFinish)
+    /// and related tool gating. Default false — see phasev2.md Phase A.
+    pub semantic_policy: bool,
 }
 
 impl Config {
@@ -120,6 +124,9 @@ impl Config {
             keep_recent_session_messages: env_or("KEEP_RECENT_SESSION_MESSAGES", "20")
                 .parse::<usize>()
                 .expect("KEEP_RECENT_SESSION_MESSAGES must be a non-negative integer"),
+            semantic_policy: env_or("SEMANTIC_POLICY", "false")
+                .parse::<bool>()
+                .expect("SEMANTIC_POLICY must be true or false"),
         }
     }
 }

@@ -14,6 +14,14 @@ pub struct ToolPolicy {
 }
 
 impl ToolPolicy {
+    pub fn unrestricted() -> Self {
+        Self {
+            allowed_tools: ALL_TOOLS.iter().copied().collect(),
+            blocked_verification_families: HashSet::new(),
+            mode: RuntimeMode::Normal,
+        }
+    }
+
     pub fn from_state(state: &GovernanceState) -> Self {
         let mut allowed: HashSet<&'static str> = ALL_TOOLS.iter().copied().collect();
         let blocked_verification_families = state.blocked_verification_families.clone();

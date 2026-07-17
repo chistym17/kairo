@@ -42,6 +42,10 @@ pub enum ActionProgress {
 
 impl GovernanceState {
     pub fn before_action(&mut self, action: &Action, _model_turn: u32) -> GovernanceDecision {
+        if !self.semantic_policy {
+            return GovernanceDecision::Allow;
+        }
+
         let policy = self.tool_policy();
         let fp = fingerprint(action, self.workspace_revision);
         let fp_hash = fingerprint_hash(&fp);
@@ -116,6 +120,10 @@ impl GovernanceState {
         progress: ActionProgress,
         model_turn: u32,
     ) {
+        if !self.semantic_policy {
+            return;
+        }
+
         let fp = fingerprint(action, self.workspace_revision);
         let fp_hash = fingerprint_hash(&fp);
 

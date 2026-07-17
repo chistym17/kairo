@@ -157,6 +157,7 @@ fn build_runtime(config: &config::Config) -> AgentRuntime {
         config.context_reserve_tokens,
         config.keep_recent_session_messages,
     )
+    .with_semantic_policy(config.semantic_policy)
 }
 
 #[tokio::main]
@@ -179,6 +180,10 @@ async fn main() {
     println!("[agent-v1] workspace: {}", config.workspace_root.display());
     println!("[agent-v1] model: {}", config.model_id);
     println!("[agent-v1] max_steps: {}", config.max_steps);
+    println!(
+        "[agent-v1] semantic_policy: {}",
+        config.semantic_policy
+    );
     if config.step_delay_ms > 0 {
         println!("[agent-v1] step_delay: {}ms", config.step_delay_ms);
     }

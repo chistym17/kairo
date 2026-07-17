@@ -108,7 +108,7 @@ pub fn apply_read_governance_to_shell(
     workspace_root: &Path,
     intent: &ShellFileReadIntent,
 ) -> Option<crate::tools::ToolResult> {
-    use crate::tools::read_cache::{ReadCacheOutcome, repeated_read_block_message};
+    use crate::tools::read_cache::ReadCacheOutcome;
     match read_cache.before_read(
         workspace_root,
         &intent.path,
@@ -122,11 +122,6 @@ pub fn apply_read_governance_to_shell(
             intent.offset,
             intent.limit,
         ),
-        ReadCacheOutcome::BlockedRepeated => Some(repeated_read_block_message(
-            &intent.path,
-            intent.offset,
-            intent.limit,
-        )),
     }
 }
 

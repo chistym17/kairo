@@ -93,7 +93,11 @@ pub async fn run(
                 .map(|s| s.messages.clone())
                 .unwrap_or_default();
             let goal_for_llm = goal_with_plan(state);
-            let tool_policy = state.governance.tool_policy();
+            let tool_policy = if state.governance.semantic_policy {
+                Some(state.governance.tool_policy())
+            } else {
+                None
+            };
             let (request, full_stats, bounded_stats, reduction) =
                 context_manager.build_bounded_request(
                     context_builder,
@@ -102,7 +106,7 @@ pub async fn run(
                     session.as_deref_mut(),
                     &session_messages_snapshot,
                     &state.history,
-                    Some(&tool_policy),
+                    tool_policy.as_ref(),
                 );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
@@ -167,8 +171,9 @@ pub async fn run(
                         state.exploration.model_turns_since_edit.saturating_add(1);
                     state.exploration.consecutive_single_readonly_turns = 0;
                     state.governance.note_no_tool_turn();
-                    if state.governance.consecutive_no_tool_turns
-                        >= crate::governance::MAX_NO_TOOL_TURNS
+                    if state.governance.semantic_policy
+                        && state.governance.consecutive_no_tool_turns
+                            >= crate::governance::MAX_NO_TOOL_TURNS
                     {
                         state.governance.pending_guidance = Some(
                             "You did not request a tool or finish the task. \
@@ -264,7 +269,11 @@ pub async fn run(
                             .map(|s| s.messages.clone())
                             .unwrap_or_default();
                         let goal_for_llm = goal_with_plan(state);
-                        let tool_policy = state.governance.tool_policy();
+                        let tool_policy = if state.governance.semantic_policy {
+                            Some(state.governance.tool_policy())
+                        } else {
+                            None
+                        };
                         let (request, full_stats, bounded_stats, reduction) =
                             context_manager.build_bounded_request(
                                 context_builder,
@@ -273,7 +282,7 @@ pub async fn run(
                                 session.as_deref_mut(),
                                 &session_messages_snapshot,
                                 &state.history,
-                                Some(&tool_policy),
+                                tool_policy.as_ref(),
                             );
 
                         write_event(
@@ -1012,21 +1021,12 @@ fn read_file_cached(
         .read_cache
         .try_hit(&state.workspace_root, path, offset, limit)
     {
-        if hit.success {
-            write_event(
-                &state.run_id,
-                "cache_hit",
-                &format!("{} offset={} limit={}", path.display(), offset, limit),
-                0,
-            );
-        } else {
-            write_event(
-                &state.run_id,
-                "repeated_read_blocked",
-                &format!("{} offset={} limit={}", path.display(), offset, limit),
-                0,
-            );
-        }
+        write_event(
+            &state.run_id,
+            "cache_hit",
+            &format!("{} offset={} limit={}", path.display(), offset, limit),
+            0,
+        );
         return hit;
     }
 
@@ -1230,31 +1230,30 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Current plan\n");
         out.push_str(&plan.render());
     }
-    let level = state.exploration.no_edit_escalation_level();
-    state.governance.set_no_edit_escalation_level(level);
+    // Soft batching nudge only — no semantic no-edit escalation.
     if let Some(nudge) = state.exploration.nudge_for_injection() {
-        let event = if nudge.contains("exploring inefficiently")
-            && nudge.contains("No file edit")
-        {
-            "exploration_nudge"
-        } else if nudge.contains("exploring inefficiently") {
-            "exploration_batch_nudge"
-        } else {
-            "no_edit_budget_nudge"
-        };
-        write_event(&state.run_id, event, &nudge[..nudge.len().min(400)], 0);
-        out.push_str("\n\n## Runtime guidance\n");
-        out.push_str(&nudge);
-    }
-    if let Some(guidance) = state.governance.take_pending_guidance() {
         write_event(
             &state.run_id,
-            "governance_guidance",
-            &guidance[..guidance.len().min(400)],
+            "exploration_batch_nudge",
+            &nudge[..nudge.len().min(400)],
             0,
         );
         out.push_str("\n\n## Runtime guidance\n");
-        out.push_str(&guidance);
+        out.push_str(&nudge);
+    }
+    if state.governance.semantic_policy {
+        let level = state.exploration.no_edit_escalation_level();
+        state.governance.set_no_edit_escalation_level(level);
+        if let Some(guidance) = state.governance.take_pending_guidance() {
+            write_event(
+                &state.run_id,
+                "governance_guidance",
+                &guidance[..guidance.len().min(400)],
+                0,
+            );
+            out.push_str("\n\n## Runtime guidance\n");
+            out.push_str(&guidance);
+        }
     }
     out
 }

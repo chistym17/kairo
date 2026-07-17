@@ -34,6 +34,8 @@ pub struct AgentRuntime {
     pub tool_use_retry_delay_ms: u64,
     /// When true (benchmarks), finish requires a prior successful run_command/run_shell.
     pub require_verified_finish: bool,
+    /// When true, enable semantic governance (modes / tool gating). Default false.
+    pub semantic_policy: bool,
     context_builder: ContextBuilder,
     context_manager: ContextManager,
 }
@@ -60,6 +62,7 @@ impl AgentRuntime {
             tool_use_retry_delay_ms,
             // Developer/default: allow finish without a green verify step.
             require_verified_finish: false,
+            semantic_policy: false,
             context_builder: ContextBuilder::new().with_system_prompt(system_prompt),
             context_manager: ContextManager::new(
                 max_context_tokens,
@@ -71,6 +74,11 @@ impl AgentRuntime {
 
     pub fn with_verified_finish(mut self, require: bool) -> Self {
         self.require_verified_finish = require;
+        self
+    }
+
+    pub fn with_semantic_policy(mut self, enabled: bool) -> Self {
+        self.semantic_policy = enabled;
         self
     }
 
@@ -96,6 +104,7 @@ impl AgentRuntime {
             self.model_id.clone(),
             self.max_steps,
         );
+        state.governance.semantic_policy = self.semantic_policy;
 
         if let Some(obs) = observer {
             obs.on_event(AgentEvent::RunStarted {
@@ -622,7 +631,8 @@ mod tests {
             16000,
             2048,
             20,
-        );
+        )
+        .with_semantic_policy(true);
 
         let result = runtime.run("goal", &workspace, None, None).await.unwrap();
         let log = std::fs::read_to_string(&result.log_path).unwrap();

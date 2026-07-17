@@ -11,7 +11,7 @@ mod tests {
 
     #[test]
     fn blocks_repeated_grep_after_threshold() {
-        let mut gov = GovernanceState::new();
+        let mut gov = GovernanceState::new().with_semantic_policy(true);
         gov.note_edit(1);
         let action = Action::RunCommand {
             cmd: "grep position frontend-v2/src/lib/api.ts".to_string(),
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn edit_or_justify_blocks_broad_search() {
-        let mut gov = GovernanceState::new();
+        let mut gov = GovernanceState::new().with_semantic_policy(true);
         gov.enter_edit_or_justify("test");
         assert_eq!(gov.mode, RuntimeMode::EditOrJustify);
 
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn review_or_finish_blocks_explore_reads() {
-        let mut gov = GovernanceState::new();
+        let mut gov = GovernanceState::new().with_semantic_policy(true);
         gov.enter_review_or_finish("test");
         assert_eq!(gov.mode, RuntimeMode::ReviewOrFinish);
 
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn edit_resets_blocked_fingerprints() {
-        let mut gov = GovernanceState::new();
+        let mut gov = GovernanceState::new().with_semantic_policy(true);
         gov.note_edit(1);
         let action = Action::RunCommand {
             cmd: "grep foo".to_string(),
@@ -122,6 +122,22 @@ mod tests {
         gov.note_edit(5);
         assert!(matches!(
             gov.before_action(&action, 6),
+            GovernanceDecision::Allow
+        ));
+    }
+
+    #[test]
+    fn semantic_policy_off_never_rejects() {
+        let mut gov = GovernanceState::new(); // default: semantic_policy = false
+        gov.enter_edit_or_justify("should be ignored");
+        assert_eq!(gov.mode, RuntimeMode::Normal);
+
+        let search = Action::SearchCode {
+            query: "foo".into(),
+            path: PathBuf::from("."),
+        };
+        assert!(matches!(
+            gov.before_action(&search, 1),
             GovernanceDecision::Allow
         ));
     }

@@ -1,6 +1,7 @@
 //! Runtime governance — progress tracking, deadlock detection, tool gating.
 //!
-//! Answers only: "Can this next action still produce useful progress?"
+//! **Default off.** Semantic policy (EditOrJustify / ReviewOrFinish / tool removal)
+//! is disabled unless `SEMANTIC_POLICY=true`. Kept for comparison; see phasev2.md.
 
 mod decide;
 mod fingerprint;
@@ -24,6 +25,7 @@ pub const STAGNATION_TURNS_AFTER_EDIT: u32 = 8;
 pub const VERIFY_FAMILY_FAILURE_THRESHOLD: u32 = 3;
 pub const REVIEW_MODE_VIOLATIONS_BEFORE_TERMINATE: u32 = 3;
 /// Model turns without edit at which each no-edit nudge fires (max 4).
+/// Only applied when `semantic_policy` is enabled.
 pub const NO_EDIT_NUDGE_THRESHOLDS: [u32; 4] = [4, 6, 8, 10];
 pub const POST_VERIFY_FINISH_TURNS: u32 = 2;
 pub const MAX_NO_TOOL_TURNS: u32 = 2;
