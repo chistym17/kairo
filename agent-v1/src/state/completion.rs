@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 
+use crate::verification::VerificationOutcome;
+
 /// Idle model turns after edit+review+verify-attempt before auto-stop.
 pub const POST_EDIT_IDLE_TURNS: u32 = 4;
 
@@ -21,6 +23,7 @@ pub struct CompletionTracker {
     seen_result_fingerprints: HashSet<u64>,
     pub last_verify_success: Option<bool>,
     pub last_verify_detail: Option<String>,
+    pub last_verification: Option<VerificationOutcome>,
 }
 
 impl CompletionTracker {
@@ -37,6 +40,7 @@ impl CompletionTracker {
         self.seen_result_fingerprints.clear();
         self.last_verify_success = None;
         self.last_verify_detail = None;
+        self.last_verification = None;
     }
 
     /// Reset idle time only for a result not already observed since the edit.
@@ -59,17 +63,22 @@ impl CompletionTracker {
         self.maybe_mark_milestones(turn);
     }
 
-    /// Record a real verify attempt (run_command / run_shell that executed).
-    pub fn note_verify_attempt(&mut self, turn: u32, success: bool, detail: impl Into<String>) {
+    /// Record an executed command that matched a discovered repository check.
+    pub fn note_verification_outcome(
+        &mut self,
+        turn: u32,
+        outcome: VerificationOutcome,
+    ) {
         if self.last_edit_turn.is_none() {
             return;
         }
         self.verify_attempted_since_edit = true;
-        self.last_verify_success = Some(success);
-        self.last_verify_detail = Some(detail.into());
-        if success {
+        self.last_verify_success = Some(outcome.passed);
+        self.last_verify_detail = Some(outcome.summary.clone());
+        if outcome.passed {
             self.last_progress_turn = Some(turn);
         }
+        self.last_verification = Some(outcome);
         self.maybe_mark_milestones(turn);
     }
 
@@ -103,6 +112,17 @@ impl CompletionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verification::{CheckKind, VerificationOutcome};
+
+    fn outcome(passed: bool, summary: &str) -> VerificationOutcome {
+        VerificationOutcome {
+            check_id: "root:test".into(),
+            kind: CheckKind::Test,
+            passed,
+            exit_code: Some(if passed { 0 } else { 1 }),
+            summary: summary.into(),
+        }
+    }
 
     #[test]
     fn completes_after_edit_review_verify_and_idle() {
@@ -111,7 +131,7 @@ mod tests {
         assert!(!t.should_complete_unverified(14));
         t.note_review(11);
         assert!(!t.should_complete_unverified(14));
-        t.note_verify_attempt(12, false, "exited with code 1");
+        t.note_verification_outcome(12, outcome(false, "exited with code 1"));
         assert_eq!(t.milestones_met_turn, Some(12));
         assert!(!t.should_complete_unverified(15)); // idle 3 from max(10,12)=12
         assert!(t.should_complete_unverified(16)); // idle 4
@@ -122,7 +142,7 @@ mod tests {
         let mut t = CompletionTracker::new();
         t.note_edit(1);
         t.note_review(2);
-        t.note_verify_attempt(3, true, "exit_code: 0");
+        t.note_verification_outcome(3, outcome(true, "3 passed"));
         assert!(!t.should_complete_unverified(6));
         assert!(t.should_complete_unverified(7));
     }
@@ -132,7 +152,7 @@ mod tests {
         let mut t = CompletionTracker::new();
         t.note_edit(1);
         t.note_review(2);
-        t.note_verify_attempt(3, false, "blocked");
+        t.note_verification_outcome(3, outcome(false, "failed"));
         assert!(t.note_novel_result(5, 42));
         assert!(!t.note_novel_result(6, 42));
         assert!(!t.should_complete_unverified(8));

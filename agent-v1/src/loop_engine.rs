@@ -1110,12 +1110,6 @@ fn commit_tool_outcome(
                 },
             );
         }
-        if matches!(
-            action,
-            Action::RunCommand { .. } | Action::RunShell { .. }
-        ) {
-            state.note_verification();
-        }
     } else {
         emit(
             observer,
@@ -1160,29 +1154,27 @@ fn commit_tool_outcome(
         Action::GitDiff { .. } | Action::GitStatus => {
             state.completion.note_review(model_turn);
         }
-        Action::RunCommand { .. } | Action::RunShell { .. } => {
-            // Count real executions and failed attempts; skip pure cache/budget blocks.
+        Action::RunCommand { cmd, cwd, .. }
+        | Action::RunShell {
+            command: cmd,
+            cwd,
+            ..
+        } => {
+            // Only real executions matching repository-discovered checks count
+            // as verification. Arbitrary shell commands no longer satisfy the
+            // completion milestone.
             if !result_is_blocked {
-                let detail = result
-                    .error
-                    .clone()
-                    .or_else(|| {
-                        result
-                            .output
-                            .lines()
-                            .find(|l| l.starts_with("exit_code:"))
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| {
-                        if result.success {
-                            "exit_code: 0".into()
-                        } else {
-                            "verification failed".into()
-                        }
-                    });
-                state
-                    .completion
-                    .note_verify_attempt(model_turn, result.success, detail);
+                let matched = state.project_snapshot.as_ref().and_then(|snapshot| {
+                    let checks = crate::verification::discover_checks(snapshot);
+                    crate::verification::match_executed_check(cmd, cwd, &checks)
+                        .map(|check| crate::verification::outcome_for(check, &result))
+                });
+                if let Some(outcome) = matched {
+                    state.note_verification();
+                    state
+                        .completion
+                        .note_verification_outcome(model_turn, outcome);
+                }
             }
         }
         _ => {}

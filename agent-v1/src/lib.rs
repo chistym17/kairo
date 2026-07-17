@@ -5,6 +5,7 @@ pub mod logging;
 pub mod loop_engine;
 pub mod state;
 pub mod tools;
+pub mod verification;
 
 pub mod benchmark;
 pub mod agent;

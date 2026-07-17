@@ -65,6 +65,26 @@ fn summarize_diff_vs_head(state: &AgentState, files: &[String]) -> String {
 }
 
 fn verification_lines(c: &CompletionTracker) -> (String, String) {
+    if let Some(outcome) = &c.last_verification {
+        let exit = outcome
+            .exit_code
+            .map(|code| format!(", exit {code}"))
+            .unwrap_or_default();
+        if outcome.passed {
+            return (
+                format!(
+                    "{} passed ({:?}{exit}): {}",
+                    outcome.check_id, outcome.kind, outcome.summary
+                ),
+                "none".into(),
+            );
+        }
+        return (
+            format!("{} failed ({:?}{exit})", outcome.check_id, outcome.kind),
+            outcome.summary.clone(),
+        );
+    }
+
     match c.last_verify_success {
         None if c.last_edit_turn.is_none() => ("not started".into(), "none".into()),
         None => ("not attempted since last edit".into(), "none".into()),
