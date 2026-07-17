@@ -37,7 +37,10 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
     };
 
     let start = Instant::now();
-    let spawned = Command::new("sh")
+    // bash + pipefail so `cmd | tail` cannot hide a crashed left-hand side as exit 0.
+    let spawned = Command::new("bash")
+        .arg("-o")
+        .arg("pipefail")
         .arg("-c")
         .arg(command)
         .current_dir(&cwd_abs)
@@ -51,7 +54,7 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
         Ok(c) => c,
         Err(e) => {
             return ToolResult::error(format!(
-                "failed to spawn sh: {e}. Is a POSIX shell available?"
+                "failed to spawn bash: {e}. Is bash available on PATH?"
             ));
         }
     };
@@ -273,6 +276,25 @@ mod tests {
             result.error
         );
         assert!(result.output.contains("command: sleep 5"));
+    }
+
+    #[test]
+    fn pipefail_surfaces_left_side_failure() {
+        let dir = tempdir().unwrap();
+        let result = execute(
+            RunShellOpts {
+                command: "bash -c 'exit 42' | cat",
+                cwd: Path::new("."),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        assert!(!result.success, "pipefail must not hide left-side exit 42");
+        assert!(
+            result.output.contains("exit_code: 42"),
+            "{}",
+            result.output
+        );
     }
 
     #[test]

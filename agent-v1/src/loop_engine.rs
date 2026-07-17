@@ -445,6 +445,25 @@ pub async fn run(
                     ) && s.result.success
                 }),
         );
+
+        if state.completion.should_complete_unverified(model_turn) {
+            let reason = StopReason::CompletedUnverified;
+            write_event(
+                &state.run_id,
+                "post_edit_idle_complete",
+                &format!(
+                    "edit+review+verify attempted; idle >= {} turns — CompletedUnverified",
+                    crate::state::completion::POST_EDIT_IDLE_TURNS
+                ),
+                0,
+            );
+            println!(
+                "\n[agent] post-edit idle complete — {:?}",
+                reason
+            );
+            write_summary(state, &reason);
+            return reason;
+        }
     }
 }
 
@@ -1111,6 +1130,64 @@ fn commit_tool_outcome(
         );
     }
 
+    // Objective completion milestones (not semantic governance).
+    let read_cache_hit = matches!(action, Action::ReadFile { .. })
+        && result.output.starts_with("[cached");
+    let result_is_blocked = result
+        .error
+        .as_deref()
+        .map(|e| {
+            let l = e.to_ascii_lowercase();
+            l.contains("explore-shell budget")
+                || l.contains("blocked: identical")
+                || l.contains("blocked: explore")
+        })
+        .unwrap_or(false);
+
+    if !read_cache_hit
+        && !result_is_blocked
+        && !matches!(
+            action,
+            Action::ApplyPatch { .. } | Action::WriteFile { .. } | Action::Finish { .. }
+        )
+    {
+        state
+            .completion
+            .note_novel_result(model_turn, objective_result_fingerprint(&action, &result));
+    }
+
+    match &action {
+        Action::GitDiff { .. } | Action::GitStatus => {
+            state.completion.note_review(model_turn);
+        }
+        Action::RunCommand { .. } | Action::RunShell { .. } => {
+            // Count real executions and failed attempts; skip pure cache/budget blocks.
+            if !result_is_blocked {
+                let detail = result
+                    .error
+                    .clone()
+                    .or_else(|| {
+                        result
+                            .output
+                            .lines()
+                            .find(|l| l.starts_with("exit_code:"))
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| {
+                        if result.success {
+                            "exit_code: 0".into()
+                        } else {
+                            "verification failed".into()
+                        }
+                    });
+                state
+                    .completion
+                    .note_verify_attempt(model_turn, result.success, detail);
+            }
+        }
+        _ => {}
+    }
+
     if let Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } = &action {
         emit(
             observer,
@@ -1150,8 +1227,6 @@ fn commit_tool_outcome(
         "step_index must match sequential record order"
     );
 
-    let read_cache_hit = matches!(action, Action::ReadFile { .. })
-        && result.output.starts_with("[cached");
     if result.success {
         match &action {
             Action::ReadFile { path, .. } => state.governance.pre_edit.observe_read(
@@ -1230,6 +1305,11 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Current plan\n");
         out.push_str(&plan.render());
     }
+    if state.completion.last_edit_turn.is_some() {
+        let summary = crate::state::workspace_summary::render_workspace_summary(state);
+        out.push_str("\n\n## Workspace state\n");
+        out.push_str(&summary);
+    }
     // Soft batching nudge only — no semantic no-edit escalation.
     if let Some(nudge) = state.exploration.nudge_for_injection() {
         write_event(
@@ -1306,6 +1386,19 @@ fn record_governance_after(
     state
         .governance
         .after_action(action, result, progress, model_turn);
+}
+
+fn objective_result_fingerprint(action: &Action, result: &ToolResult) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(action)
+        .unwrap_or_else(|_| format!("{action:?}"))
+        .hash(&mut hasher);
+    result.success.hash(&mut hasher);
+    result.output.hash(&mut hasher);
+    result.error.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn looks_like_unified_diff(diff: &str) -> bool {

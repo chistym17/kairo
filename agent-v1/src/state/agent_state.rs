@@ -3,6 +3,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::governance::GovernanceState;
+use crate::state::completion::CompletionTracker;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
 use crate::state::plan::AgentPlan;
@@ -39,6 +40,9 @@ pub struct AgentState {
     /// Serial exploration + soft no-edit budget tracking.
     pub exploration: ExplorationTracker,
 
+    /// Objective post-edit completion milestones.
+    pub completion: CompletionTracker,
+
     /// Runtime governance — progress, deadlock detection, tool gating.
     pub governance: GovernanceState,
 
@@ -71,6 +75,7 @@ impl AgentState {
             read_cache: ReadCache::new(),
             shell_cache: ShellCommandCache::new(),
             exploration: ExplorationTracker::new(),
+            completion: CompletionTracker::new(),
             governance: GovernanceState::new(),
             run_started: Instant::now(),
             parallel_tool_groups: 0,
@@ -118,6 +123,7 @@ impl AgentState {
         }
         self.shell_cache.clear();
         self.exploration.note_edit();
+        self.completion.note_edit(model_turn);
         self.governance.note_edit(model_turn);
     }
 
