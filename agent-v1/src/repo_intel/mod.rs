@@ -1,16 +1,28 @@
 //! Thin repository intelligence seam.
 //!
-//! First backend (`SearchSnapshotIntel`) ranks content/path hits using the
-//! existing project snapshot. Richer symbol backends can implement the same
-//! [`RepositoryIntelligence`] trait later without changing the tool surface.
+//! - Tool backend today: [`SearchSnapshotIntel`] (unchanged behavior).
+//! - Hybrid pipeline seams: [`types`] + [`traits`] (Part 1). Sources/index
+//!   build come in later parts without changing the `locate` tool API.
 
 mod search_snapshot;
+pub mod traits;
+pub mod types;
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub use search_snapshot::SearchSnapshotIntel;
+pub use traits::{
+    CandidateMerger, CandidateRanker, CandidateSource, DefaultCandidateMerger, FileIndexer,
+    HybridRepositoryIntelligence, IndexStorage, SignalSumRanker, SnippetProvider, SymbolExtractor,
+};
+pub use types::{
+    CandidateSignal, CandidateSourceError, FileChange, FileChangeKind, FileHash, FileRecord,
+    ImportReference, Language, LocateCandidate, LocateError, MergedCandidate, RawCandidate,
+    RepositoryIndex, RepositoryIntelligenceError, RepositoryRevision, SignalKind, Snippet,
+    SymbolKind, SymbolLocation, SymbolRecord,
+};
 
 use crate::tools::project_snapshot::ProjectSnapshot;
 use crate::tools::ToolResult;
@@ -108,8 +120,16 @@ impl LocateResult {
     }
 }
 
+/// Legacy tool-facing locate (returns rendered [`LocateResult`]).
+///
+/// Hybrid ranked locate uses [`HybridRepositoryIntelligence`]. Additive
+/// [`Self::update`] defaults to no-op so snapshot search stays valid.
 pub trait RepositoryIntelligence {
     fn locate(&self, request: &LocateRequest) -> LocateResult;
+
+    fn update(&mut self, _changes: &[FileChange]) -> Result<(), RepositoryIntelligenceError> {
+        Ok(())
+    }
 }
 
 /// Tool entry: ranked locate over workspace (optional path scopes search).
