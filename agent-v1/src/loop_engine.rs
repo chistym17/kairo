@@ -733,34 +733,76 @@ async fn execute_readonly_group(
                     limit,
                 } = &action
                 {
-                    if let Some(hit) =
-                        state
-                            .read_cache
-                            .try_hit(&workspace, path, *offset, *limit)
-                    {
-                        write_event(
-                            &state.run_id,
-                            "cache_hit",
-                            &format!("{} offset={} limit={}", path.display(), offset, limit),
-                            0,
-                        );
-                        handles.push((
-                            i,
-                            step_index,
-                            action,
-                            tool_call_id,
-                            Some(hit),
-                            None,
-                            true,
-                        ));
-                        continue;
+                    match state.read_cache.resolve(&workspace, path, *offset, *limit) {
+                        tools::read_cache::ReadResolve::AlreadyRead(hit) => {
+                            write_event(
+                                &state.run_id,
+                                "cache_hit",
+                                &format!(
+                                    "{} offset={} limit={} (already-read notice)",
+                                    path.display(),
+                                    offset,
+                                    limit
+                                ),
+                                0,
+                            );
+                            handles.push((
+                                i,
+                                step_index,
+                                action,
+                                tool_call_id,
+                                Some(hit),
+                                None,
+                                true,
+                            ));
+                            continue;
+                        }
+                        tools::read_cache::ReadResolve::Live {
+                            offset: live_off,
+                            limit: live_lim,
+                            note,
+                        } => {
+                            write_event(
+                                &state.run_id,
+                                if note.is_some() {
+                                    "cache_partial"
+                                } else {
+                                    "cache_miss"
+                                },
+                                &format!(
+                                    "{} requested={}-{} live={}-{}",
+                                    path.display(),
+                                    offset,
+                                    offset.saturating_add(limit.saturating_sub(1)),
+                                    live_off,
+                                    live_off.saturating_add(live_lim.saturating_sub(1))
+                                ),
+                                0,
+                            );
+                            let root = workspace.clone();
+                            let path_owned = path.clone();
+                            let handle = tokio::task::spawn_blocking(move || {
+                                let mut result =
+                                    tools::read_file::execute(&path_owned, live_off, live_lim, &root);
+                                if let Some(note) = note {
+                                    if result.success {
+                                        result.output = format!("{note}{}", result.output);
+                                    }
+                                }
+                                result
+                            });
+                            handles.push((
+                                i,
+                                step_index,
+                                action,
+                                tool_call_id,
+                                None,
+                                Some(handle),
+                                false,
+                            ));
+                            continue;
+                        }
                     }
-                    write_event(
-                        &state.run_id,
-                        "cache_miss",
-                        &format!("{} offset={} limit={}", path.display(), offset, limit),
-                        0,
-                    );
                 }
 
                 if let Action::Locate { query, path } = &action {
@@ -1125,38 +1167,67 @@ fn read_file_cached(
     limit: u32,
 ) -> ToolResult {
     let step_index = state.step_count;
-    if let Some(hit) = state
+    match state
         .read_cache
-        .try_hit(&state.workspace_root, path, offset, limit)
+        .resolve(&state.workspace_root, path, offset, limit)
     {
-        write_event(
-            &state.run_id,
-            "cache_hit",
-            &format!("{} offset={} limit={}", path.display(), offset, limit),
-            0,
-        );
-        return hit;
-    }
+        tools::read_cache::ReadResolve::AlreadyRead(hit) => {
+            write_event(
+                &state.run_id,
+                "cache_hit",
+                &format!(
+                    "{} offset={} limit={} (already-read notice)",
+                    path.display(),
+                    offset,
+                    limit
+                ),
+                0,
+            );
+            hit
+        }
+        tools::read_cache::ReadResolve::Live {
+            offset: live_off,
+            limit: live_lim,
+            note,
+        } => {
+            write_event(
+                &state.run_id,
+                if note.is_some() {
+                    "cache_partial"
+                } else {
+                    "cache_miss"
+                },
+                &format!(
+                    "{} requested={}-{} live={}-{}",
+                    path.display(),
+                    offset,
+                    offset.saturating_add(limit.saturating_sub(1)),
+                    live_off,
+                    live_off.saturating_add(live_lim.saturating_sub(1))
+                ),
+                0,
+            );
 
-    write_event(
-        &state.run_id,
-        "cache_miss",
-        &format!("{} offset={} limit={}", path.display(), offset, limit),
-        0,
-    );
-
-    let result = tools::read_file::execute(path, offset, limit, &state.workspace_root);
-    if result.success {
-        state.read_cache.store(
-            &state.workspace_root,
-            path,
-            offset,
-            limit,
-            step_index,
-            &result.output,
-        );
+            let mut result =
+                tools::read_file::execute(path, live_off, live_lim, &state.workspace_root);
+            if let Some(note) = note {
+                if result.success {
+                    result.output = format!("{note}{}", result.output);
+                }
+            }
+            if result.success {
+                state.read_cache.store(
+                    &state.workspace_root,
+                    path,
+                    live_off,
+                    live_lim,
+                    step_index,
+                    &result.output,
+                );
+            }
+            result
+        }
     }
-    result
 }
 
 /// Log, observe, and record a completed tool. Returns Some(stop) if the run should end.

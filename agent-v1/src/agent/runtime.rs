@@ -386,7 +386,7 @@ mod tests {
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("\"event\":\"cache_miss\"") || log.contains("\"event\": \"cache_miss\""));
         assert!(log.contains("\"event\":\"cache_hit\"") || log.contains("\"event\": \"cache_hit\""));
-        assert!(log.contains("[cached — same unchanged range as step"));
+        assert!(log.contains("[already read"));
         assert_eq!(result.efficiency.cache_hits, 1);
         assert!(result.efficiency.cache_misses >= 1);
     }
