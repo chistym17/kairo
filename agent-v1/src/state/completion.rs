@@ -82,9 +82,9 @@ impl CompletionTracker {
             return;
         }
         self.verify_attempted_since_edit = true;
-        self.last_verify_success = Some(outcome.passed);
+        self.last_verify_success = Some(outcome.passed());
         self.last_verify_detail = Some(outcome.summary.clone());
-        if outcome.passed {
+        if outcome.passed() {
             self.last_progress_turn = Some(turn);
         }
         self.last_verification = Some(outcome);
@@ -121,14 +121,28 @@ impl CompletionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verification::{CheckKind, VerificationOutcome};
+    use crate::verification::{CheckKind, VerificationOutcome, VerificationStatus};
 
     fn outcome(passed: bool, summary: &str) -> VerificationOutcome {
         VerificationOutcome {
             check_id: "root:test".into(),
             kind: CheckKind::Test,
-            passed,
+            status: if passed {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::Failed
+            },
             exit_code: Some(if passed { 0 } else { 1 }),
+            summary: summary.into(),
+        }
+    }
+
+    fn env_blocked(summary: &str) -> VerificationOutcome {
+        VerificationOutcome {
+            check_id: "root:test".into(),
+            kind: CheckKind::Test,
+            status: VerificationStatus::EnvironmentBlocked,
+            exit_code: Some(133),
             summary: summary.into(),
         }
     }
@@ -196,5 +210,20 @@ mod tests {
         // Idle anchors at max(progress=2, milestones=5) = 5
         assert!(!t.should_complete_unverified(8));
         assert!(t.should_complete_unverified(9));
+    }
+
+    #[test]
+    fn environment_blocked_counts_as_verify_attempt_without_resetting_idle() {
+        let mut t = CompletionTracker::new();
+        t.note_edit(1);
+        t.note_review(2);
+        t.note_verification_outcome(
+            3,
+            env_blocked("EnvironmentBlocked: sandbox crash"),
+        );
+        assert!(t.verify_attempted_since_edit);
+        assert_eq!(t.milestones_met_turn, Some(3));
+        assert!(!t.last_verify_success.unwrap_or(true));
+        assert!(t.should_complete_unverified(7));
     }
 }

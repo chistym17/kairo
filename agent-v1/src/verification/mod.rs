@@ -1,8 +1,9 @@
 //! Objective verification discovery and outcome recording.
 //!
 //! The model remains responsible for choosing when and what to run. This module
-//! only identifies commands that match checks declared by the repository's
-//! project snapshot and turns their tool results into structured outcomes.
+//! identifies commands that match checks declared by the repository's project
+//! snapshot and classifies their results — including environment/sandbox blocks
+//! that are not evidence the patch itself failed.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -19,6 +20,17 @@ pub enum CheckKind {
     Lint,
     Typecheck,
     Other,
+}
+
+/// Prefer small, non-browser checks first when suggesting or ranking.
+fn kind_preference(kind: CheckKind) -> u8 {
+    match kind {
+        CheckKind::Typecheck => 0,
+        CheckKind::Lint => 1,
+        CheckKind::Test => 2,
+        CheckKind::Build => 3,
+        CheckKind::Other => 4,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,16 +52,38 @@ impl Check {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Passed,
+    Failed,
+    /// Check could not run meaningfully (browser/sandbox/namespace crash, etc.).
+    EnvironmentBlocked,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationOutcome {
     pub check_id: String,
     pub kind: CheckKind,
-    pub passed: bool,
+    pub status: VerificationStatus,
     pub exit_code: Option<i32>,
     pub summary: String,
 }
 
+impl VerificationOutcome {
+    pub fn passed(&self) -> bool {
+        matches!(self.status, VerificationStatus::Passed)
+    }
+
+    pub fn is_environment_blocked(&self) -> bool {
+        matches!(self.status, VerificationStatus::EnvironmentBlocked)
+    }
+}
+
 /// Convert repository command hints into stable, typed verification checks.
+///
+/// Ordered for preference: typecheck → lint → test → build, demoting
+/// browser/e2e-flavored commands, then by snapshot confidence.
 pub fn discover_checks(snapshot: &ProjectSnapshot) -> Vec<Check> {
     let mut checks = Vec::new();
 
@@ -82,13 +116,23 @@ pub fn discover_checks(snapshot: &ProjectSnapshot) -> Vec<Check> {
     }
 
     checks.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        kind_preference(a.kind)
+            .cmp(&kind_preference(b.kind))
+            .then_with(|| browserish_penalty(a).cmp(&browserish_penalty(b)))
+            .then_with(|| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.id.cmp(&b.id))
     });
     checks.dedup_by(|a, b| a.command() == b.command() && a.cwd == b.cwd);
     checks
+}
+
+/// First preferred non-browserish check, if any (for summaries / fallbacks).
+pub fn preferred_check(checks: &[Check]) -> Option<&Check> {
+    checks.iter().find(|c| browserish_penalty(c) == 0)
 }
 
 /// Match a command execution to a discovered check.
@@ -127,12 +171,108 @@ pub fn match_executed_check<'a>(
 }
 
 pub fn outcome_for(check: &Check, result: &ToolResult) -> VerificationOutcome {
+    let exit_code = parse_exit_code(&result.output);
+    let env_blocked = is_environment_blocked(result);
+
+    let status = if result.success {
+        VerificationStatus::Passed
+    } else if env_blocked {
+        VerificationStatus::EnvironmentBlocked
+    } else {
+        VerificationStatus::Failed
+    };
+
+    let summary = match status {
+        VerificationStatus::EnvironmentBlocked => {
+            let detail = summarize_result(result);
+            let fallback = preferred_check_hint(check);
+            format!(
+                "EnvironmentBlocked: check could not run in this sandbox ({detail}). \
+                 This does not mean the patch failed.{fallback}"
+            )
+        }
+        _ => summarize_result(result),
+    };
+
     VerificationOutcome {
         check_id: check.id.clone(),
         kind: check.kind,
-        passed: result.success,
-        exit_code: parse_exit_code(&result.output),
-        summary: summarize_result(result),
+        status,
+        exit_code,
+        summary,
+    }
+}
+
+fn preferred_check_hint(blocked: &Check) -> String {
+    // Hint is generic — caller may not have the full check list here.
+    let _ = blocked;
+    " Prefer a smaller non-browser check (typecheck, lint, unit test, or build) if available."
+        .to_string()
+}
+
+/// Detect browser/sandbox/namespace failures that are environmental, not test logic.
+pub fn is_environment_blocked(result: &ToolResult) -> bool {
+    let mut blob = String::new();
+    if let Some(err) = &result.error {
+        blob.push_str(err);
+        blob.push('\n');
+    }
+    blob.push_str(&result.output);
+    let lower = blob.to_ascii_lowercase();
+
+    const MARKERS: &[&str] = &[
+        "zygote_host",
+        "zygote",
+        "pr_set_no_new_privs",
+        "setuid sandbox is not running",
+        "failed to move to new namespace",
+        "devtoolsactiveport",
+        "browsertype.launch",
+        "playwright",
+        "puppeteer",
+        "chromium",
+        "chrome_crashpad",
+        "running as root without --no-sandbox",
+        "snap-confine has elevated permissions",
+        "target closed",
+        "browser has been closed",
+        "executable doesn't exist",
+        "no usable sandbox",
+    ];
+
+    if MARKERS.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+
+    // SIGTRAP (133) / SIGABRT (134) paired with sandbox wording is almost always env.
+    if matches!(parse_exit_code(&result.output), Some(133) | Some(134))
+        && (lower.contains("sandbox")
+            || lower.contains("namespace")
+            || lower.contains("trace/breakpoint trap")
+            || lower.contains("core dumped"))
+    {
+        return true;
+    }
+
+    false
+}
+
+fn browserish_penalty(check: &Check) -> u8 {
+    let cmd = check.command().to_ascii_lowercase();
+    const KEYS: &[&str] = &[
+        "playwright",
+        "cypress",
+        "selenium",
+        "puppeteer",
+        "e2e",
+        "chrome",
+        "chromium",
+        "webdriver",
+    ];
+    if KEYS.iter().any(|k| cmd.contains(k)) {
+        10
+    } else {
+        0
     }
 }
 
@@ -198,6 +338,19 @@ fn parse_exit_code(output: &str) -> Option<i32> {
 
 fn summarize_result(result: &ToolResult) -> String {
     if let Some(error) = &result.error {
+        // Prefer a more specific line from output when present.
+        if let Some(line) = result.output.lines().rev().map(str::trim).find(|line| {
+            !line.is_empty()
+                && !line.starts_with("timeout_secs:")
+                && !line.starts_with("duration_ms:")
+                && !line.starts_with("cwd:")
+                && !line.starts_with("exit_code:")
+                && !line.starts_with("--- ")
+        }) {
+            if line.len() > 8 {
+                return line.chars().take(240).collect();
+            }
+        }
         return error.clone();
     }
 
@@ -249,11 +402,25 @@ mod tests {
                             confidence: 0.8,
                         },
                         CommandHint {
+                            label: "typecheck".into(),
+                            program: "npm".into(),
+                            args: vec!["run".into(), "typecheck".into()],
+                            working_directory: PathBuf::from("frontend"),
+                            confidence: 0.75,
+                        },
+                        CommandHint {
                             label: "dev".into(),
                             program: "npm".into(),
                             args: vec!["run".into(), "dev".into()],
                             working_directory: PathBuf::from("frontend"),
                             confidence: 0.8,
+                        },
+                        CommandHint {
+                            label: "test".into(),
+                            program: "npx".into(),
+                            args: vec!["playwright".into(), "test".into()],
+                            working_directory: PathBuf::from("frontend"),
+                            confidence: 0.95,
                         },
                     ],
                     entry_points: vec![],
@@ -283,8 +450,20 @@ mod tests {
     #[test]
     fn discovers_only_verification_commands() {
         let checks = discover_checks(&snapshot());
-        assert_eq!(checks.len(), 2);
         assert!(checks.iter().all(|c| !c.command().contains("dev")));
+        assert!(checks.len() >= 3);
+    }
+
+    #[test]
+    fn ranks_typecheck_before_build_and_demotes_playwright() {
+        let checks = discover_checks(&snapshot());
+        let ids: Vec<&str> = checks.iter().map(|c| c.id.as_str()).collect();
+        let typecheck = ids.iter().position(|id| *id == "frontend:typecheck").unwrap();
+        let build = ids.iter().position(|id| *id == "frontend:build").unwrap();
+        let pw = ids.iter().position(|id| *id == "frontend:test").unwrap();
+        assert!(typecheck < build);
+        assert!(pw > build || pw > typecheck);
+        assert_eq!(preferred_check(&checks).map(|c| c.id.as_str()), Some("frontend:typecheck"));
     }
 
     #[test]
@@ -315,7 +494,10 @@ mod tests {
 
     #[test]
     fn creates_structured_outcome() {
-        let check = discover_checks(&snapshot()).remove(0);
+        let check = discover_checks(&snapshot())
+            .into_iter()
+            .find(|c| c.id == "backend:test")
+            .unwrap();
         let result = ToolResult {
             success: true,
             output: "exit_code: 0\ncwd: backend\n3 passed".into(),
@@ -324,8 +506,54 @@ mod tests {
             stop_reason: None,
         };
         let outcome = outcome_for(&check, &result);
-        assert!(outcome.passed);
+        assert!(outcome.passed());
+        assert_eq!(outcome.status, VerificationStatus::Passed);
         assert_eq!(outcome.exit_code, Some(0));
         assert_eq!(outcome.summary, "3 passed");
+    }
+
+    #[test]
+    fn chromium_sandbox_crash_is_environment_blocked() {
+        let check = discover_checks(&snapshot())
+            .into_iter()
+            .find(|c| c.id == "backend:test")
+            .unwrap();
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 133\ncwd: backend\ntimeout_secs: 60\n\
+                     The setuid sandbox is not running as root.\n\
+                     Failed to move to new namespace: PID namespaces supported\n\
+                     FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc\n\
+                     Trace/breakpoint trap (core dumped)\n"
+                .into(),
+            diff: None,
+            error: Some("exited with code 133".into()),
+            stop_reason: None,
+        };
+        assert!(is_environment_blocked(&result));
+        let outcome = outcome_for(&check, &result);
+        assert_eq!(outcome.status, VerificationStatus::EnvironmentBlocked);
+        assert!(!outcome.passed());
+        assert!(outcome.summary.contains("EnvironmentBlocked"));
+        assert!(outcome.summary.contains("does not mean the patch failed"));
+    }
+
+    #[test]
+    fn ordinary_test_failure_is_failed_not_blocked() {
+        let check = discover_checks(&snapshot())
+            .into_iter()
+            .find(|c| c.id == "backend:test")
+            .unwrap();
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 1\ncwd: backend\nFAIL: test_list_requires_date\nAssertionError\n"
+                .into(),
+            diff: None,
+            error: Some("exited with code 1".into()),
+            stop_reason: None,
+        };
+        let outcome = outcome_for(&check, &result);
+        assert_eq!(outcome.status, VerificationStatus::Failed);
+        assert!(!outcome.summary.contains("EnvironmentBlocked"));
     }
 }

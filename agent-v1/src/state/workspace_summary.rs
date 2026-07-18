@@ -70,34 +70,42 @@ fn verification_lines(c: &CompletionTracker) -> (String, String) {
             .exit_code
             .map(|code| format!(", exit {code}"))
             .unwrap_or_default();
-        if outcome.passed {
-            return (
+        use crate::verification::VerificationStatus;
+        match outcome.status {
+            VerificationStatus::Passed => (
                 format!(
                     "{} passed ({:?}{exit}): {}",
                     outcome.check_id, outcome.kind, outcome.summary
                 ),
                 "none".into(),
-            );
+            ),
+            VerificationStatus::EnvironmentBlocked => (
+                format!(
+                    "{} environment_blocked ({:?}{exit}) — not a patch failure",
+                    outcome.check_id, outcome.kind
+                ),
+                outcome.summary.clone(),
+            ),
+            VerificationStatus::Failed => (
+                format!("{} failed ({:?}{exit})", outcome.check_id, outcome.kind),
+                outcome.summary.clone(),
+            ),
         }
-        return (
-            format!("{} failed ({:?}{exit})", outcome.check_id, outcome.kind),
-            outcome.summary.clone(),
-        );
-    }
-
-    match c.last_verify_success {
-        None if c.last_edit_turn.is_none() => ("not started".into(), "none".into()),
-        None => ("not attempted since last edit".into(), "none".into()),
-        Some(true) => (
-            "last attempt reported success".into(),
-            "none".into(),
-        ),
-        Some(false) => (
-            "last attempt failed".into(),
-            c.last_verify_detail
-                .clone()
-                .unwrap_or_else(|| "command failed".into()),
-        ),
+    } else {
+        match c.last_verify_success {
+            None if c.last_edit_turn.is_none() => ("not started".into(), "none".into()),
+            None => ("not attempted since last edit".into(), "none".into()),
+            Some(true) => (
+                "last attempt reported success".into(),
+                "none".into(),
+            ),
+            Some(false) => (
+                "last attempt failed".into(),
+                c.last_verify_detail
+                    .clone()
+                    .unwrap_or_else(|| "command failed".into()),
+            ),
+        }
     }
 }
 

@@ -11,9 +11,11 @@ Build generic backends behind thin seams. Gate each seam on **two concrete backe
    - Provider adapters own wire format; the loop never branches on Groq/DeepSeek/AgentRouter specifics
    - Existing `next_actions` stays as a thin legacy adapter so the loop need not change yet
 
-2. **Generic verification / check discovery** — passive recognition implemented
+2. **Generic verification / check discovery** — passive recognition + env handling
    - Discover project checks objectively (build, test, lint) without teaching the model “when to verify”
    - Match model-run commands to discovered checks and record structured outcomes
+   - Rank preferred checks: typecheck → lint → test → build; demote browser/e2e commands
+   - Classify sandbox/browser crashes as `EnvironmentBlocked` (not patch failure)
    - Automatic check execution remains intentionally deferred
 
 3. **Thin RepositoryIntelligence** — Phase A+B: single `locate` tool
@@ -31,3 +33,7 @@ Build generic backends behind thin seams. Gate each seam on **two concrete backe
 
 - Semantic governance / mode machines
 - Changing the core tool loop semantics beyond consuming the normalized protocol
+
+
+
+ "On /tasks, selecting a day shows no tasks even though tasks exist for that date. The list endpoint expects a specific query parameter name. Find the frontend/backend mismatch in the tasks API client and fix it. Verify with backend tasks tests."
