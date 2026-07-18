@@ -59,6 +59,7 @@ impl ToolPolicy {
             match action {
                 Action::ListFiles { .. }
                 | Action::SearchCode { .. }
+                | Action::Locate { .. }
                 | Action::FindFiles { .. }
                 | Action::DetectProjectSnapshot { .. } => return false,
                 Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } => {
@@ -84,6 +85,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "read_file",
     "list_files",
     "search_code",
+    "locate",
     "find_files",
     "detect_project_snapshot",
     "git_status",
@@ -122,6 +124,7 @@ pub fn tool_name(action: &Action) -> &'static str {
         Action::ReadFile { .. } => "read_file",
         Action::ListFiles { .. } => "list_files",
         Action::SearchCode { .. } => "search_code",
+        Action::Locate { .. } => "locate",
         Action::FindFiles { .. } => "find_files",
         Action::DetectProjectSnapshot { .. } => "detect_project_snapshot",
         Action::GitStatus => "git_status",

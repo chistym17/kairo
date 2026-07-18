@@ -156,6 +156,13 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
                 "path": path.to_string_lossy()
             }),
         ),
+        Action::Locate { query, path } => (
+            "locate",
+            json!({
+                "query": query,
+                "path": path.to_string_lossy()
+            }),
+        ),
         Action::FindFiles { pattern, path } => (
             "find_files",
             json!({

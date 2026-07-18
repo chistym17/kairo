@@ -79,6 +79,30 @@ pub fn build_tools_schema() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "locate",
+                "description": "Ranked repository locate for a symbol or concept. Prefer this when \
+                    finding where something is defined or used (e.g. 'moveTask', 'dueDate'). \
+                    Returns a short ranked list with path, line, reason, and a small snippet. \
+                    Use search_code when you need a raw unranked dump of every match.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Symbol or text to locate. Example: 'moveTask' or 'dueDate'"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional relative directory to scope the search. Default: '.'"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "find_files",
                 "description": "Find files by glob pattern. \
                     Use this to discover file types or names (e.g. '*.tsx', '**/routes/*', '*test*'). \
@@ -348,6 +372,20 @@ pub fn parse_tool_call(
             })
         }
 
+        "locate" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or("locate missing required arg: query")?;
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            Ok(Action::Locate {
+                query: query.to_string(),
+                path: PathBuf::from(path),
+            })
+        }
+
         "find_files" => {
             let pattern = args["pattern"]
                 .as_str()
@@ -467,7 +505,7 @@ pub fn parse_tool_call(
         }
 
         unknown => Err(format!(
-            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, find_files, detect_project_snapshot, git_status, git_diff, write_file, apply_patch, run_command, run_shell, update_plan, finish",
+            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, locate, find_files, detect_project_snapshot, git_status, git_diff, write_file, apply_patch, run_command, run_shell, update_plan, finish",
             unknown
         )),
     }

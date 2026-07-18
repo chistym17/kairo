@@ -49,6 +49,13 @@ fn summarize_run_steps(steps: &[Step]) -> String {
                     path.to_string_lossy()
                 ));
             }
+            Action::Locate { query, path } => {
+                diagnoses.push(format!(
+                    "located {:?} in {}",
+                    query,
+                    path.to_string_lossy()
+                ));
+            }
             Action::ApplyPatch { path, .. } | Action::WriteFile { path, .. } => {
                 let p = path.to_string_lossy().replace('\\', "/");
                 if !files_modified.contains(&p) {

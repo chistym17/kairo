@@ -474,6 +474,7 @@ fn is_parallel_readonly(action: &Action) -> bool {
         Action::ReadFile { .. }
             | Action::ListFiles { .. }
             | Action::SearchCode { .. }
+            | Action::Locate { .. }
             | Action::FindFiles { .. }
             | Action::DetectProjectSnapshot { .. }
             | Action::GitStatus
@@ -1225,6 +1226,7 @@ fn commit_tool_outcome(
                 &path.to_string_lossy().replace('\\', "/"),
             ),
             Action::SearchCode { .. } => state.governance.pre_edit.observe_search(),
+            Action::Locate { .. } => state.governance.pre_edit.observe_search(),
             _ => {}
         }
     }
@@ -1274,6 +1276,7 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
         Action::ReadFile { .. } => "read_file",
         Action::ListFiles { .. } => "list_files",
         Action::SearchCode { .. } => "search_code",
+        Action::Locate { .. } => "locate",
         Action::FindFiles { .. } => "find_files",
         Action::DetectProjectSnapshot { .. } => "detect_project_snapshot",
         Action::GitStatus => "git_status",
@@ -1429,6 +1432,7 @@ fn validate_action(
         Action::ReadFile { path, .. } => validate_rel_path("read_file", path),
         Action::ListFiles { path } => validate_rel_path("list_files", path),
         Action::SearchCode { path, .. } => validate_rel_path("search_code", path),
+        Action::Locate { path, .. } => validate_rel_path("locate", path),
         Action::FindFiles { path, .. } => validate_rel_path("find_files", path),
         Action::DetectProjectSnapshot { path } => {
             validate_rel_path("detect_project_snapshot", path)
@@ -1673,6 +1677,10 @@ mod tests {
             limit: 10,
         }));
         assert!(is_parallel_readonly(&Action::SearchCode {
+            query: "x".into(),
+            path: PathBuf::from("."),
+        }));
+        assert!(is_parallel_readonly(&Action::Locate {
             query: "x".into(),
             path: PathBuf::from("."),
         }));

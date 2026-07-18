@@ -16,8 +16,10 @@ Build generic backends behind thin seams. Gate each seam on **two concrete backe
    - Match model-run commands to discovered checks and record structured outcomes
    - Automatic check execution remains intentionally deferred
 
-3. **Thin RepositoryIntelligence**
-   - Wrap existing search / file / git tools; no new symbol backends until the seam exists
+3. **Thin RepositoryIntelligence** — Phase A+B: single `locate` tool
+   - `RepositoryIntelligence::locate` + `SearchSnapshotIntel` backend
+   - Additive tool; raw `search_code` retained
+   - Defer `RepoContext` / AST until locate proves insufficient
 
 4. **Richer symbol backends** (second RI backend)
    - Only after RI is used by two backends

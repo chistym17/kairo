@@ -3,6 +3,7 @@ pub mod config;
 pub mod llm;
 pub mod logging;
 pub mod loop_engine;
+pub mod repo_intel;
 pub mod state;
 pub mod tools;
 pub mod verification;

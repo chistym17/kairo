@@ -88,6 +88,11 @@ pub fn fingerprint(action: &Action, revision: u64) -> ActionFingerprint {
             scope: normalize_path(path),
             revision,
         },
+        Action::Locate { query, path } => ActionFingerprint::Search {
+            query: format!("locate:{}", normalize_command(query)),
+            scope: normalize_path(path),
+            revision,
+        },
         Action::FindFiles { pattern, path } => ActionFingerprint::Find {
             pattern: pattern.trim().to_string(),
             scope: normalize_path(path),
@@ -191,6 +196,7 @@ pub fn is_explore_action(action: &Action) -> bool {
         Action::ReadFile { .. }
             | Action::ListFiles { .. }
             | Action::SearchCode { .. }
+            | Action::Locate { .. }
             | Action::FindFiles { .. }
             | Action::DetectProjectSnapshot { .. }
     ) || match action {

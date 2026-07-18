@@ -98,6 +98,7 @@ pub fn is_exploration_readonly(action: &Action) -> bool {
         Action::ReadFile { .. }
             | Action::ListFiles { .. }
             | Action::SearchCode { .. }
+            | Action::Locate { .. }
             | Action::FindFiles { .. }
             | Action::DetectProjectSnapshot { .. }
             | Action::GitStatus

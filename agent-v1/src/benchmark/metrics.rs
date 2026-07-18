@@ -403,6 +403,7 @@ fn tool_name(action: &Action) -> &'static str {
         Action::ReadFile { .. } => "read_file",
         Action::ListFiles { .. } => "list_files",
         Action::SearchCode { .. } => "search_code",
+        Action::Locate { .. } => "locate",
         Action::FindFiles { .. } => "find_files",
         Action::DetectProjectSnapshot { .. } => "detect_project_snapshot",
         Action::GitStatus => "git_status",
@@ -421,6 +422,7 @@ fn action_path(action: &Action) -> String {
         Action::ReadFile { path, .. }
         | Action::ListFiles { path }
         | Action::SearchCode { path, .. }
+        | Action::Locate { path, .. }
         | Action::FindFiles { path, .. }
         | Action::DetectProjectSnapshot { path }
         | Action::WriteFile { path, .. }

@@ -195,6 +195,7 @@ pub fn classify_progress(
         Action::ApplyPatch { .. } | Action::WriteFile { .. } => ActionProgress::Edit,
         Action::ReadFile { .. }
         | Action::SearchCode { .. }
+        | Action::Locate { .. }
         | Action::FindFiles { .. }
         | Action::ListFiles { .. }
         | Action::DetectProjectSnapshot { .. } => ActionProgress::UniqueInfo,

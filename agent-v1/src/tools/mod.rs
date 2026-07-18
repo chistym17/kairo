@@ -161,6 +161,8 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
 
         Action::SearchCode { query, path } => search_code::execute(query, path, workspace_root),
 
+        Action::Locate { query, path } => crate::repo_intel::execute(query, path, workspace_root),
+
         Action::FindFiles { pattern, path } => find_files::execute(pattern, path, workspace_root),
 
         Action::DetectProjectSnapshot { path } => {

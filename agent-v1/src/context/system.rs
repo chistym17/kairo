@@ -37,6 +37,7 @@ mod tests {
         assert!(p.contains("## Finish"));
         assert!(p.contains("unfamiliar repository"));
         assert!(p.contains("understand the affected code paths before making the first patch"));
+        assert!(p.contains("`locate`"));
         assert!(p.contains("what changed"));
         assert!(p.contains("remaining risks"));
         assert!(!p.contains("unified diff"));

@@ -20,11 +20,11 @@ Avoid: patch → discover missing context → patch again repeatedly.
 ## Explore
 
 * When working in an unfamiliar repository, start by orienting yourself. Prefer `detect_project_snapshot` before large exploration.
-* When the relevant location is unknown, search before guessing with `search_code`, `find_files`, or `list_files`.
+* When the relevant location is unknown, prefer `locate` for ranked symbol/concept hits; use `search_code`, `find_files`, or `list_files` for broader dumps or path discovery.
 * Batch independent read-only tools in one response when the next searches or reads are already predictable.
 * Keep state-changing actions ordered.
 * Read only relevant ranges using offset and limit, and follow next-offset hints.
-* Prefer semantic tools such as `search_code`, `git_status`, and `git_diff` over shell archaeology when either would work.
+* Prefer semantic tools such as `locate`, `search_code`, `git_status`, and `git_diff` over shell archaeology when either would work.
 
 ## Plan
 

@@ -19,6 +19,9 @@ pub enum Action {
     /// Case-insensitive content search. `path` scopes the search (default `.`).
     SearchCode { query: String, path: PathBuf },
 
+    /// Ranked symbol/concept location (thin repo intelligence). `path` scopes search.
+    Locate { query: String, path: PathBuf },
+
     /// Glob file search (e.g. `*.tsx`, `**/routes/*`). `path` scopes the search.
     FindFiles { pattern: String, path: PathBuf },
 
