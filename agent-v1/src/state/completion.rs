@@ -3,6 +3,9 @@
 //! After the model has edited, reviewed workspace state, and attempted
 //! verification, idle turns with no further progress end the run as
 //! `CompletedUnverified`.
+//!
+//! Once those milestones are met, only a new edit or a *successful* verify
+//! resets the idle clock. Extra reads/searches must not postpone completion.
 
 use std::collections::HashSet;
 
@@ -18,7 +21,7 @@ pub struct CompletionTracker {
     pub verify_attempted_since_edit: bool,
     /// Turn when edit + review + verify-attempt were all satisfied.
     pub milestones_met_turn: Option<u32>,
-    /// Last turn that produced an objectively novel tool result.
+    /// Last turn that produced completion-relevant progress.
     pub last_progress_turn: Option<u32>,
     seen_result_fingerprints: HashSet<u64>,
     pub last_verify_success: Option<bool>,
@@ -43,16 +46,22 @@ impl CompletionTracker {
         self.last_verification = None;
     }
 
-    /// Reset idle time only for a result not already observed since the edit.
+    /// Record a novel tool result. Before milestones, this can move the progress
+    /// cursor. After milestones, thrash reads/searches are ignored so they cannot
+    /// postpone auto-completion.
     pub fn note_novel_result(&mut self, turn: u32, fingerprint: u64) -> bool {
         if self.last_edit_turn.is_none() {
             return false;
         }
-        if self.seen_result_fingerprints.insert(fingerprint) {
-            self.last_progress_turn = Some(turn);
-            return true;
+        if !self.seen_result_fingerprints.insert(fingerprint) {
+            return false;
         }
-        false
+        // Milestones already met: only edit / successful verify reset idle.
+        if self.milestones_met_turn.is_some() {
+            return false;
+        }
+        self.last_progress_turn = Some(turn);
+        true
     }
 
     pub fn note_review(&mut self, turn: u32) {
@@ -148,13 +157,43 @@ mod tests {
     }
 
     #[test]
-    fn only_novel_results_reset_idle() {
+    fn thrash_reads_do_not_reset_idle_after_milestones() {
         let mut t = CompletionTracker::new();
         t.note_edit(1);
         t.note_review(2);
         t.note_verification_outcome(3, outcome(false, "failed"));
-        assert!(t.note_novel_result(5, 42));
-        assert!(!t.note_novel_result(6, 42));
+        assert_eq!(t.milestones_met_turn, Some(3));
+
+        // Distinct fingerprints after milestones must not postpone auto-complete.
+        assert!(!t.note_novel_result(5, 42));
+        assert!(!t.note_novel_result(6, 43));
+        assert!(!t.should_complete_unverified(6)); // idle 3
+        assert!(t.should_complete_unverified(7)); // idle 4
+    }
+
+    #[test]
+    fn successful_verify_after_failed_attempt_resets_idle() {
+        let mut t = CompletionTracker::new();
+        t.note_edit(1);
+        t.note_review(2);
+        t.note_verification_outcome(3, outcome(false, "failed"));
+        assert!(t.should_complete_unverified(7));
+
+        t.note_verification_outcome(8, outcome(true, "ok"));
+        assert!(!t.should_complete_unverified(11));
+        assert!(t.should_complete_unverified(12));
+    }
+
+    #[test]
+    fn novel_results_before_milestones_still_track_progress() {
+        let mut t = CompletionTracker::new();
+        t.note_edit(1);
+        assert!(t.note_novel_result(2, 99));
+        assert_eq!(t.last_progress_turn, Some(2));
+        assert!(!t.note_novel_result(3, 99));
+        t.note_review(4);
+        t.note_verification_outcome(5, outcome(false, "failed"));
+        // Idle anchors at max(progress=2, milestones=5) = 5
         assert!(!t.should_complete_unverified(8));
         assert!(t.should_complete_unverified(9));
     }
