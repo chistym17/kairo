@@ -12,6 +12,7 @@ use super::types::{
     FileChange, FileChangeKind, FileHash, FileRecord, ImportReference, Language, RepositoryIndex,
     RepositoryIntelligenceError, SymbolLocation, SymbolRecord,
 };
+use super::bm25::build_field_freqs;
 
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_INDEX_FILES: usize = 8_000;
@@ -54,6 +55,8 @@ impl FileIndexer for DefaultFileIndexer {
         let symbols = self.symbols.extract_for_path(path, content);
         let imports = extract_imports(path, content, &self.workspace_root);
         let tokens = collect_tokens(path, content, &symbols);
+        let symbol_names: Vec<String> = symbols.iter().map(|s| s.name.clone()).collect();
+        let fields = build_field_freqs(path, &symbol_names, content);
 
         FileRecord {
             path: path.to_path_buf(),
@@ -62,6 +65,7 @@ impl FileIndexer for DefaultFileIndexer {
             tokens,
             symbols,
             imports,
+            fields,
         }
     }
 }

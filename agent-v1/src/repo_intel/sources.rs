@@ -1,21 +1,20 @@
-//! v1 candidate sources: path, token, symbol, lexical.
+//! Candidate sources: path, symbol, and field-weighted BM25 lexical.
+//!
+//! Each source returns its own ranked list. Hybrid merges them with RRF.
+//! Token pile-up sources are intentionally omitted.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::bm25::rank_bm25;
 use super::query::normalize_query;
+use super::rrf::RankedHit;
 use super::traits::CandidateSource;
 use super::types::{
     CandidateSignal, CandidateSourceError, RawCandidate, RepositoryIndex, SignalKind, Snippet,
 };
 use super::LocateRequest;
 
-const W_EXACT_SYMBOL: f32 = 12.0;
-const W_EXACT_TOKEN: f32 = 8.0;
-const W_FILENAME: f32 = 7.0;
-const W_PATH: f32 = 5.0;
-const W_LEXICAL: f32 = 6.0;
-const MAX_LEXICAL_HITS: usize = 40;
+const MAX_SOURCE_HITS: usize = 40;
 const MAX_SNIPPET_CHARS: usize = 160;
 
 fn in_scope(path: &Path, scope: &Path) -> bool {
@@ -25,12 +24,51 @@ fn in_scope(path: &Path, scope: &Path) -> bool {
     path.starts_with(scope)
 }
 
-fn signal(kind: SignalKind, weight: f32, detail: impl Into<String>) -> CandidateSignal {
-    CandidateSignal {
-        kind,
-        weight,
-        detail: Some(detail.into()),
+fn clip(s: &str) -> String {
+    let mut t = s.to_string();
+    if t.len() > MAX_SNIPPET_CHARS {
+        t.truncate(MAX_SNIPPET_CHARS);
+        t.push('…');
     }
+    t
+}
+
+/// Convert a source's RawCandidates into a unique path ranking (best score first).
+pub fn rank_raw_by_path(raw: Vec<RawCandidate>, source_name: &str) -> Vec<RankedHit> {
+    use std::collections::HashMap;
+    let mut best: HashMap<PathBuf, (f32, Vec<Snippet>)> = HashMap::new();
+    for hit in raw {
+        let score: f32 = hit.signals.iter().map(|s| s.weight).sum();
+        let entry = best.entry(hit.path.clone()).or_insert((0.0, Vec::new()));
+        if score > entry.0 {
+            entry.0 = score;
+            entry.1 = hit.snippets;
+        } else {
+            for s in hit.snippets {
+                if !entry.1.iter().any(|x| x.line == s.line && x.text == s.text) {
+                    entry.1.push(s);
+                }
+            }
+        }
+    }
+    let mut ranked: Vec<(PathBuf, f32, Vec<Snippet>)> = best
+        .into_iter()
+        .map(|(p, (s, sn))| (p, s, sn))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    ranked.truncate(MAX_SOURCE_HITS);
+    ranked
+        .into_iter()
+        .map(|(path, _score, snippets)| RankedHit {
+            path,
+            snippets,
+            reason: source_name.to_string(),
+        })
+        .collect()
 }
 
 pub struct PathCandidateSource;
@@ -58,69 +96,49 @@ impl CandidateSource for PathCandidateSource {
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            let stem = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
 
+            let mut best = 0.0_f32;
+            let mut detail = String::new();
             for v in &q.variants {
                 let vl = v.to_ascii_lowercase();
-                if file_name.contains(&vl) {
-                    out.push(RawCandidate {
-                        path: path.clone(),
-                        signals: vec![signal(SignalKind::FilenameMatch, W_FILENAME, v.clone())],
-                        snippets: vec![],
-                    });
-                    break;
-                }
-                if path_lower.contains(&vl) {
-                    out.push(RawCandidate {
-                        path: path.clone(),
-                        signals: vec![signal(SignalKind::PathMatch, W_PATH, v.clone())],
-                        snippets: vec![],
-                    });
-                    break;
-                }
-            }
-        }
-        Ok(out)
-    }
-}
-
-pub struct TokenCandidateSource;
-
-impl CandidateSource for TokenCandidateSource {
-    fn name(&self) -> &'static str {
-        "token"
-    }
-
-    fn generate(
-        &self,
-        request: &LocateRequest,
-        index: &RepositoryIndex,
-    ) -> Result<Vec<RawCandidate>, CandidateSourceError> {
-        let q = normalize_query(&request.query);
-        let mut out = Vec::new();
-        for v in &q.variants {
-            for path in index.files_for_token(v) {
-                if !in_scope(path, &request.scope) {
+                if vl.len() < 2 {
                     continue;
                 }
+                let score = if stem == vl {
+                    10.0
+                } else if file_name.starts_with(&vl) || stem.starts_with(&vl) {
+                    8.0
+                } else if file_name.contains(&vl) {
+                    6.0
+                } else if path_lower.contains(&vl) {
+                    3.0
+                } else {
+                    0.0
+                };
+                if score > best {
+                    best = score;
+                    detail = v.clone();
+                }
+            }
+            if best > 0.0 {
                 out.push(RawCandidate {
                     path: path.clone(),
-                    signals: vec![signal(SignalKind::ExactToken, W_EXACT_TOKEN, v.clone())],
+                    signals: vec![CandidateSignal {
+                        kind: if best >= 6.0 {
+                            SignalKind::FilenameMatch
+                        } else {
+                            SignalKind::PathMatch
+                        },
+                        weight: best,
+                        detail: Some(detail),
+                    }],
                     snippets: vec![],
                 });
-            }
-            // Case-insensitive token table probe for lowercased keys.
-            let lower = v.to_ascii_lowercase();
-            if lower != *v {
-                for path in index.files_for_token(&lower) {
-                    if !in_scope(path, &request.scope) {
-                        continue;
-                    }
-                    out.push(RawCandidate {
-                        path: path.clone(),
-                        signals: vec![signal(SignalKind::ExactToken, W_EXACT_TOKEN, lower.clone())],
-                        snippets: vec![],
-                    });
-                }
             }
         }
         Ok(out)
@@ -148,83 +166,40 @@ impl CandidateSource for SymbolCandidateSource {
                 }
                 out.push(RawCandidate {
                     path: loc.path.clone(),
-                    signals: vec![signal(SignalKind::ExactSymbol, W_EXACT_SYMBOL, v.clone())],
+                    signals: vec![CandidateSignal {
+                        kind: SignalKind::ExactSymbol,
+                        weight: 12.0,
+                        detail: Some(v.clone()),
+                    }],
                     snippets: vec![Snippet {
                         line: loc.line,
                         text: format!("{} (symbol)", v),
                     }],
                 });
             }
-        }
-        Ok(out)
-    }
-}
-
-/// Capped content search over indexed files only.
-pub struct LexicalCandidateSource {
-    pub workspace_root: PathBuf,
-    pub max_hits: usize,
-}
-
-impl LexicalCandidateSource {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-            max_hits: MAX_LEXICAL_HITS,
-        }
-    }
-}
-
-impl CandidateSource for LexicalCandidateSource {
-    fn name(&self) -> &'static str {
-        "lexical"
-    }
-
-    fn generate(
-        &self,
-        request: &LocateRequest,
-        index: &RepositoryIndex,
-    ) -> Result<Vec<RawCandidate>, CandidateSourceError> {
-        let q = normalize_query(&request.query);
-        let needles: Vec<String> = q
-            .variants
-            .iter()
-            .map(|v| v.to_ascii_lowercase())
-            .collect();
-        if needles.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut out = Vec::new();
-        for path in index.files.keys() {
-            if out.len() >= self.max_hits {
-                break;
-            }
-            if !in_scope(path, &request.scope) {
+            // Partial: symbol name contains variant (weaker).
+            let vl = v.to_ascii_lowercase();
+            if vl.len() < 3 {
                 continue;
             }
-            let abs = self.workspace_root.join(path);
-            let content = match fs::read_to_string(&abs) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            for (idx, line) in content.lines().enumerate() {
-                if out.len() >= self.max_hits {
-                    break;
-                }
-                let lower = line.to_ascii_lowercase();
-                for needle in &needles {
-                    if lower.contains(needle) {
-                        let text = clip(line.trim());
+            for (name, locs) in &index.symbols_by_name {
+                if name.to_ascii_lowercase().contains(&vl) && name != v {
+                    for loc in locs {
+                        if !in_scope(&loc.path, &request.scope) {
+                            continue;
+                        }
                         out.push(RawCandidate {
-                            path: path.clone(),
-                            signals: vec![signal(SignalKind::LexicalHit, W_LEXICAL, needle.clone())],
+                            path: loc.path.clone(),
+                            signals: vec![CandidateSignal {
+                                kind: SignalKind::ExactSymbol,
+                                weight: 4.0,
+                                detail: Some(name.clone()),
+                            }],
                             snippets: vec![Snippet {
-                                line: idx + 1,
-                                text,
+                                line: loc.line,
+                                text: format!("{name} (symbol~)"),
                             }],
                         });
-                        break;
                     }
                 }
             }
@@ -233,13 +208,84 @@ impl CandidateSource for LexicalCandidateSource {
     }
 }
 
-fn clip(s: &str) -> String {
-    let mut t = s.to_string();
-    if t.len() > MAX_SNIPPET_CHARS {
-        t.truncate(MAX_SNIPPET_CHARS);
-        t.push('…');
+/// Field-weighted BM25 over the repository index (no per-hit token accumulation).
+pub struct LexicalCandidateSource {
+    pub max_hits: usize,
+}
+
+impl Default for LexicalCandidateSource {
+    fn default() -> Self {
+        Self {
+            max_hits: MAX_SOURCE_HITS,
+        }
     }
-    t
+}
+
+impl LexicalCandidateSource {
+    pub fn new(_workspace_root: impl Into<PathBuf>) -> Self {
+        Self::default()
+    }
+}
+
+impl CandidateSource for LexicalCandidateSource {
+    fn name(&self) -> &'static str {
+        "bm25"
+    }
+
+    fn generate(
+        &self,
+        request: &LocateRequest,
+        index: &RepositoryIndex,
+    ) -> Result<Vec<RawCandidate>, CandidateSourceError> {
+        let q = normalize_query(&request.query);
+        // Prefer short terms + variants for BM25 (avoid flooding with camelCase duplicates).
+        let mut terms = q.terms.clone();
+        for v in &q.variants {
+            if v.len() >= 2 && !terms.iter().any(|t| t.eq_ignore_ascii_case(v)) {
+                terms.push(v.clone());
+            }
+        }
+        let ranked = rank_bm25(index, &terms, &request.scope, self.max_hits);
+        Ok(ranked
+            .into_iter()
+            .map(|(path, score)| {
+                let snip = index.files.get(&path).and_then(|rec| {
+                    rec.symbols.first().map(|s| Snippet {
+                        line: s.line,
+                        text: clip(&format!("{} ({})", s.name, "symbol")),
+                    })
+                });
+                RawCandidate {
+                    path,
+                    signals: vec![CandidateSignal {
+                        kind: SignalKind::LexicalHit,
+                        weight: score,
+                        detail: Some("bm25".into()),
+                    }],
+                    snippets: snip.into_iter().collect(),
+                }
+            })
+            .collect())
+    }
+}
+
+/// Kept for API stability; not registered in the hybrid RRF pipeline.
+pub struct TokenCandidateSource;
+
+impl CandidateSource for TokenCandidateSource {
+    fn name(&self) -> &'static str {
+        "token"
+    }
+
+    fn generate(
+        &self,
+        request: &LocateRequest,
+        index: &RepositoryIndex,
+    ) -> Result<Vec<RawCandidate>, CandidateSourceError> {
+        // Deprecated for hybrid ranking — empty to avoid naive token pile-up.
+        let _ = (request, index);
+        Ok(vec![])
+    }
 }
 
 #[cfg(test)]

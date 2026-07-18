@@ -93,7 +93,34 @@ pub struct ImportReference {
     pub resolved: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FieldTermFreqs {
+    pub symbols: std::collections::HashMap<String, u32>,
+    pub path: std::collections::HashMap<String, u32>,
+    pub idents: std::collections::HashMap<String, u32>,
+    pub strings: std::collections::HashMap<String, u32>,
+}
+
+impl FieldTermFreqs {
+    pub fn total_len(&self) -> u32 {
+        self.symbols.values().sum::<u32>()
+            + self.path.values().sum::<u32>()
+            + self.idents.values().sum::<u32>()
+            + self.strings.values().sum::<u32>()
+    }
+
+    pub fn contains_any(&self, terms: &[String]) -> bool {
+        terms.iter().any(|t| {
+            let t = t.to_ascii_lowercase();
+            self.symbols.contains_key(&t)
+                || self.path.contains_key(&t)
+                || self.idents.contains_key(&t)
+                || self.strings.contains_key(&t)
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FileRecord {
     pub path: PathBuf,
     pub language: Option<Language>,
@@ -101,6 +128,8 @@ pub struct FileRecord {
     pub tokens: Vec<String>,
     pub symbols: Vec<SymbolRecord>,
     pub imports: Vec<ImportReference>,
+    /// Field term frequencies for BM25 (symbols / path / idents / strings).
+    pub fields: FieldTermFreqs,
 }
 
 /// Observable evidence used by the ranker (extensible by adding variants).

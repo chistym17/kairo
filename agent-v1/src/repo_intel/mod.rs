@@ -4,11 +4,13 @@
 //! legacy/test backend. Index is built once per run on [`AgentState::repo_intel`]
 //! and updated incrementally after successful edits.
 
+mod bm25;
 mod expand;
 mod extractors;
 mod hybrid;
 mod indexer;
 mod query;
+mod rrf;
 mod search_snapshot;
 mod snippets;
 mod sources;
@@ -19,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use bm25::{build_field_freqs, rank_bm25};
 pub use expand::expand_imports;
 pub use extractors::{
     CompositeSymbolExtractor, JsTsSymbolExtractor, PythonSymbolExtractor, RustSymbolExtractor,
@@ -29,6 +32,7 @@ pub use indexer::{
     DefaultFileIndexer, IndexBuildStats, IndexUpdateStats,
 };
 pub use query::{normalize_query, QueryTokens};
+pub use rrf::{reciprocal_rank_fuse, RankedHit, RRF_K};
 pub use search_snapshot::SearchSnapshotIntel;
 pub use snippets::LineSnippetProvider;
 pub use sources::{
@@ -39,10 +43,10 @@ pub use traits::{
     HybridRepositoryIntelligence, IndexStorage, SignalSumRanker, SnippetProvider, SymbolExtractor,
 };
 pub use types::{
-    CandidateSignal, CandidateSourceError, FileChange, FileChangeKind, FileHash, FileRecord,
-    ImportReference, Language, LocateCandidate, LocateError, MergedCandidate, RawCandidate,
-    RepositoryIndex, RepositoryIntelligenceError, RepositoryRevision, SignalKind, Snippet,
-    SymbolKind, SymbolLocation, SymbolRecord,
+    CandidateSignal, CandidateSourceError, FieldTermFreqs, FileChange, FileChangeKind, FileHash,
+    FileRecord, ImportReference, Language, LocateCandidate, LocateError, MergedCandidate,
+    RawCandidate, RepositoryIndex, RepositoryIntelligenceError, RepositoryRevision, SignalKind,
+    Snippet, SymbolKind, SymbolLocation, SymbolRecord,
 };
 
 use crate::tools::project_snapshot::ProjectSnapshot;
@@ -274,9 +278,10 @@ mod integration_tests {
         assert!(result.output.contains("dueDate"));
         assert!(result.output.contains("api.ts"));
         assert!(
-            result.output.contains("exact_symbol")
-                || result.output.contains("exact_token")
-                || result.output.contains("lexical_hit")
+            result.output.contains("symbol")
+                || result.output.contains("bm25")
+                || result.output.contains("path")
+                || result.output.contains("exact_symbol")
                 || result.output.contains("filename_match"),
             "{}",
             result.output

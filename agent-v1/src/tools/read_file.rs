@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::tools::symbol_expand::expand_read_window;
 use crate::tools::ToolResult;
 
 pub const DEFAULT_OFFSET: u32 = 1;
@@ -58,7 +59,7 @@ pub fn execute(
 
     let lines: Vec<&str> = contents.lines().collect();
     let total = lines.len();
-    let start = offset.max(1) as usize;
+    let req_start = offset.max(1) as usize;
     let lim = limit.clamp(1, MAX_LIMIT) as usize;
 
     if total == 0 {
@@ -71,20 +72,24 @@ pub fn execute(
         };
     }
 
-    if start > total {
+    if req_start > total {
         return ToolResult {
             success: false,
             output: String::new(),
             diff: None,
             error: Some(format!(
-                "offset {start} is past end of file ({} has {total} lines). Use a smaller offset.",
+                "offset {req_start} is past end of file ({} has {total} lines). Use a smaller offset.",
                 path.display()
             )),
             stop_reason: None,
         };
     }
 
-    let end = (start + lim - 1).min(total);
+    let req_end = (req_start + lim - 1).min(total);
+    let window = expand_read_window(path, &contents, req_start, req_end);
+    let start = window.start;
+    let end = window.end;
+
     let slice = &lines[start - 1..end];
     let mut body = slice.join("\n");
     if body.len() > MAX_WINDOW_CHARS {
@@ -92,10 +97,20 @@ pub fn execute(
         body.push_str("\n...[char-truncated within this line window]");
     }
 
-    let header = format!(
-        "lines {start}-{end} of {total} — {}",
-        path.display()
-    );
+    let header = if window.expanded {
+        let sym = window
+            .symbol
+            .as_ref()
+            .map(|s| format!("function {}", s.name))
+            .unwrap_or_else(|| "enclosing symbol".to_string());
+        format!(
+            "lines {start}-{end} of {total} — {} (expanded from requested {req_start}-{req_end} to cover {sym})",
+            path.display()
+        )
+    } else {
+        format!("lines {start}-{end} of {total} — {}", path.display())
+    };
+
     let footer = if end < total {
         format!(
             "\n...[more below — next: read_file path=\"{}\" offset={} limit={}]",
@@ -153,5 +168,32 @@ mod tests {
         let result = execute(Path::new("a.txt"), 5, 10, dir.path());
         assert!(!result.success);
         assert!(result.stop_reason.is_none());
+    }
+
+    #[test]
+    fn expands_to_full_function() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+export async function getTasks(date: string) {
+  const x = 1;
+  const y = 2;
+  return request(`/tasks/?dueDate=${encodeURIComponent(date)}`);
+}
+"#;
+        fs::write(dir.path().join("api.ts"), src).unwrap();
+        let result = execute(Path::new("api.ts"), 4, 2, dir.path());
+        assert!(result.success, "{:?}", result.error);
+        assert!(
+            result.output.contains("expanded from requested"),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("getTasks"), "{}", result.output);
+        assert!(result.output.contains("dueDate"), "{}", result.output);
+        assert!(
+            result.output.contains("encodeURIComponent"),
+            "{}",
+            result.output
+        );
     }
 }

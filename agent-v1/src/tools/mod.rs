@@ -19,6 +19,7 @@ pub mod run_shell;
 pub mod search_code;
 pub mod shell_cache;
 pub mod shell_read;
+pub mod symbol_expand;
 pub mod write_file;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
