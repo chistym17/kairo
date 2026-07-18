@@ -1,9 +1,11 @@
 //! Thin repository intelligence seam.
 //!
 //! - Tool backend today: [`SearchSnapshotIntel`] (unchanged behavior).
-//! - Hybrid pipeline seams: [`types`] + [`traits`] (Part 1). Sources/index
-//!   build come in later parts without changing the `locate` tool API.
+//! - Hybrid pipeline seams: [`types`] + [`traits`] (Part 1).
+//! - Index build / incremental update: [`indexer`] + [`extractors`] (Part 2).
 
+mod extractors;
+mod indexer;
 mod search_snapshot;
 pub mod traits;
 pub mod types;
@@ -12,6 +14,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use extractors::{
+    CompositeSymbolExtractor, JsTsSymbolExtractor, PythonSymbolExtractor, RustSymbolExtractor,
+};
+pub use indexer::{
+    apply_changes, apply_changes_with, build_index, build_index_with, rebuild_lookups,
+    DefaultFileIndexer, IndexBuildStats, IndexUpdateStats,
+};
 pub use search_snapshot::SearchSnapshotIntel;
 pub use traits::{
     CandidateMerger, CandidateRanker, CandidateSource, DefaultCandidateMerger, FileIndexer,
