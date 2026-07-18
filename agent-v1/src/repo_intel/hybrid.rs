@@ -1,5 +1,6 @@
 //! Hybrid repository intelligence: sources → merge → rank → expand → rerank.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -36,6 +37,17 @@ pub struct HybridIntel {
     merger: DefaultCandidateMerger,
     ranker: SignalSumRanker,
     snippets: LineSnippetProvider,
+}
+
+impl fmt::Debug for HybridIntel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HybridIntel")
+            .field("workspace_root", &self.workspace_root)
+            .field("files", &self.index.file_count())
+            .field("revision", &self.index.revision)
+            .field("sources", &self.sources.len())
+            .finish()
+    }
 }
 
 impl HybridIntel {

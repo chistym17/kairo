@@ -1,8 +1,8 @@
 //! Thin repository intelligence seam.
 //!
-//! - Tool backend today: [`SearchSnapshotIntel`] (unchanged).
-//! - Parts 1–3: types, traits, index build, hybrid locate pipeline.
-//! - Part 4 (next): wire hybrid into the `locate` tool + incremental update on edit.
+//! Hybrid `locate` is the tool backend. [`SearchSnapshotIntel`] remains as a
+//! legacy/test backend. Index is built once per run on [`AgentState::repo_intel`]
+//! and updated incrementally after successful edits.
 
 mod expand;
 mod extractors;
@@ -154,6 +154,10 @@ pub trait RepositoryIntelligence {
 }
 
 /// Tool entry: ranked locate over workspace (optional path scopes search).
+///
+/// Builds a one-shot [`HybridIntel`] when callers have no run-scoped index
+/// (tests / bare `tools::dispatch`). The agent loop prefers
+/// [`execute_with_intel`] on the run's index.
 pub fn execute(query: &str, path: &Path, workspace_root: &Path) -> ToolResult {
     if !workspace_root.exists() {
         return ToolResult::error(format!(
@@ -182,23 +186,47 @@ pub fn execute(query: &str, path: &Path, workspace_root: &Path) -> ToolResult {
         ));
     }
 
-    let snapshot = crate::tools::project_snapshot::detect(workspace_root);
-    let intel = SearchSnapshotIntel::new(workspace_root, &snapshot);
-    let result = intel.locate(&LocateRequest {
-        query: q.to_string(),
-        scope,
-    });
-
-    ToolResult {
-        success: true,
-        output: crate::tools::truncate_output(&result.render()),
-        diff: None,
-        error: None,
-        stop_reason: None,
+    match HybridIntel::build(workspace_root, workspace_root.display().to_string()) {
+        Ok((intel, _stats)) => execute_with_intel(&intel, q, &scope),
+        Err(e) => ToolResult::error(format!("locate index build failed: {e}")),
     }
 }
 
-/// Convenience for callers that already hold a snapshot (tests / future wiring).
+/// Locate using an existing (run-scoped) hybrid index.
+pub fn execute_with_intel(intel: &HybridIntel, query: &str, scope: &Path) -> ToolResult {
+    let q = query.trim();
+    if q.is_empty() {
+        return ToolResult::error("locate query must not be empty");
+    }
+    let scope = if scope.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        scope.to_path_buf()
+    };
+
+    match intel.locate_with_stats(&LocateRequest {
+        query: q.to_string(),
+        scope: scope.clone(),
+    }) {
+        Ok((candidates, stats)) => {
+            let mut output = render_candidates(q, &scope, &candidates);
+            output.push_str(&format!(
+                "\n[locate_ms={} source_hits={}]\n",
+                stats.locate_ms, stats.source_hits
+            ));
+            ToolResult {
+                success: true,
+                output: crate::tools::truncate_output(&output),
+                diff: None,
+                error: None,
+                stop_reason: None,
+            }
+        }
+        Err(e) => ToolResult::error(e.to_string()),
+    }
+}
+
+/// Convenience for callers that already hold a snapshot (legacy tests).
 pub fn locate_with_snapshot(
     query: &str,
     scope: &Path,
@@ -245,7 +273,14 @@ mod integration_tests {
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.contains("dueDate"));
         assert!(result.output.contains("api.ts"));
-        assert!(result.output.contains("definition_like") || result.output.contains("exact_match"));
+        assert!(
+            result.output.contains("exact_symbol")
+                || result.output.contains("exact_token")
+                || result.output.contains("lexical_hit")
+                || result.output.contains("filename_match"),
+            "{}",
+            result.output
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::governance::GovernanceState;
+use crate::repo_intel::HybridIntel;
 use crate::state::completion::CompletionTracker;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
@@ -30,6 +31,9 @@ pub struct AgentState {
 
     /// Orientation snapshot (computed once per run; refreshable via tool).
     pub project_snapshot: Option<ProjectSnapshot>,
+
+    /// Hybrid repository index for `locate` (built once per run; updated on edit).
+    pub repo_intel: Option<HybridIntel>,
 
     /// Successful read_file windows for this run (invalidated on edit).
     pub read_cache: ReadCache,
@@ -72,6 +76,7 @@ impl AgentState {
             max_steps,
             plan: None,
             project_snapshot: None,
+            repo_intel: None,
             read_cache: ReadCache::new(),
             shell_cache: ShellCommandCache::new(),
             exploration: ExplorationTracker::new(),

@@ -54,6 +54,40 @@ pub async fn run(
         state.project_snapshot = Some(snap);
     }
 
+    // Hybrid locate index once per run (incremental updates on edit).
+    if state.repo_intel.is_none() {
+        match crate::repo_intel::HybridIntel::build(
+            &state.workspace_root,
+            state.workspace_root.display().to_string(),
+        ) {
+            Ok((intel, stats)) => {
+                println!(
+                    "[agent] repo index: {} file(s) in {}ms{}",
+                    stats.files_indexed,
+                    stats.build_ms,
+                    if stats.truncated { " (truncated)" } else { "" }
+                );
+                write_event(
+                    &state.run_id,
+                    "repo_index_built",
+                    &format!(
+                        "files={} skipped={} build_ms={} truncated={}",
+                        stats.files_indexed,
+                        stats.files_skipped,
+                        stats.build_ms,
+                        stats.truncated
+                    ),
+                    stats.build_ms as u64,
+                );
+                state.repo_intel = Some(intel);
+            }
+            Err(e) => {
+                println!("[agent] repo index build failed: {e} — locate will rebuild per call");
+                write_event(&state.run_id, "repo_index_build_failed", &e.to_string(), 0);
+            }
+        }
+    }
+
     loop {
         // ── 1. Check step limit before asking the LLM ──────────────────
         if state.is_exhausted() {
@@ -729,6 +763,20 @@ async fn execute_readonly_group(
                     );
                 }
 
+                if let Action::Locate { query, path } = &action {
+                    let result = locate_with_state(state, query, path);
+                    handles.push((
+                        i,
+                        step_index,
+                        action,
+                        tool_call_id,
+                        Some(result),
+                        None,
+                        false,
+                    ));
+                    continue;
+                }
+
                 let root = workspace.clone();
                 let action_for_job = action.clone();
                 let handle =
@@ -851,6 +899,7 @@ fn produce_tool_result(
                 }
                 result
             }
+            Action::Locate { query, path } => locate_with_state(state, query, path),
             Action::Finish { summary } => {
                 let stop_reason = if verified_for_finish {
                     StopReason::TaskComplete
@@ -1030,6 +1079,45 @@ fn run_command_deduped(
     result
 }
 
+fn locate_with_state(
+    state: &mut AgentState,
+    query: &str,
+    path: &std::path::Path,
+) -> ToolResult {
+    ensure_repo_intel(state);
+    let scope = if path.as_os_str().is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        path.to_path_buf()
+    };
+    if let Some(intel) = state.repo_intel.as_ref() {
+        crate::repo_intel::execute_with_intel(intel, query, &scope)
+    } else {
+        crate::repo_intel::execute(query, path, &state.workspace_root)
+    }
+}
+
+fn ensure_repo_intel(state: &mut AgentState) {
+    if state.repo_intel.is_some() {
+        return;
+    }
+    if let Ok((intel, stats)) = crate::repo_intel::HybridIntel::build(
+        &state.workspace_root,
+        state.workspace_root.display().to_string(),
+    ) {
+        write_event(
+            &state.run_id,
+            "repo_index_built",
+            &format!(
+                "files={} skipped={} build_ms={} truncated={} (lazy)",
+                stats.files_indexed, stats.files_skipped, stats.build_ms, stats.truncated
+            ),
+            stats.build_ms as u64,
+        );
+        state.repo_intel = Some(intel);
+    }
+}
+
 fn read_file_cached(
     state: &mut AgentState,
     path: &std::path::Path,
@@ -1096,6 +1184,33 @@ fn commit_tool_outcome(
             state.note_edit(model_turn);
             state.governance.note_file_modified(&path);
             state.read_cache.invalidate_path(std::path::Path::new(&path));
+            if let Some(intel) = state.repo_intel.as_mut() {
+                let change = crate::repo_intel::FileChange {
+                    path: std::path::PathBuf::from(&path),
+                    kind: crate::repo_intel::FileChangeKind::Modified,
+                };
+                match intel.update_with_stats(&[change]) {
+                    Ok(stats) => {
+                        write_event(
+                            &state.run_id,
+                            "repo_index_updated",
+                            &format!(
+                                "path={} updated={} removed={} update_ms={}",
+                                path, stats.files_updated, stats.files_removed, stats.update_ms
+                            ),
+                            stats.update_ms as u64,
+                        );
+                    }
+                    Err(e) => {
+                        write_event(
+                            &state.run_id,
+                            "repo_index_update_failed",
+                            &format!("path={path} err={e}"),
+                            0,
+                        );
+                    }
+                }
+            }
             write_event(
                 &state.run_id,
                 "cache_invalidate",

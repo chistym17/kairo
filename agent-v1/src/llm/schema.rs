@@ -80,9 +80,9 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "locate",
-                "description": "Ranked repository locate for a symbol or concept. Prefer this when \
-                    finding where something is defined or used (e.g. 'moveTask', 'dueDate'). \
-                    Returns a short ranked list with path, line, reason, and a small snippet. \
+                "description": "Ranked repository locate (path/token/symbol/lexical + import expand). \
+                    Prefer this when finding where something is defined or used \
+                    (e.g. 'moveTask', 'due date'). Returns top files with reasons and snippets. \
                     Use search_code when you need a raw unranked dump of every match.",
                 "parameters": {
                     "type": "object",
