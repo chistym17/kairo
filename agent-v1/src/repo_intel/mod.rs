@@ -1,12 +1,17 @@
 //! Thin repository intelligence seam.
 //!
-//! - Tool backend today: [`SearchSnapshotIntel`] (unchanged behavior).
-//! - Hybrid pipeline seams: [`types`] + [`traits`] (Part 1).
-//! - Index build / incremental update: [`indexer`] + [`extractors`] (Part 2).
+//! - Tool backend today: [`SearchSnapshotIntel`] (unchanged).
+//! - Parts 1–3: types, traits, index build, hybrid locate pipeline.
+//! - Part 4 (next): wire hybrid into the `locate` tool + incremental update on edit.
 
+mod expand;
 mod extractors;
+mod hybrid;
 mod indexer;
+mod query;
 mod search_snapshot;
+mod snippets;
+mod sources;
 pub mod traits;
 pub mod types;
 
@@ -14,14 +19,21 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use expand::expand_imports;
 pub use extractors::{
     CompositeSymbolExtractor, JsTsSymbolExtractor, PythonSymbolExtractor, RustSymbolExtractor,
 };
+pub use hybrid::{render_candidates, HybridIntel, LocateStats, HYBRID_TOP_K};
 pub use indexer::{
     apply_changes, apply_changes_with, build_index, build_index_with, rebuild_lookups,
     DefaultFileIndexer, IndexBuildStats, IndexUpdateStats,
 };
+pub use query::{normalize_query, QueryTokens};
 pub use search_snapshot::SearchSnapshotIntel;
+pub use snippets::LineSnippetProvider;
+pub use sources::{
+    LexicalCandidateSource, PathCandidateSource, SymbolCandidateSource, TokenCandidateSource,
+};
 pub use traits::{
     CandidateMerger, CandidateRanker, CandidateSource, DefaultCandidateMerger, FileIndexer,
     HybridRepositoryIntelligence, IndexStorage, SignalSumRanker, SnippetProvider, SymbolExtractor,
