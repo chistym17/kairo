@@ -393,7 +393,10 @@ mod tests {
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("\"event\":\"cache_miss\"") || log.contains("\"event\": \"cache_miss\""));
         assert!(log.contains("\"event\":\"cache_hit\"") || log.contains("\"event\": \"cache_hit\""));
-        assert!(log.contains("[already read"));
+        assert!(
+            log.contains("Duplicate read denied") || log.contains("duplicate read denied"),
+            "expected denied duplicate read in log"
+        );
         assert_eq!(result.efficiency.cache_hits, 1);
         assert!(result.efficiency.cache_misses >= 1);
     }

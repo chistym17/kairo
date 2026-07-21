@@ -25,6 +25,16 @@ Avoid: patch → discover missing context → patch again repeatedly.
 * Keep state-changing actions ordered.
 * Read only relevant ranges using offset and limit, and follow next-offset hints.
 * Prefer semantic tools such as `locate`, `search_code`, `git_status`, and `git_diff` over shell archaeology when either would work.
+* Do not reread exact ranges already returned; duplicate full reads are denied. Prefer a new range, another file, a plan update, an edit, a question, or finish with findings.
+
+## Contracts and boundaries
+
+* When a bug may sit across a call boundary, inspect both sides before concluding:
+  * caller and callee
+  * client request construction and server request handling
+  * producer and consumer of a shared schema, query parameter, header, or event field
+* Name the contract (parameter, field, route, type) and check that both sides use the same name and shape.
+* Prefer locating the boundary over thrashing UI/presentation files when the symptom is missing or mismatched data.
 
 ## Plan
 

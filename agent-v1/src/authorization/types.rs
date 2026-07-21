@@ -138,7 +138,22 @@ pub fn tool_effect(action: &Action) -> ToolEffect {
 
         Action::WriteFile { .. } | Action::ApplyPatch { .. } => ToolEffect::WorkspaceMutation,
 
-        Action::RunCommand { .. } | Action::RunShell { .. } => ToolEffect::ExternalSideEffect,
+        // Archaeology / read-like shells do not need ExternalSideEffect approval.
+        // Verify/build/test shells remain ExternalSideEffect.
+        Action::RunCommand { cmd, .. } => {
+            if crate::tools::shell_cache::is_explore_shell(cmd) {
+                ToolEffect::ReadOnly
+            } else {
+                ToolEffect::ExternalSideEffect
+            }
+        }
+        Action::RunShell { command, .. } => {
+            if crate::tools::shell_cache::is_explore_shell(command) {
+                ToolEffect::ReadOnly
+            } else {
+                ToolEffect::ExternalSideEffect
+            }
+        }
     }
 }
 
@@ -281,6 +296,36 @@ mod tests {
         );
         assert_eq!(tool_effect(&patch_action()), ToolEffect::WorkspaceMutation);
         assert_eq!(tool_effect(&shell_action()), ToolEffect::ExternalSideEffect);
+        assert_eq!(
+            tool_effect(&Action::RunShell {
+                command: "cat -n frontend-v2/src/lib/api.ts".into(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }),
+            ToolEffect::ReadOnly
+        );
+        assert_eq!(
+            tool_effect(&Action::RunShell {
+                command: "cat frontend-v2/src/lib/api.ts | head -120".into(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 30,
+            }),
+            ToolEffect::ReadOnly
+        );
+    }
+
+    #[test]
+    fn confirm_allows_explore_shell_without_approval() {
+        let auth = AuthorizationState::new(EditPolicy::ConfirmBeforeFirstEdit);
+        assert!(matches!(
+            authorize(ToolEffect::ReadOnly, &auth),
+            AuthorizationDecision::Allow
+        ));
+        // Real verify shells still require approval.
+        assert!(matches!(
+            authorize(ToolEffect::ExternalSideEffect, &auth),
+            AuthorizationDecision::RequireApproval(_)
+        ));
     }
 
     #[test]

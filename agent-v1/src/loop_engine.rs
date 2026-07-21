@@ -616,6 +616,18 @@ async fn execute_one_tool(
         }
     }
 
+    if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
+        return commit_tool_outcome(
+            state,
+            observer,
+            step_index,
+            model_turn,
+            action,
+            tool_call_id,
+            denied,
+        );
+    }
+
     if let Err(denied) = resolve_tool_authorization(state, &action, approval_gate, session) {
         return commit_tool_outcome(
             state,
@@ -755,6 +767,11 @@ async fn execute_readonly_group(
             }
         }
 
+        if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
+            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
+            continue;
+        }
+
         let validation = validate_action(&action, false, false);
         if let Some(err) = &validation {
             write_event(&state.run_id, &err.event, &err.message, 0);
@@ -808,7 +825,7 @@ async fn execute_readonly_group(
                                 &state.run_id,
                                 "cache_hit",
                                 &format!(
-                                    "{} offset={} limit={} (already-read notice)",
+                                    "{} offset={} limit={} (duplicate read denied)",
                                     path.display(),
                                     offset,
                                     limit
@@ -1318,7 +1335,7 @@ fn read_file_cached(
                 &state.run_id,
                 "cache_hit",
                 &format!(
-                    "{} offset={} limit={} (already-read notice)",
+                    "{} offset={} limit={} (duplicate read denied)",
                     path.display(),
                     offset,
                     limit
@@ -1370,6 +1387,25 @@ fn read_file_cached(
             result
         }
     }
+}
+
+fn is_duplicate_read_outcome(action: &Action, result: &ToolResult) -> bool {
+    if !matches!(action, Action::ReadFile { .. }) {
+        return false;
+    }
+    if result.output.starts_with("[cached")
+        || result.output.to_ascii_lowercase().contains("[already read")
+    {
+        return true;
+    }
+    result
+        .error
+        .as_deref()
+        .map(|e| {
+            let l = e.to_ascii_lowercase();
+            l.contains("duplicate read denied") || l.contains("exact content already available")
+        })
+        .unwrap_or(false)
 }
 
 /// Log, observe, and record a completed tool. Returns Some(stop) if the run should end.
@@ -1455,8 +1491,8 @@ fn commit_tool_outcome(
     }
 
     // Objective completion milestones (not semantic governance).
-    let read_cache_hit = matches!(action, Action::ReadFile { .. })
-        && result.output.starts_with("[cached");
+    let duplicate_read = is_duplicate_read_outcome(&action, &result);
+    let read_cache_hit = duplicate_read;
     let result_is_blocked = result
         .error
         .as_deref()
@@ -1465,8 +1501,14 @@ fn commit_tool_outcome(
             l.contains("explore-shell budget")
                 || l.contains("blocked: identical")
                 || l.contains("blocked: explore")
+                || l.contains("duplicate read denied")
+                || l.contains("exploration checkpoint active")
         })
         .unwrap_or(false);
+
+    state
+        .progress
+        .observe_tool(&action, &result, duplicate_read);
 
     if !read_cache_hit
         && !result_is_blocked
@@ -1648,16 +1690,35 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Workspace state\n");
         out.push_str(&summary);
     }
-    // Soft batching nudge only — no semantic no-edit escalation.
-    if let Some(nudge) = state.exploration.nudge_for_injection() {
+    // Soft stagnation / evidence-checkpoint guidance (not workflow stages).
+    let mut injected_guidance = false;
+    if let Some(nudge) = state.progress.nudge_for_injection() {
+        let event = if state.progress.checkpoint_active {
+            "evidence_checkpoint"
+        } else {
+            "progress_stagnation_nudge"
+        };
         write_event(
             &state.run_id,
-            "exploration_batch_nudge",
+            event,
             &nudge[..nudge.len().min(400)],
             0,
         );
         out.push_str("\n\n## Runtime guidance\n");
         out.push_str(&nudge);
+        injected_guidance = true;
+    }
+    if !injected_guidance {
+        if let Some(nudge) = state.exploration.nudge_for_injection() {
+            write_event(
+                &state.run_id,
+                "exploration_batch_nudge",
+                &nudge[..nudge.len().min(400)],
+                0,
+            );
+            out.push_str("\n\n## Runtime guidance\n");
+            out.push_str(&nudge);
+        }
     }
     if state.governance.semantic_policy {
         let level = state.exploration.no_edit_escalation_level();
@@ -1674,6 +1735,24 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         }
     }
     out
+}
+
+fn apply_evidence_checkpoint_gate(
+    state: &mut AgentState,
+    action: &Action,
+) -> Result<(), ToolResult> {
+    match state.progress.check_exploration_allowed(action) {
+        Ok(()) => Ok(()),
+        Err(message) => {
+            write_event(
+                &state.run_id,
+                "evidence_checkpoint_denied",
+                &message[..message.len().min(400)],
+                0,
+            );
+            Err(ToolResult::error(message))
+        }
+    }
 }
 
 enum GovernancePreflightOutcome {

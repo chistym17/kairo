@@ -1,8 +1,8 @@
 //! Per-run memory of successful `read_file` windows.
 //!
-//! Unchanged duplicate / overlapping reads stay allowed but become cheap:
-//! fully covered ranges return a short notice (no body dump); partial
-//! overlaps return only unseen lines (small overlap for readability).
+//! Fully covered unchanged ranges are **denied** (not re-delivered): the model
+//! must choose a different range, file, or productive action. Partial overlaps
+//! return only unseen lines (small overlap for readability).
 
 use std::collections::HashMap;
 use std::path::{Component, Path};
@@ -20,7 +20,7 @@ pub struct ReadCache {
     pub hits: u32,
     pub misses: u32,
     pub repeated_reads: u32,
-    /// Retained for metrics compatibility; always 0 (blocking removed).
+    /// Exact duplicate full-cover reads that were denied.
     pub blocked_repeated_reads: u32,
     /// Overlap-aware partial reads (only new lines returned).
     pub partial_reads: u32,
@@ -53,10 +53,10 @@ pub enum ReadCacheOutcome {
     Hit,
 }
 
-/// How to satisfy a `read_file` without blocking the model.
+/// How to satisfy a `read_file` without re-delivering identical content.
 #[derive(Debug)]
 pub enum ReadResolve {
-    /// Fully covered and unchanged — short notice, no file body.
+    /// Fully covered and unchanged — denied duplicate (no body).
     AlreadyRead(ToolResult),
     /// Live read needed (possibly narrowed to unseen lines).
     Live {
@@ -126,6 +126,7 @@ impl ReadCache {
                 .unwrap_or(0);
             self.hits = self.hits.saturating_add(1);
             self.repeated_reads = self.repeated_reads.saturating_add(1);
+            self.blocked_repeated_reads = self.blocked_repeated_reads.saturating_add(1);
             return ReadResolve::AlreadyRead(already_read_result(
                 &path_key, req_start, req_end, prior,
             ));
@@ -275,15 +276,22 @@ impl ReadCache {
 }
 
 fn already_read_result(path: &str, start: u32, end: u32, prior_step: u32) -> ToolResult {
+    let message = format!(
+        "Duplicate read denied: Exact content already available in current context \
+         ({path} lines {start}-{end}, earlier step {prior_step}; file unchanged).\n\
+         Alternatives:\n\
+         - read a different range\n\
+         - read another file\n\
+         - locate a different concept / boundary\n\
+         - update_plan\n\
+         - apply_patch / write_file\n\
+         - finish with findings if blocked"
+    );
     ToolResult {
-        success: true,
-        output: format!(
-            "[already read — {path} lines {start}-{end} were returned earlier (step {prior_step})]\n\
-             File is unchanged since that read. Reuse the prior content; request a different range \
-             or wait until the file is edited if you need a refresh."
-        ),
+        success: false,
+        output: String::new(),
         diff: None,
-        error: None,
+        error: Some(message),
         stop_reason: None,
     }
 }
@@ -416,7 +424,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn identical_reread_returns_short_notice() {
+    fn identical_reread_is_denied() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
 
@@ -427,11 +435,12 @@ mod tests {
         cache.store(dir.path(), path, 1, 10, 0, &fresh.output);
 
         let hit = cache.try_hit(dir.path(), path, 1, 10).unwrap();
-        assert!(hit.success);
-        assert!(hit.output.contains("[already read"));
-        assert!(!hit.output.contains("one\ntwo"));
+        assert!(!hit.success);
+        let err = hit.error.as_deref().unwrap_or("");
+        assert!(err.contains("Duplicate read denied"), "{err}");
+        assert!(!err.contains("one\ntwo"));
         assert_eq!(cache.hits, 1);
-        assert_eq!(cache.blocked_repeated_reads, 0);
+        assert_eq!(cache.blocked_repeated_reads, 1);
     }
 
     #[test]
@@ -447,8 +456,10 @@ mod tests {
 
         match cache.resolve(dir.path(), path, 1, 100) {
             ReadResolve::AlreadyRead(r) => {
-                assert!(r.output.contains("already read"));
-                assert!(r.output.contains("step 3"));
+                assert!(!r.success);
+                let err = r.error.as_deref().unwrap_or("");
+                assert!(err.contains("Duplicate read denied"), "{err}");
+                assert!(err.contains("step 3"), "{err}");
             }
             other => panic!("expected AlreadyRead, got {other:?}"),
         }

@@ -9,6 +9,7 @@ use crate::session::{TaskSessionState, TurnIntent};
 use crate::state::completion::CompletionTracker;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
+use crate::state::progress::ProgressState;
 use crate::state::step::Step;
 use crate::tools::project_snapshot::ProjectSnapshot;
 use crate::tools::read_cache::ReadCache;
@@ -51,6 +52,9 @@ pub struct AgentState {
     /// Serial exploration + soft no-edit budget tracking.
     pub exploration: ExplorationTracker,
 
+    /// Consecutive no-progress / stagnation tracking (soft guidance).
+    pub progress: ProgressState,
+
     /// Objective post-edit completion milestones.
     pub completion: CompletionTracker,
 
@@ -89,6 +93,7 @@ impl AgentState {
             read_cache: ReadCache::new(),
             shell_cache: ShellCommandCache::new(),
             exploration: ExplorationTracker::new(),
+            progress: ProgressState::new(),
             completion: CompletionTracker::new(),
             governance: GovernanceState::new(),
             run_started: Instant::now(),

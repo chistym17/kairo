@@ -169,6 +169,8 @@ fn is_blocked_result(result: &ToolResult) -> bool {
                 || e.contains("blocked: identical")
                 || e.contains("blocked: explore")
                 || e.contains("repeated read blocked")
+                || e.contains("duplicate read denied")
+                || e.contains("exploration checkpoint active")
             {
                 return true;
             }

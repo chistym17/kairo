@@ -31,6 +31,7 @@ mod tests {
         assert!(p.contains("## Workflow"));
         assert!(p.contains("## General principles"));
         assert!(p.contains("## Explore"));
+        assert!(p.contains("## Contracts and boundaries"));
         assert!(p.contains("## Plan"));
         assert!(p.contains("## Edit"));
         assert!(p.contains("## Verify"));
