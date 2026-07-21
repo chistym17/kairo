@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use agent_v1::agent::AgentRuntime;
+use agent_v1::authorization::EditPolicy;
 use agent_v1::chat::{open_session, ChatRuntime, SessionArg};
 use agent_v1::config;
 use agent_v1::context::default_system_prompt;
@@ -184,13 +185,25 @@ async fn main() {
         "[agent-v1] semantic_policy: {}",
         config.semantic_policy
     );
+    println!("[agent-v1] edit_policy: {:?}", config.edit_policy);
     if config.step_delay_ms > 0 {
         println!("[agent-v1] step_delay: {}ms", config.step_delay_ms);
     }
 
+    // Interactive defaults to ConfirmBeforeFirstEdit unless EDIT_POLICY was set
+    // explicitly to something other than the one-shot default of auto.
+    let interactive_edit_policy = match std::env::var("EDIT_POLICY") {
+        Ok(_) => config.edit_policy,
+        Err(_) => EditPolicy::ConfirmBeforeFirstEdit,
+    };
+
     let session_settings = SessionSettings {
         model_id: config.model_id.clone(),
         max_steps: config.max_steps,
+        edit_policy: match cli.mode {
+            RunMode::Interactive => interactive_edit_policy,
+            RunMode::OneShot { .. } => config.edit_policy,
+        },
     };
 
     let manager = SessionManager::with_default_dir();
@@ -238,6 +251,9 @@ async fn main() {
                     config.workspace_root.clone(),
                     None,
                     session.as_mut(),
+                    // One-shot: no stdin gate. Use EDIT_POLICY=auto (default) or
+                    // confirm will deny mutations without a gate.
+                    None,
                 )
                 .await
                 .unwrap_or_else(|e| {

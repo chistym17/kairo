@@ -1,3 +1,7 @@
+use crate::authorization::{
+    apply_decision, authorize, build_approval_request, tool_effect, ApprovalDecision,
+    ApprovalGate, AuthorizationDecision,
+};
 use crate::context::{ContextBuilder, ContextManager};
 use crate::governance::{classify_progress, GovernanceDecision};
 use crate::llm::{LlmClient, LlmError, LlmToolCall};
@@ -34,10 +38,19 @@ pub async fn run(
     require_verified_finish: bool,
     observer: Option<&dyn AgentObserver>,
     mut session: Option<&mut Session>,
+    approval_gate: Option<&dyn ApprovalGate>,
 ) -> StopReason {
+    if let Some(session) = session.as_deref() {
+        state.authorization = session.authorization.clone();
+    }
+
     println!(
-        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n",
-        state.run_id, state.goal, state.model_id, state.max_steps
+        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n",
+        state.run_id,
+        state.goal,
+        state.model_id,
+        state.max_steps,
+        state.authorization.edit_policy
     );
     if step_delay_ms > 0 {
         println!("[agent] step_delay: {}ms (opt-in pacing)", step_delay_ms);
@@ -442,6 +455,8 @@ pub async fn run(
                     model_turn,
                     &mut verified_in_batch,
                     observer,
+                    approval_gate,
+                    &mut session,
                 )
                 .await
                 {
@@ -456,6 +471,8 @@ pub async fn run(
                     require_verified_finish,
                     &mut verified_in_batch,
                     observer,
+                    approval_gate,
+                    &mut session,
                 )
                 .await
                 {
@@ -524,6 +541,8 @@ async fn execute_one_tool(
     require_verified_finish: bool,
     verified_in_batch: &mut bool,
     observer: Option<&dyn AgentObserver>,
+    approval_gate: Option<&dyn ApprovalGate>,
+    session: &mut Option<&mut Session>,
 ) -> Option<StopReason> {
     let action = tool_call.action.clone();
     let tool_call_id = tool_call.tool_call_id.clone();
@@ -564,6 +583,18 @@ async fn execute_one_tool(
             write_summary(state, &reason);
             return Some(reason);
         }
+    }
+
+    if let Err(denied) = resolve_tool_authorization(state, &action, approval_gate, session) {
+        return commit_tool_outcome(
+            state,
+            observer,
+            step_index,
+            model_turn,
+            action,
+            tool_call_id,
+            denied,
+        );
     }
 
     let mut result = produce_tool_result(
@@ -610,6 +641,8 @@ async fn execute_readonly_group(
     model_turn: u32,
     verified_in_batch: &mut bool,
     observer: Option<&dyn AgentObserver>,
+    approval_gate: Option<&dyn ApprovalGate>,
+    session: &mut Option<&mut Session>,
 ) -> Option<StopReason> {
     if group.len() == 1 {
         return execute_one_tool(
@@ -619,6 +652,8 @@ async fn execute_readonly_group(
             false,
             verified_in_batch,
             observer,
+            approval_gate,
+            session,
         )
         .await;
     }
@@ -1523,6 +1558,69 @@ enum GovernancePreflightOutcome {
     Proceed,
     Rejected(ToolResult),
     Terminate(StopReason),
+}
+
+/// Classify → authorize → pause if needed → persist grant → allow or deny.
+fn resolve_tool_authorization(
+    state: &mut AgentState,
+    action: &Action,
+    approval_gate: Option<&dyn ApprovalGate>,
+    session: &mut Option<&mut Session>,
+) -> Result<(), ToolResult> {
+    let effect = tool_effect(action);
+    match authorize(effect, &state.authorization) {
+        AuthorizationDecision::Allow => Ok(()),
+        AuthorizationDecision::Deny(message) => {
+            write_event(&state.run_id, "authorization_denied", &message, 0);
+            Err(ToolResult::error(message))
+        }
+        AuthorizationDecision::RequireApproval(_) => {
+            let request = build_approval_request(action, effect);
+            write_event(
+                &state.run_id,
+                "authorization_required",
+                &format!("{:?} — {}", effect, request.summary),
+                0,
+            );
+
+            let Some(gate) = approval_gate else {
+                let message = format!(
+                    "authorization required for {} ({:?}) but no approval gate is available \
+                     (use interactive session or EditPolicy::Auto)",
+                    request.summary, effect
+                );
+                write_event(&state.run_id, "authorization_denied", &message, 0);
+                return Err(ToolResult::error(message));
+            };
+
+            let decision = gate.request_approval(&request);
+            write_event(
+                &state.run_id,
+                "authorization_decision",
+                &format!("{decision:?} for {}", request.summary),
+                0,
+            );
+            apply_decision(&mut state.authorization, effect, &decision);
+            sync_authorization_to_session(state, session);
+
+            match decision {
+                ApprovalDecision::Reject => {
+                    let message = format!(
+                        "user rejected authorization for {} ({:?})",
+                        request.summary, effect
+                    );
+                    Err(ToolResult::error(message))
+                }
+                ApprovalDecision::ApproveOnce | ApprovalDecision::ApproveForTask => Ok(()),
+            }
+        }
+    }
+}
+
+fn sync_authorization_to_session(state: &AgentState, session: &mut Option<&mut Session>) {
+    if let Some(session) = session.as_deref_mut() {
+        session.authorization = state.authorization.clone();
+    }
 }
 
 fn apply_governance_preflight(

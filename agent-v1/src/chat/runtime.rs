@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::agent::{AgentRuntime, RunResult};
+use crate::authorization::StdinApprovalGate;
 use crate::session::{Session, SessionManager, SessionSettings};
 
 use super::commands::{parse_input, ChatInput};
@@ -78,6 +79,7 @@ impl ChatRuntime {
     }
 
     async fn handle_message(&mut self, message: &str) -> Result<()> {
+        let gate = StdinApprovalGate;
         let result = self
             .agent
             .run(
@@ -85,6 +87,7 @@ impl ChatRuntime {
                 self.workspace.clone(),
                 None,
                 Some(&mut self.session),
+                Some(&gate),
             )
             .await?;
 
@@ -99,6 +102,15 @@ impl ChatRuntime {
     fn print_banner(&self) {
         println!("[agent-v1] interactive session: {}", self.session.id);
         println!("[agent-v1] workspace: {}", self.workspace.display());
+        println!(
+            "[agent-v1] edit_policy: {:?}{}",
+            self.session.authorization.edit_policy,
+            if self.session.authorization.workspace_mutations_approved {
+                " (workspace mutations approved for task)"
+            } else {
+                ""
+            }
+        );
         println!("[agent-v1] type a task, or /exit to quit");
         if !self.session.messages.is_empty() {
             println!(

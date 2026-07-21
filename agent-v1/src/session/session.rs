@@ -4,12 +4,17 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::authorization::{AuthorizationState, EditPolicy};
+
 use super::message::Message;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSettings {
     pub model_id: String,
     pub max_steps: u32,
+    /// Initial edit policy for new sessions (copied into [`AuthorizationState`]).
+    #[serde(default)]
+    pub edit_policy: EditPolicy,
 }
 
 impl Default for SessionSettings {
@@ -17,6 +22,7 @@ impl Default for SessionSettings {
         Self {
             model_id: "llama-3.1-70b-versatile".to_string(),
             max_steps: 15,
+            edit_policy: EditPolicy::Auto,
         }
     }
 }
@@ -38,6 +44,9 @@ pub struct Session {
     pub messages: Vec<Message>,
     pub compaction: Option<CompactionState>,
     pub settings: SessionSettings,
+    /// Edit policy + task-scoped mutation grants (Phase 12).
+    #[serde(default)]
+    pub authorization: AuthorizationState,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -45,12 +54,14 @@ pub struct Session {
 impl Session {
     pub fn new(workspace_root: impl Into<PathBuf>, settings: SessionSettings) -> Self {
         let now = Utc::now().to_rfc3339();
+        let authorization = AuthorizationState::new(settings.edit_policy);
         Self {
             id: Uuid::new_v4().to_string(),
             workspace_root: workspace_root.into(),
             messages: Vec::new(),
             compaction: None,
             settings,
+            authorization,
             created_at: now.clone(),
             updated_at: now,
         }

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::authorization::AuthorizationState;
 use crate::governance::GovernanceState;
 use crate::repo_intel::HybridIntel;
 use crate::state::completion::CompletionTracker;
@@ -25,6 +26,9 @@ pub struct AgentState {
     /// Number of LLM responses (a turn may include multiple tool calls).
     pub model_turns: u32,
     pub max_steps: u32,
+
+    /// Edit policy + grants for this run (synced from session when present).
+    pub authorization: AuthorizationState,
 
     /// Optional working plan for multi-step tasks (Phase 7.3).
     pub plan: Option<AgentPlan>,
@@ -74,6 +78,7 @@ impl AgentState {
             step_count: 0,
             model_turns: 0,
             max_steps,
+            authorization: AuthorizationState::default(),
             plan: None,
             project_snapshot: None,
             repo_intel: None,

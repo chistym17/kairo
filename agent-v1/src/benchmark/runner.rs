@@ -52,7 +52,7 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
             )?;
 
             let run = runtime
-                .run(task.goal.clone(), task.workspace.clone(), None, None)
+                .run(task.goal.clone(), task.workspace.clone(), None, None, None)
                 .await
                 .with_context(|| format!("agent runtime failed for task {}", task.id))?;
 

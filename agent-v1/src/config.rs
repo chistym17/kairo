@@ -54,6 +54,11 @@ pub struct Config {
     /// When true, enable semantic runtime modes (EditOrJustify / ReviewOrFinish)
     /// and related tool gating. Default false — see phasev2.md Phase A.
     pub semantic_policy: bool,
+
+    /// Edit / mutation authorization policy (Phase 12).
+    /// `auto` | `confirm` | `readonly`. Default `auto` for one-shot/benchmarks;
+    /// interactive sessions default to `confirm` unless overridden.
+    pub edit_policy: crate::authorization::EditPolicy,
 }
 
 impl Config {
@@ -127,6 +132,14 @@ impl Config {
             semantic_policy: env_or("SEMANTIC_POLICY", "false")
                 .parse::<bool>()
                 .expect("SEMANTIC_POLICY must be true or false"),
+            edit_policy: {
+                let raw = env_or("EDIT_POLICY", "auto");
+                crate::authorization::EditPolicy::parse(&raw).unwrap_or_else(|| {
+                    panic!(
+                        "EDIT_POLICY must be auto, confirm, or readonly (got {raw:?})"
+                    )
+                })
+            },
         }
     }
 }

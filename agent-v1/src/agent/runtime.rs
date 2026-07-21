@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::authorization::ApprovalGate;
 use crate::llm::LlmClient;
 use crate::loop_engine;
 use crate::agent::{AgentEvent, AgentObserver};
@@ -88,6 +89,7 @@ impl AgentRuntime {
         workspace_root: impl Into<PathBuf>,
         observer: Option<&dyn AgentObserver>,
         mut session: Option<&mut Session>,
+        approval_gate: Option<&dyn ApprovalGate>,
     ) -> Result<RunResult> {
         let goal = goal.into();
         let workspace_root = workspace_root.into();
@@ -127,10 +129,13 @@ impl AgentRuntime {
             self.require_verified_finish,
             observer,
             session.as_deref_mut(),
+            approval_gate,
         )
         .await;
 
         if let Some(session) = session {
+            // Persist final authorization grants (ApproveForTask etc.).
+            session.authorization = state.authorization.clone();
             session.add_user_message(&goal);
             if let Some(summary) = finish_summary(&state) {
                 session.add_assistant_message(summary);
@@ -286,7 +291,7 @@ mod tests {
             20,
         );
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         assert!(result.success);
         assert!(result.changed_files.iter().any(|p| p.ends_with("hello.txt")));
     }
@@ -332,7 +337,7 @@ mod tests {
             20,
         );
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         assert!(result.success);
         assert_eq!(result.total_steps, 4); // 3 parallel reads + finish
         assert_eq!(result.efficiency.parallel_tool_groups, 1);
@@ -381,7 +386,7 @@ mod tests {
             20,
         );
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         assert!(result.success);
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("\"event\":\"cache_miss\"") || log.contains("\"event\": \"cache_miss\""));
@@ -430,7 +435,7 @@ mod tests {
             20,
         );
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         assert!(result.success);
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("cache_invalidate"));
@@ -490,7 +495,7 @@ mod tests {
             20,
         );
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         assert!(result.success);
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(
@@ -544,7 +549,7 @@ mod tests {
             20,
         );
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         assert!(result.success);
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(
@@ -589,7 +594,7 @@ mod tests {
             20,
         );
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         assert!(result.success);
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(
@@ -636,7 +641,7 @@ mod tests {
         )
         .with_semantic_policy(true);
 
-        let result = runtime.run("goal", &workspace, None, None).await.unwrap();
+        let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(
             log.contains("governance_rejected") || log.contains("governance_terminate"),

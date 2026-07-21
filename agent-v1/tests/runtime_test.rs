@@ -88,7 +88,7 @@ async fn runtime_runs_and_reports_changed_files() {
         20,
     );
 
-    let result = runtime.run("goal", workspace, None, None).await.unwrap();
+    let result = runtime.run("goal", workspace, None, None, None).await.unwrap();
 
     assert!(result.success);
     assert!(result.total_steps >= 1);
@@ -126,7 +126,7 @@ async fn rate_limit_does_not_consume_step_budget() {
         20,
     );
 
-    let result = runtime.run("goal", workspace, None, None).await.unwrap();
+    let result = runtime.run("goal", workspace, None, None, None).await.unwrap();
     assert!(result.success);
     assert_eq!(result.total_steps, 2);
 }

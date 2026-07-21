@@ -1,3 +1,4 @@
+pub mod authorization;
 pub mod governance;
 pub mod config;
 pub mod llm;
