@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::authorization::AuthorizationState;
 use crate::governance::GovernanceState;
 use crate::repo_intel::HybridIntel;
-use crate::session::TaskSessionState;
+use crate::session::{TaskSessionState, TurnIntent};
 use crate::state::completion::CompletionTracker;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
@@ -32,6 +32,9 @@ pub struct AgentState {
 
     /// Durable task memory for this run (synced from / to session).
     pub task: TaskSessionState,
+
+    /// Declared turn intent for this run (metadata only — not a tool gate).
+    pub turn_intent: TurnIntent,
 
     /// Orientation snapshot (computed once per run; refreshable via tool).
     pub project_snapshot: Option<ProjectSnapshot>,
@@ -80,6 +83,7 @@ impl AgentState {
             max_steps,
             authorization: AuthorizationState::default(),
             task: TaskSessionState::default(),
+            turn_intent: TurnIntent::Explore,
             project_snapshot: None,
             repo_intel: None,
             read_cache: ReadCache::new(),

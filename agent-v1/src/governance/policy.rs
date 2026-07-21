@@ -61,7 +61,8 @@ impl ToolPolicy {
                 | Action::SearchCode { .. }
                 | Action::Locate { .. }
                 | Action::FindFiles { .. }
-                | Action::DetectProjectSnapshot { .. } => return false,
+                | Action::DetectProjectSnapshot { .. }
+                | Action::SummarizeRepo { .. } => return false,
                 Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } => {
                     if crate::tools::shell_cache::is_explore_shell(cmd) {
                         return false;
@@ -88,6 +89,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "locate",
     "find_files",
     "detect_project_snapshot",
+    "summarize_repo",
     "git_status",
     "git_diff",
     "write_file",
@@ -127,6 +129,7 @@ pub fn tool_name(action: &Action) -> &'static str {
         Action::Locate { .. } => "locate",
         Action::FindFiles { .. } => "find_files",
         Action::DetectProjectSnapshot { .. } => "detect_project_snapshot",
+        Action::SummarizeRepo { .. } => "summarize_repo",
         Action::GitStatus => "git_status",
         Action::GitDiff { .. } => "git_diff",
         Action::WriteFile { .. } => "write_file",

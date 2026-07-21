@@ -160,6 +160,10 @@ pub fn fingerprint(action: &Action, revision: u64) -> ActionFingerprint {
             tool: "detect_project_snapshot",
             revision,
         },
+        Action::SummarizeRepo { .. } => ActionFingerprint::Other {
+            tool: "summarize_repo",
+            revision,
+        },
         Action::WriteFile { .. } => ActionFingerprint::Other {
             tool: "write_file",
             revision,
@@ -199,6 +203,7 @@ pub fn is_explore_action(action: &Action) -> bool {
             | Action::Locate { .. }
             | Action::FindFiles { .. }
             | Action::DetectProjectSnapshot { .. }
+            | Action::SummarizeRepo { .. }
     ) || match action {
         Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } => {
             is_explore_shell(cmd)

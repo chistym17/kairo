@@ -137,6 +137,7 @@ impl AgentRuntime {
             // Persist final authorization grants and durable task state.
             session.authorization = state.authorization.clone();
             session.task = state.task.clone();
+            session.declared_intent = state.turn_intent;
             session.add_user_message(&goal);
             if let Some(summary) = finish_summary(&state) {
                 session.add_assistant_message(summary);

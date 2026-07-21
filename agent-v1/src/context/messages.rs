@@ -174,6 +174,14 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
             "detect_project_snapshot",
             json!({ "path": path.to_string_lossy() }),
         ),
+        Action::SummarizeRepo { depth, path, focus } => (
+            "summarize_repo",
+            json!({
+                "depth": depth,
+                "path": path.to_string_lossy(),
+                "focus": focus,
+            }),
+        ),
         Action::GitStatus => ("git_status", json!({})),
         Action::GitDiff { path } => {
             let mut args = json!({});

@@ -170,6 +170,10 @@ pub fn dispatch(action: &Action, workspace_root: &Path) -> ToolResult {
             project_snapshot::execute(path, workspace_root)
         }
 
+        Action::SummarizeRepo { .. } => ToolResult::error(
+            "summarize_repo must be handled by the loop engine (needs repo index)",
+        ),
+
         Action::GitStatus => git_status::execute(workspace_root),
 
         Action::GitDiff { path } => git_diff::execute(path, workspace_root, None),

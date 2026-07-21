@@ -14,6 +14,7 @@ mod rrf;
 mod search_snapshot;
 mod snippets;
 mod sources;
+mod summary;
 pub mod traits;
 pub mod types;
 
@@ -34,6 +35,9 @@ pub use indexer::{
 pub use query::{normalize_query, QueryTokens};
 pub use rrf::{reciprocal_rank_fuse, RankedHit, RRF_K};
 pub use search_snapshot::SearchSnapshotIntel;
+pub use summary::{
+    summarize, RepositorySummary, SummaryBudget, SummaryDepth, SummaryRequest, SummaryScope,
+};
 pub use snippets::LineSnippetProvider;
 pub use sources::{
     LexicalCandidateSource, PathCandidateSource, SymbolCandidateSource, TokenCandidateSource,

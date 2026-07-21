@@ -147,6 +147,10 @@ impl HybridIntel {
         &self.workspace_root
     }
 
+    pub fn index(&self) -> &RepositoryIndex {
+        &self.index
+    }
+
     pub fn update_with_stats(
         &mut self,
         changes: &[FileChange],

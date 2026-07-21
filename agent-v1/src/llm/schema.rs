@@ -146,6 +146,34 @@ pub fn build_tools_schema() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "summarize_repo",
+                "description": "Bounded repository overview from the index and project snapshot \
+                    (layout, languages, manifests, sample symbols, README excerpt). \
+                    Prefer this for 'explain this repo' / orientation instead of recursively \
+                    reading many files. Depth: overview (default), structural, or detailed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "depth": {
+                            "type": "string",
+                            "description": "overview | structural | detailed. Default: overview"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional relative directory to scope the summary. Default: '.'"
+                        },
+                        "focus": {
+                            "type": "string",
+                            "description": "Optional keywords to bias paths/symbols (e.g. 'tasks api')"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "git_status",
                 "description": "Show git status for the workspace (branch and changed files). \
                     Call this before editing to see existing modifications, and after edits to confirm what changed.",
@@ -410,6 +438,28 @@ pub fn parse_tool_call(
             })
         }
 
+        "summarize_repo" => {
+            let depth = args
+                .get("depth")
+                .and_then(|v| v.as_str())
+                .unwrap_or("overview")
+                .to_string();
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let focus = args
+                .get("focus")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            Ok(Action::SummarizeRepo {
+                depth,
+                path: PathBuf::from(path),
+                focus,
+            })
+        }
+
         "git_status" => Ok(Action::GitStatus),
 
         "git_diff" => {
@@ -505,7 +555,7 @@ pub fn parse_tool_call(
         }
 
         unknown => Err(format!(
-            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, locate, find_files, detect_project_snapshot, git_status, git_diff, write_file, apply_patch, run_command, run_shell, update_plan, finish",
+            "unknown tool name: '{}'. Valid tools: read_file, list_files, search_code, locate, find_files, detect_project_snapshot, summarize_repo, git_status, git_diff, write_file, apply_patch, run_command, run_shell, update_plan, finish",
             unknown
         )),
     }

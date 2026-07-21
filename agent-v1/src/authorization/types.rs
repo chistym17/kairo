@@ -130,6 +130,7 @@ pub fn tool_effect(action: &Action) -> ToolEffect {
         | Action::Locate { .. }
         | Action::FindFiles { .. }
         | Action::DetectProjectSnapshot { .. }
+        | Action::SummarizeRepo { .. }
         | Action::GitStatus
         | Action::GitDiff { .. }
         | Action::UpdatePlan { .. }

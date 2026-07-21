@@ -101,6 +101,7 @@ pub fn is_exploration_readonly(action: &Action) -> bool {
             | Action::Locate { .. }
             | Action::FindFiles { .. }
             | Action::DetectProjectSnapshot { .. }
+            | Action::SummarizeRepo { .. }
             | Action::GitStatus
             | Action::GitDiff { .. }
     )

@@ -28,6 +28,16 @@ pub enum Action {
     /// Compact orientation map of project units (manifests → kind/commands/entry points).
     DetectProjectSnapshot { path: PathBuf },
 
+    /// Bounded index-backed repository overview (no recursive tree reads).
+    SummarizeRepo {
+        /// overview | structural | detailed
+        depth: String,
+        /// Directory / path scope (default `.`).
+        path: PathBuf,
+        /// Optional focus keywords.
+        focus: Option<String>,
+    },
+
     GitStatus,
 
     /// Working-tree diff vs HEAD. Optional path scopes the diff.

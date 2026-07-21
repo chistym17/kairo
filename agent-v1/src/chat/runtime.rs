@@ -64,6 +64,11 @@ impl ChatRuntime {
                 ChatInput::Empty => continue,
                 ChatInput::ShowPlan => self.print_plan(),
                 ChatInput::ShowTask => self.print_task(),
+                ChatInput::Overview { depth, focus } => {
+                    if let Err(e) = self.print_overview(&depth, focus.as_deref()) {
+                        eprintln!("[agent-v1] {e:#}");
+                    }
+                }
                 ChatInput::ApprovePlan => {
                     if let Err(e) = self.approve_plan() {
                         eprintln!("[agent-v1] {e}");
@@ -76,6 +81,16 @@ impl ChatRuntime {
                 }
                 ChatInput::RecordDecision(text) => {
                     if let Err(e) = self.record_decision(&text) {
+                        eprintln!("[agent-v1] {e}");
+                    }
+                }
+                ChatInput::SetIntent(intent) => {
+                    if let Err(e) = self.set_intent(intent) {
+                        eprintln!("[agent-v1] {e}");
+                    }
+                }
+                ChatInput::ClearIntent => {
+                    if let Err(e) = self.clear_intent() {
                         eprintln!("[agent-v1] {e}");
                     }
                 }
@@ -128,9 +143,18 @@ impl ChatRuntime {
                 ""
             }
         );
+        println!(
+            "[agent-v1] turn_intent: {}{}",
+            self.session.declared_intent.as_str(),
+            if self.session.intent_pinned {
+                " (pinned)"
+            } else {
+                " (auto)"
+            }
+        );
         println!("[agent-v1] type a task, or /exit to quit");
         println!(
-            "[agent-v1] cmds: /plan  /approve-plan  /constrain <text>  /decision <text>  /task  /exit"
+            "[agent-v1] cmds: /overview  /intent <explore|plan|execute|review|clear>  /plan  /approve-plan  /constrain <text>  /decision <text>  /task  /exit"
         );
         if !self.session.messages.is_empty() {
             println!(
@@ -156,6 +180,40 @@ impl ChatRuntime {
     fn print_task(&self) {
         println!("\n[agent-v1] ── task state ──────────────────────────");
         print!("{}", self.session.task.render_compact());
+    }
+
+    fn print_overview(&self, depth: &str, focus: Option<&str>) -> Result<()> {
+        use crate::repo_intel::{
+            summarize, HybridIntel, SummaryBudget, SummaryDepth, SummaryRequest, SummaryScope,
+        };
+        use crate::tools::project_snapshot;
+
+        let depth = SummaryDepth::parse(depth).unwrap_or(SummaryDepth::Overview);
+        let (intel, stats) = HybridIntel::build(
+            &self.workspace,
+            self.workspace.display().to_string(),
+        )
+        .map_err(|e| anyhow::anyhow!("index build failed: {e}"))?;
+        let snapshot = project_snapshot::detect(&self.workspace);
+        let request = SummaryRequest {
+            scope: SummaryScope::Repository,
+            depth,
+            budget: SummaryBudget::for_depth(depth),
+            focus: focus.map(|s| s.to_string()),
+        };
+        let summary = summarize(
+            &self.workspace,
+            intel.index(),
+            Some(&snapshot),
+            &request,
+        );
+        println!("\n[agent-v1] ── repository overview ───────────────");
+        println!(
+            "[agent-v1] index: {} file(s) in {}ms",
+            stats.files_indexed, stats.build_ms
+        );
+        println!("{}", summary.text);
+        Ok(())
     }
 
     fn approve_plan(&mut self) -> Result<()> {
@@ -206,6 +264,23 @@ impl ChatRuntime {
             .map_err(anyhow::Error::msg)?;
         self.manager.save(&self.session)?;
         println!("[agent-v1] decision recorded: {text}");
+        Ok(())
+    }
+
+    fn set_intent(&mut self, intent: crate::session::TurnIntent) -> Result<()> {
+        self.session.set_intent(intent);
+        self.manager.save(&self.session)?;
+        println!(
+            "[agent-v1] turn_intent pinned to {} (metadata only — EditPolicy still governs edits)",
+            intent.as_str()
+        );
+        Ok(())
+    }
+
+    fn clear_intent(&mut self) -> Result<()> {
+        self.session.clear_intent_pin();
+        self.manager.save(&self.session)?;
+        println!("[agent-v1] turn_intent pin cleared — will infer from messages");
         Ok(())
     }
 

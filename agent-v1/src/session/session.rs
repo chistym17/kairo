@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::authorization::{AuthorizationState, EditPolicy};
 
+use super::intent::TurnIntent;
 use super::message::Message;
 use super::task_state::TaskSessionState;
 
@@ -51,6 +52,12 @@ pub struct Session {
     /// Compact durable task memory (plan, decisions, files, verification).
     #[serde(default)]
     pub task: TaskSessionState,
+    /// Last declared / inferred turn intent (metadata only).
+    #[serde(default)]
+    pub declared_intent: TurnIntent,
+    /// When true, [`declared_intent`] was set via `/intent` and is not overwritten by inference.
+    #[serde(default)]
+    pub intent_pinned: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -67,9 +74,22 @@ impl Session {
             settings,
             authorization,
             task: TaskSessionState::default(),
+            declared_intent: TurnIntent::Explore,
+            intent_pinned: false,
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    pub fn set_intent(&mut self, intent: TurnIntent) {
+        self.declared_intent = intent;
+        self.intent_pinned = true;
+        self.touch();
+    }
+
+    pub fn clear_intent_pin(&mut self) {
+        self.intent_pinned = false;
+        self.touch();
     }
 
     pub fn add_message(&mut self, message: Message) {

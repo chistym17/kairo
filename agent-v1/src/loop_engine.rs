@@ -40,19 +40,47 @@ pub async fn run(
     mut session: Option<&mut Session>,
     approval_gate: Option<&dyn ApprovalGate>,
 ) -> StopReason {
-    if let Some(session) = session.as_deref() {
+    if let Some(session) = session.as_deref_mut() {
         state.authorization = session.authorization.clone();
         state.task = session.task.clone();
+        if session.intent_pinned {
+            state.turn_intent = session.declared_intent;
+        } else {
+            state.turn_intent = crate::session::TurnIntent::infer_from_message(&state.goal);
+            session.declared_intent = state.turn_intent;
+        }
+    } else {
+        state.turn_intent = crate::session::TurnIntent::infer_from_message(&state.goal);
     }
     state.task.set_objective_if_empty(&state.goal);
 
+    write_event(
+        &state.run_id,
+        "turn_intent",
+        &format!(
+            "{}{}",
+            state.turn_intent.as_str(),
+            if session
+                .as_ref()
+                .map(|s| s.intent_pinned)
+                .unwrap_or(false)
+            {
+                " (pinned)"
+            } else {
+                " (inferred)"
+            }
+        ),
+        0,
+    );
+
     println!(
-        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n",
+        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n[agent] turn_intent: {} (metadata)\n",
         state.run_id,
         state.goal,
         state.model_id,
         state.max_steps,
-        state.authorization.edit_policy
+        state.authorization.edit_policy,
+        state.turn_intent.as_str()
     );
     if step_delay_ms > 0 {
         println!("[agent] step_delay: {}ms (opt-in pacing)", step_delay_ms);
@@ -530,6 +558,7 @@ fn is_parallel_readonly(action: &Action) -> bool {
             | Action::Locate { .. }
             | Action::FindFiles { .. }
             | Action::DetectProjectSnapshot { .. }
+            | Action::SummarizeRepo { .. }
             | Action::GitStatus
             | Action::GitDiff { .. }
     )
@@ -994,6 +1023,9 @@ fn produce_tool_result(
                 result
             }
             Action::Locate { query, path } => locate_with_state(state, query, path),
+            Action::SummarizeRepo { depth, path, focus } => {
+                summarize_repo_with_state(state, depth, path, focus.as_deref())
+            }
             Action::Finish { summary } => {
                 let stop_reason = if verified_for_finish {
                     StopReason::TaskComplete
@@ -1188,6 +1220,64 @@ fn locate_with_state(
         crate::repo_intel::execute_with_intel(intel, query, &scope)
     } else {
         crate::repo_intel::execute(query, path, &state.workspace_root)
+    }
+}
+
+fn summarize_repo_with_state(
+    state: &mut AgentState,
+    depth: &str,
+    path: &std::path::Path,
+    focus: Option<&str>,
+) -> ToolResult {
+    ensure_repo_intel(state);
+    let Some(intel) = state.repo_intel.as_ref() else {
+        return ToolResult::error(
+            "summarize_repo: repository index unavailable (index build failed)",
+        );
+    };
+
+    let depth = crate::repo_intel::SummaryDepth::parse(depth).unwrap_or(
+        crate::repo_intel::SummaryDepth::Overview,
+    );
+    let scope = if path.as_os_str().is_empty() || path == std::path::Path::new(".") {
+        crate::repo_intel::SummaryScope::Repository
+    } else {
+        crate::repo_intel::SummaryScope::Path(path.to_path_buf())
+    };
+    let request = crate::repo_intel::SummaryRequest {
+        scope,
+        depth,
+        budget: crate::repo_intel::SummaryBudget::for_depth(depth),
+        focus: focus.map(|s| s.to_string()),
+    };
+
+    let summary = crate::repo_intel::summarize(
+        &state.workspace_root,
+        intel.index(),
+        state.project_snapshot.as_ref(),
+        &request,
+    );
+
+    write_event(
+        &state.run_id,
+        "repo_summary",
+        &format!(
+            "depth={:?} files={} symbols={} truncated={} chars={}",
+            depth,
+            summary.files_mentioned,
+            summary.symbols_mentioned,
+            summary.truncated,
+            summary.text.len()
+        ),
+        0,
+    );
+
+    ToolResult {
+        success: true,
+        output: summary.text,
+        diff: None,
+        error: None,
+        stop_reason: None,
     }
 }
 
@@ -1519,6 +1609,7 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
         Action::Locate { .. } => "locate",
         Action::FindFiles { .. } => "find_files",
         Action::DetectProjectSnapshot { .. } => "detect_project_snapshot",
+        Action::SummarizeRepo { .. } => "summarize_repo",
         Action::GitStatus => "git_status",
         Action::GitDiff { .. } => "git_diff",
         Action::WriteFile { .. } => "write_file",
@@ -1532,6 +1623,9 @@ fn tool_name(action: &crate::state::step::Action) -> &'static str {
 
 fn goal_with_plan(state: &mut AgentState) -> String {
     let mut out = state.goal.clone();
+    out.push_str("\n\n## Turn intent\n");
+    out.push_str(state.turn_intent.prompt_hint());
+    out.push('\n');
     if let Some(snap) = &state.project_snapshot {
         out.push_str("\n\n## Project snapshot\n");
         out.push_str(&snap.render_compact());
@@ -1755,6 +1849,7 @@ fn validate_action(
         Action::DetectProjectSnapshot { path } => {
             validate_rel_path("detect_project_snapshot", path)
         }
+        Action::SummarizeRepo { path, .. } => validate_rel_path("summarize_repo", path),
         Action::GitStatus => None,
         Action::GitDiff { path } => {
             if let Some(p) = path {

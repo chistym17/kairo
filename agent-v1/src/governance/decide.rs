@@ -198,7 +198,8 @@ pub fn classify_progress(
         | Action::Locate { .. }
         | Action::FindFiles { .. }
         | Action::ListFiles { .. }
-        | Action::DetectProjectSnapshot { .. } => ActionProgress::UniqueInfo,
+        | Action::DetectProjectSnapshot { .. }
+        | Action::SummarizeRepo { .. } => ActionProgress::UniqueInfo,
         Action::RunCommand { .. } | Action::RunShell { .. } => {
             if result.success && looks_like_verify_success(action, result) {
                 ActionProgress::SuccessfulVerify
