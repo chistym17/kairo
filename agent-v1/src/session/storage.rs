@@ -53,6 +53,9 @@ mod tests {
         let mut session = Session::new("/tmp/project", SessionSettings::default());
         session.add_user_message("fix the bug");
         session.add_assistant_message("I'll inspect the code");
+        session.plan = Some(
+            crate::state::AgentPlan::from_update("Fix bug", "[ ] find\n[ ] fix").unwrap(),
+        );
 
         save(base.path(), &session).unwrap();
         let loaded = load(base.path(), &session.id).unwrap();
@@ -60,5 +63,9 @@ mod tests {
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0], Message::user("fix the bug"));
+        let plan = loaded.plan.expect("plan persisted");
+        assert_eq!(plan.objective, "Fix bug");
+        assert_eq!(plan.version, 1);
+        assert_eq!(plan.steps.len(), 2);
     }
 }

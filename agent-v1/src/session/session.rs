@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::authorization::{AuthorizationState, EditPolicy};
+use crate::state::AgentPlan;
 
 use super::message::Message;
 
@@ -47,6 +48,9 @@ pub struct Session {
     /// Edit policy + task-scoped mutation grants (Phase 12).
     #[serde(default)]
     pub authorization: AuthorizationState,
+    /// Durable working plan for this session (Phase 12). Optional — edits allowed without one.
+    #[serde(default)]
+    pub plan: Option<AgentPlan>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -62,6 +66,7 @@ impl Session {
             compaction: None,
             settings,
             authorization,
+            plan: None,
             created_at: now.clone(),
             updated_at: now,
         }

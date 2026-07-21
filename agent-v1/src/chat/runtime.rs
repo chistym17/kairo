@@ -62,6 +62,17 @@ impl ChatRuntime {
                     break;
                 }
                 ChatInput::Empty => continue,
+                ChatInput::ShowPlan => self.print_plan(),
+                ChatInput::ApprovePlan => {
+                    if let Err(e) = self.approve_plan() {
+                        eprintln!("[agent-v1] {e}");
+                    }
+                }
+                ChatInput::ConstrainPlan(text) => {
+                    if let Err(e) = self.constrain_plan(&text) {
+                        eprintln!("[agent-v1] {e}");
+                    }
+                }
                 ChatInput::Message(message) => {
                     if let Err(e) = self.handle_message(&message).await {
                         eprintln!("[agent-v1] error: {e:#}");
@@ -112,12 +123,59 @@ impl ChatRuntime {
             }
         );
         println!("[agent-v1] type a task, or /exit to quit");
+        println!("[agent-v1] plan cmds: /plan  /approve-plan  /constrain <text>");
         if !self.session.messages.is_empty() {
             println!(
                 "[agent-v1] {} prior message(s) in session",
                 self.session.messages.len()
             );
         }
+        if self.session.plan.is_some() {
+            println!("[agent-v1] session has a durable plan (/plan to view)");
+        }
+    }
+
+    fn print_plan(&self) {
+        match &self.session.plan {
+            Some(plan) => {
+                println!("\n[agent-v1] ── session plan ─────────────────────────");
+                println!("{}", plan.render());
+            }
+            None => println!("[agent-v1] no plan in this session yet"),
+        }
+    }
+
+    fn approve_plan(&mut self) -> Result<()> {
+        let version = {
+            let Some(plan) = self.session.plan.as_mut() else {
+                anyhow::bail!("no plan to approve — ask the agent to update_plan first");
+            };
+            plan.approve();
+            plan.version
+        };
+        self.manager.save(&self.session)?;
+        println!("[agent-v1] plan approved (v{version})");
+        if let Some(plan) = &self.session.plan {
+            println!("{}", plan.render());
+        }
+        Ok(())
+    }
+
+    fn constrain_plan(&mut self, text: &str) -> Result<()> {
+        let version = {
+            let Some(plan) = self.session.plan.as_mut() else {
+                anyhow::bail!("no plan to constrain — ask the agent to update_plan first");
+            };
+            plan.add_constraint(text)
+                .map_err(anyhow::Error::msg)?;
+            plan.version
+        };
+        self.manager.save(&self.session)?;
+        println!("[agent-v1] constraint added; plan back to draft (v{version})");
+        if let Some(plan) = &self.session.plan {
+            println!("{}", plan.render());
+        }
+        Ok(())
     }
 
     fn print_run_summary(&self, result: &RunResult) {

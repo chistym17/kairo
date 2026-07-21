@@ -93,6 +93,7 @@ fn print_usage() {
     eprintln!("  agent-v1 --session <id> \"<goal>\"");
     eprintln!();
     eprintln!("interactive: type tasks at >, /exit to quit");
+    eprintln!("plan cmds: /plan  /approve-plan  /constrain <text>");
     eprintln!("example: agent-v1 \"fix the failing test in test_calc.py\"");
 }
 

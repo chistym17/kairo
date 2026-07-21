@@ -11,6 +11,6 @@ pub use agent_state::AgentState;
 pub use completion::CompletionTracker;
 pub use efficiency::RunEfficiency;
 pub use exploration::ExplorationTracker;
-pub use plan::{AgentPlan, PlanStep};
+pub use plan::{AgentPlan, PlanConstraint, PlanStatus, PlanStep};
 pub use step::{Action, Step};
 pub use stop_reason::StopReason;

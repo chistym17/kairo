@@ -42,6 +42,7 @@ pub async fn run(
 ) -> StopReason {
     if let Some(session) = session.as_deref() {
         state.authorization = session.authorization.clone();
+        state.plan = session.plan.clone();
     }
 
     println!(
@@ -604,6 +605,10 @@ async fn execute_one_tool(
         verified_for_finish,
     );
 
+    if result.success && matches!(action, Action::UpdatePlan { .. }) {
+        sync_plan_to_session(state, session);
+    }
+
     if result.success {
         if let Some(path) = mutating_path(&action) {
             if let Some(err) = post_edit_sanity_check(&state.workspace_root, &path) {
@@ -940,14 +945,20 @@ fn produce_tool_result(
         }
         None => match action {
             Action::UpdatePlan { objective, steps } => {
-                match crate::state::AgentPlan::from_update(objective, steps) {
-                    Ok(plan) => {
-                        let output = format!("Plan updated:\n{}", plan.render());
+                let updated = if let Some(existing) = state.plan.as_mut() {
+                    existing.amend_from_update(objective, steps).map(|_| ())
+                } else {
+                    crate::state::AgentPlan::from_update(objective, steps).map(|plan| {
                         state.plan = Some(plan);
-                        state
-                            .governance
-                            .pre_edit
-                            .observe_plan(steps);
+                    })
+                };
+                match updated {
+                    Ok(()) => {
+                        let output = format!(
+                            "Plan updated:\n{}",
+                            state.plan.as_ref().expect("plan present after update").render()
+                        );
+                        state.governance.pre_edit.observe_plan(steps);
                         ToolResult {
                             success: true,
                             output,
@@ -1620,6 +1631,12 @@ fn resolve_tool_authorization(
 fn sync_authorization_to_session(state: &AgentState, session: &mut Option<&mut Session>) {
     if let Some(session) = session.as_deref_mut() {
         session.authorization = state.authorization.clone();
+    }
+}
+
+fn sync_plan_to_session(state: &AgentState, session: &mut Option<&mut Session>) {
+    if let Some(session) = session.as_deref_mut() {
+        session.plan = state.plan.clone();
     }
 }
 

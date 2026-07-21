@@ -281,10 +281,10 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "update_plan",
-                "description": "Create or replace the working plan for a multi-step task. \
-                    Use early for non-trivial goals (explore → fix → verify). \
-                    Re-call as you complete steps, marking them [x]. \
-                    The current plan is shown in context on later steps.",
+                "description": "Create or update the durable working plan for a multi-step task. \
+                    Persists across turns in the session. Amendments keep the same plan id, bump version, and return to draft. \
+                    Use early for non-trivial goals (explore → fix → verify). Re-call as you complete steps, marking them [x]. \
+                    Not required for simple one-step edits. The current plan is shown in context on later steps.",
                 "parameters": {
                     "type": "object",
                     "properties": {
