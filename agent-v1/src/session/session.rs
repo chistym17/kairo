@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::authorization::{AuthorizationState, EditPolicy};
-use crate::state::AgentPlan;
 
 use super::message::Message;
+use super::task_state::TaskSessionState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSettings {
@@ -48,9 +48,9 @@ pub struct Session {
     /// Edit policy + task-scoped mutation grants (Phase 12).
     #[serde(default)]
     pub authorization: AuthorizationState,
-    /// Durable working plan for this session (Phase 12). Optional — edits allowed without one.
+    /// Compact durable task memory (plan, decisions, files, verification).
     #[serde(default)]
-    pub plan: Option<AgentPlan>,
+    pub task: TaskSessionState,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -66,7 +66,7 @@ impl Session {
             compaction: None,
             settings,
             authorization,
-            plan: None,
+            task: TaskSessionState::default(),
             created_at: now.clone(),
             updated_at: now,
         }

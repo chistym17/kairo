@@ -42,8 +42,9 @@ pub async fn run(
 ) -> StopReason {
     if let Some(session) = session.as_deref() {
         state.authorization = session.authorization.clone();
-        state.plan = session.plan.clone();
+        state.task = session.task.clone();
     }
+    state.task.set_objective_if_empty(&state.goal);
 
     println!(
         "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n",
@@ -605,10 +606,6 @@ async fn execute_one_tool(
         verified_for_finish,
     );
 
-    if result.success && matches!(action, Action::UpdatePlan { .. }) {
-        sync_plan_to_session(state, session);
-    }
-
     if result.success {
         if let Some(path) = mutating_path(&action) {
             if let Some(err) = post_edit_sanity_check(&state.workspace_root, &path) {
@@ -628,7 +625,7 @@ async fn execute_one_tool(
         *verified_in_batch = true;
     }
 
-    commit_tool_outcome(
+    let stop = commit_tool_outcome(
         state,
         observer,
         step_index,
@@ -636,7 +633,10 @@ async fn execute_one_tool(
         action,
         tool_call_id,
         result,
-    )
+    );
+    // Persist task memory (plan / files / verification / decisions) when a session is attached.
+    sync_task_to_session(state, session);
+    stop
 }
 
 /// Run a consecutive group of read-only tools concurrently (order preserved in history).
@@ -945,19 +945,25 @@ fn produce_tool_result(
         }
         None => match action {
             Action::UpdatePlan { objective, steps } => {
-                let updated = if let Some(existing) = state.plan.as_mut() {
+                let updated = if let Some(existing) = state.task.plan.as_mut() {
                     existing.amend_from_update(objective, steps).map(|_| ())
                 } else {
                     crate::state::AgentPlan::from_update(objective, steps).map(|plan| {
-                        state.plan = Some(plan);
+                        state.task.plan = Some(plan);
                     })
                 };
                 match updated {
                     Ok(()) => {
                         let output = format!(
                             "Plan updated:\n{}",
-                            state.plan.as_ref().expect("plan present after update").render()
+                            state
+                                .task
+                                .plan
+                                .as_ref()
+                                .expect("plan present after update")
+                                .render()
                         );
+                        state.task.set_objective_if_empty(objective);
                         state.governance.pre_edit.observe_plan(steps);
                         ToolResult {
                             success: true,
@@ -1300,6 +1306,7 @@ fn commit_tool_outcome(
         if let Some(path) = mutating_path(&action) {
             state.note_edit(model_turn);
             state.governance.note_file_modified(&path);
+            state.task.note_modified_file(std::path::PathBuf::from(&path));
             state.read_cache.invalidate_path(std::path::Path::new(&path));
             if let Some(intel) = state.repo_intel.as_mut() {
                 let change = crate::repo_intel::FileChange {
@@ -1404,6 +1411,7 @@ fn commit_tool_outcome(
                 });
                 if let Some(outcome) = matched {
                     state.note_verification();
+                    state.task.note_verification(&outcome);
                     state
                         .completion
                         .note_verification_outcome(model_turn, outcome);
@@ -1528,9 +1536,18 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Project snapshot\n");
         out.push_str(&snap.render_compact());
     }
-    if let Some(plan) = &state.plan {
+    if let Some(plan) = &state.task.plan {
         out.push_str("\n\n## Current plan\n");
         out.push_str(&plan.render());
+    }
+    // Compact task memory (decisions / files / verification) when present.
+    if state.task.objective.is_some()
+        || !state.task.decisions.is_empty()
+        || !state.task.modified_files.is_empty()
+        || !state.task.verification.is_empty()
+    {
+        out.push_str("\n\n## Task state\n");
+        out.push_str(&state.task.render_compact());
     }
     if state.completion.last_edit_turn.is_some() {
         let summary = crate::state::workspace_summary::render_workspace_summary(state);
@@ -1634,9 +1651,9 @@ fn sync_authorization_to_session(state: &AgentState, session: &mut Option<&mut S
     }
 }
 
-fn sync_plan_to_session(state: &AgentState, session: &mut Option<&mut Session>) {
+fn sync_task_to_session(state: &AgentState, session: &mut Option<&mut Session>) {
     if let Some(session) = session.as_deref_mut() {
-        session.plan = state.plan.clone();
+        session.task = state.task.clone();
     }
 }
 

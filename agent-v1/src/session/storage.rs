@@ -33,8 +33,23 @@ pub fn load(base: &Path, session_id: &str) -> Result<Session> {
     let path = session_file_path(base, session_id);
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read session file {}", path.display()))?;
-    let session: Session = serde_json::from_str(&raw)
+    let mut value: serde_json::Value = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse session file {}", path.display()))?;
+
+    // Migrate Phase 12 Part 2 top-level `plan` into `task.plan`.
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(plan) = obj.remove("plan") {
+            let task = obj
+                .entry("task")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(task_obj) = task.as_object_mut() {
+                task_obj.entry("plan").or_insert(plan);
+            }
+        }
+    }
+
+    let session: Session = serde_json::from_value(value)
+        .with_context(|| format!("failed to decode session file {}", path.display()))?;
     Ok(session)
 }
 
@@ -53,7 +68,7 @@ mod tests {
         let mut session = Session::new("/tmp/project", SessionSettings::default());
         session.add_user_message("fix the bug");
         session.add_assistant_message("I'll inspect the code");
-        session.plan = Some(
+        session.task.plan = Some(
             crate::state::AgentPlan::from_update("Fix bug", "[ ] find\n[ ] fix").unwrap(),
         );
 
@@ -63,7 +78,7 @@ mod tests {
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0], Message::user("fix the bug"));
-        let plan = loaded.plan.expect("plan persisted");
+        let plan = loaded.task.plan.expect("plan persisted");
         assert_eq!(plan.objective, "Fix bug");
         assert_eq!(plan.version, 1);
         assert_eq!(plan.steps.len(), 2);

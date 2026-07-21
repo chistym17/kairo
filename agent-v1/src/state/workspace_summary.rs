@@ -110,7 +110,7 @@ fn verification_lines(c: &CompletionTracker) -> (String, String) {
 }
 
 fn unresolved_plan_items(state: &AgentState) -> String {
-    let Some(plan) = &state.plan else {
+    let Some(plan) = &state.task.plan else {
         return "no plan".to_string();
     };
     let open: Vec<&str> = plan

@@ -63,6 +63,7 @@ impl ChatRuntime {
                 }
                 ChatInput::Empty => continue,
                 ChatInput::ShowPlan => self.print_plan(),
+                ChatInput::ShowTask => self.print_task(),
                 ChatInput::ApprovePlan => {
                     if let Err(e) = self.approve_plan() {
                         eprintln!("[agent-v1] {e}");
@@ -70,6 +71,11 @@ impl ChatRuntime {
                 }
                 ChatInput::ConstrainPlan(text) => {
                     if let Err(e) = self.constrain_plan(&text) {
+                        eprintln!("[agent-v1] {e}");
+                    }
+                }
+                ChatInput::RecordDecision(text) => {
+                    if let Err(e) = self.record_decision(&text) {
                         eprintln!("[agent-v1] {e}");
                     }
                 }
@@ -123,20 +129,22 @@ impl ChatRuntime {
             }
         );
         println!("[agent-v1] type a task, or /exit to quit");
-        println!("[agent-v1] plan cmds: /plan  /approve-plan  /constrain <text>");
+        println!(
+            "[agent-v1] cmds: /plan  /approve-plan  /constrain <text>  /decision <text>  /task  /exit"
+        );
         if !self.session.messages.is_empty() {
             println!(
                 "[agent-v1] {} prior message(s) in session",
                 self.session.messages.len()
             );
         }
-        if self.session.plan.is_some() {
+        if self.session.task.plan.is_some() {
             println!("[agent-v1] session has a durable plan (/plan to view)");
         }
     }
 
     fn print_plan(&self) {
-        match &self.session.plan {
+        match &self.session.task.plan {
             Some(plan) => {
                 println!("\n[agent-v1] ── session plan ─────────────────────────");
                 println!("{}", plan.render());
@@ -145,17 +153,26 @@ impl ChatRuntime {
         }
     }
 
+    fn print_task(&self) {
+        println!("\n[agent-v1] ── task state ──────────────────────────");
+        print!("{}", self.session.task.render_compact());
+    }
+
     fn approve_plan(&mut self) -> Result<()> {
         let version = {
-            let Some(plan) = self.session.plan.as_mut() else {
+            let Some(plan) = self.session.task.plan.as_mut() else {
                 anyhow::bail!("no plan to approve — ask the agent to update_plan first");
             };
             plan.approve();
             plan.version
         };
+        let _ = self
+            .session
+            .task
+            .record_decision(format!("approved plan v{version}"));
         self.manager.save(&self.session)?;
         println!("[agent-v1] plan approved (v{version})");
-        if let Some(plan) = &self.session.plan {
+        if let Some(plan) = &self.session.task.plan {
             println!("{}", plan.render());
         }
         Ok(())
@@ -163,18 +180,32 @@ impl ChatRuntime {
 
     fn constrain_plan(&mut self, text: &str) -> Result<()> {
         let version = {
-            let Some(plan) = self.session.plan.as_mut() else {
+            let Some(plan) = self.session.task.plan.as_mut() else {
                 anyhow::bail!("no plan to constrain — ask the agent to update_plan first");
             };
             plan.add_constraint(text)
                 .map_err(anyhow::Error::msg)?;
             plan.version
         };
+        let _ = self
+            .session
+            .task
+            .record_decision(format!("constraint: {text}"));
         self.manager.save(&self.session)?;
         println!("[agent-v1] constraint added; plan back to draft (v{version})");
-        if let Some(plan) = &self.session.plan {
+        if let Some(plan) = &self.session.task.plan {
             println!("{}", plan.render());
         }
+        Ok(())
+    }
+
+    fn record_decision(&mut self, text: &str) -> Result<()> {
+        self.session
+            .task
+            .record_decision(text)
+            .map_err(anyhow::Error::msg)?;
+        self.manager.save(&self.session)?;
+        println!("[agent-v1] decision recorded: {text}");
         Ok(())
     }
 

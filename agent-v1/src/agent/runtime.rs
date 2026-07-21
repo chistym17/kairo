@@ -134,9 +134,9 @@ impl AgentRuntime {
         .await;
 
         if let Some(session) = session {
-            // Persist final authorization grants and durable plan.
+            // Persist final authorization grants and durable task state.
             session.authorization = state.authorization.clone();
-            session.plan = state.plan.clone();
+            session.task = state.task.clone();
             session.add_user_message(&goal);
             if let Some(summary) = finish_summary(&state) {
                 session.add_assistant_message(summary);

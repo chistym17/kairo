@@ -5,10 +5,10 @@ use uuid::Uuid;
 use crate::authorization::AuthorizationState;
 use crate::governance::GovernanceState;
 use crate::repo_intel::HybridIntel;
+use crate::session::TaskSessionState;
 use crate::state::completion::CompletionTracker;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
-use crate::state::plan::AgentPlan;
 use crate::state::step::Step;
 use crate::tools::project_snapshot::ProjectSnapshot;
 use crate::tools::read_cache::ReadCache;
@@ -30,8 +30,8 @@ pub struct AgentState {
     /// Edit policy + grants for this run (synced from session when present).
     pub authorization: AuthorizationState,
 
-    /// Optional working plan for multi-step tasks (Phase 7.3).
-    pub plan: Option<AgentPlan>,
+    /// Durable task memory for this run (synced from / to session).
+    pub task: TaskSessionState,
 
     /// Orientation snapshot (computed once per run; refreshable via tool).
     pub project_snapshot: Option<ProjectSnapshot>,
@@ -79,7 +79,7 @@ impl AgentState {
             model_turns: 0,
             max_steps,
             authorization: AuthorizationState::default(),
-            plan: None,
+            task: TaskSessionState::default(),
             project_snapshot: None,
             repo_intel: None,
             read_cache: ReadCache::new(),
