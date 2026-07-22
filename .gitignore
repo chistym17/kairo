@@ -28,6 +28,19 @@ phasev2.md
 index.md
 phase12.md
 
+
+Tasks for a selected day often come back empty or 400 from the API even when tasks exist for that date. Find the frontend↔backend query-param mismatch for listing tasks by day, fix the client to match the server contract, and summarize what changed. Prefer inspecting the API client and the tasks list handler over UI components.
+
+
+
+
+
+
+
+
+
+
+
 The tasks Kanban board is empty after sign-in even though tasks exist in the database for today. Backend is Django at /api/tasks/. Fix the frontend so loading tasks for a selected date works.
 
 

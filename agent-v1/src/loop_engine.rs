@@ -628,6 +628,18 @@ async fn execute_one_tool(
         );
     }
 
+    if let Err(denied) = apply_shell_mutation_gate(state, &action) {
+        return commit_tool_outcome(
+            state,
+            observer,
+            step_index,
+            model_turn,
+            action,
+            tool_call_id,
+            denied,
+        );
+    }
+
     if let Err(denied) = resolve_tool_authorization(state, &action, approval_gate, session) {
         return commit_tool_outcome(
             state,
@@ -768,6 +780,11 @@ async fn execute_readonly_group(
         }
 
         if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
+            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
+            continue;
+        }
+
+        if let Err(denied) = apply_shell_mutation_gate(state, &action) {
             prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
             continue;
         }
@@ -1690,7 +1707,7 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Workspace state\n");
         out.push_str(&summary);
     }
-    // Soft stagnation / evidence-checkpoint guidance (not workflow stages).
+    // Soft stagnation / evidence-checkpoint / after-decision guidance.
     let mut injected_guidance = false;
     if let Some(nudge) = state.progress.nudge_for_injection() {
         let event = if state.progress.checkpoint_active {
@@ -1707,6 +1724,19 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str("\n\n## Runtime guidance\n");
         out.push_str(&nudge);
         injected_guidance = true;
+    }
+    if !injected_guidance {
+        if let Some(nudge) = state.progress.after_decision_guidance() {
+            write_event(
+                &state.run_id,
+                "after_decision_guidance",
+                &nudge[..nudge.len().min(400)],
+                0,
+            );
+            out.push_str("\n\n## Runtime guidance\n");
+            out.push_str(&nudge);
+            injected_guidance = true;
+        }
     }
     if !injected_guidance {
         if let Some(nudge) = state.exploration.nudge_for_injection() {
@@ -1735,6 +1765,28 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         }
     }
     out
+}
+
+fn apply_shell_mutation_gate(
+    state: &mut AgentState,
+    action: &Action,
+) -> Result<(), ToolResult> {
+    let command = match action {
+        Action::RunShell { command, .. } => command.as_str(),
+        Action::RunCommand { cmd, .. } => cmd.as_str(),
+        _ => return Ok(()),
+    };
+    if !tools::shell_mutation::is_shell_workspace_mutation(command) {
+        return Ok(());
+    }
+    let message = tools::shell_mutation::shell_mutation_blocked_message(command);
+    write_event(
+        &state.run_id,
+        "shell_mutation_blocked",
+        &message[..message.len().min(400)],
+        0,
+    );
+    Err(ToolResult::error(message))
 }
 
 fn apply_evidence_checkpoint_gate(

@@ -18,6 +18,7 @@ pub mod run_command;
 pub mod run_shell;
 pub mod search_code;
 pub mod shell_cache;
+pub mod shell_mutation;
 pub mod shell_read;
 pub mod symbol_expand;
 pub mod write_file;

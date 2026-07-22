@@ -412,6 +412,25 @@ impl ProgressState {
         self.stagnation_nudges = self.stagnation_nudges.saturating_add(1);
         Some(text)
     }
+
+    /// Soft guidance once a plan exists and no edit has landed yet.
+    pub fn after_decision_guidance(&self) -> Option<String> {
+        if self.mutations > 0 || self.plan_updates == 0 || self.checkpoint_active {
+            return None;
+        }
+        Some(
+            "A concrete change has been identified.\n\
+             Prefer:\n\
+             1. reread only the exact edit range if needed;\n\
+             2. apply_patch;\n\
+             3. inspect git_diff;\n\
+             4. run one targeted verification;\n\
+             5. finish.\n\
+             Do not resume broad exploration unless the patch or verification reveals new \
+             contradictory evidence. Do not edit files via shell (sed/redirects)."
+                .to_string(),
+        )
+    }
 }
 
 fn is_exploration_action(action: &Action) -> bool {
@@ -724,14 +743,25 @@ mod tests {
     }
 
     #[test]
-    fn escalation_nudges_before_hard_gate() {
+    fn after_decision_guidance_when_plan_and_no_edit() {
         let mut p = ProgressState::new();
-        let hits = "a.rs:1: x";
-        p.observe_tool(&search("a"), &search_hits(hits), false);
-        for _ in 0..3 {
-            p.observe_tool(&search("a"), &search_hits(hits), false);
-        }
-        let n1 = p.nudge_for_injection().unwrap();
-        assert!(n1.contains("repeating previously inspected") || n1.contains("No new evidence"));
+        assert!(p.after_decision_guidance().is_none());
+        p.observe_tool(
+            &Action::UpdatePlan {
+                objective: "fix".into(),
+                steps: "[ ] edit".into(),
+            },
+            &ToolResult {
+                success: true,
+                output: "ok".into(),
+                diff: None,
+                error: None,
+                stop_reason: None,
+            },
+            false,
+        );
+        let g = p.after_decision_guidance().unwrap();
+        assert!(g.contains("apply_patch"));
+        assert!(g.contains("Do not resume broad exploration"));
     }
 }
