@@ -69,7 +69,7 @@ mod tests {
         let manager = SessionManager::new(base.path());
 
         let session = manager
-            .create("./test_repo", SessionSettings::default())
+            .create("./workspace", SessionSettings::default())
             .unwrap();
         let id = session.id.clone();
 

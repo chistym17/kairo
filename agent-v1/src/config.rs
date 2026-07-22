@@ -30,7 +30,8 @@ pub struct Config {
     /// Hard ceiling on loop iterations per run
     pub max_steps: u32,
 
-    /// Absolute or relative path to the workspace the agent can touch
+    /// Absolute or relative path to the workspace the agent can touch.
+    /// Set via `WORKSPACE_ROOT` or overridden by `--workspace` in main.
     pub workspace_root: PathBuf,
 
     /// Milliseconds to wait before each LLM API call.
@@ -108,7 +109,8 @@ impl Config {
             max_steps: env_or("MAX_STEPS", "15")
                 .parse::<u32>()
                 .expect("MAX_STEPS must be a positive integer"),
-            workspace_root: PathBuf::from(env_or("WORKSPACE_ROOT", "./test_repo")),
+            // Empty until set via WORKSPACE_ROOT or `--workspace` (validated in main).
+            workspace_root: PathBuf::from(env_or("WORKSPACE_ROOT", "")),
             // Default 0: no artificial pacing. Rate limits use their own backoff.
             // Set STEP_DELAY_MS only if a provider needs gentle pacing.
             step_delay_ms: env_or("STEP_DELAY_MS", "0")

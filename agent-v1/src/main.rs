@@ -23,6 +23,8 @@ enum OneShotSessionArg {
 struct CliArgs {
     mode: RunMode,
     session_arg: OneShotSessionArg,
+    /// Overrides `WORKSPACE_ROOT` when set.
+    workspace: Option<PathBuf>,
 }
 
 fn parse_args() -> CliArgs {
@@ -32,10 +34,12 @@ fn parse_args() -> CliArgs {
         return CliArgs {
             mode: RunMode::Interactive,
             session_arg: OneShotSessionArg::New,
+            workspace: None,
         };
     }
 
     let mut session_arg = OneShotSessionArg::None;
+    let mut workspace: Option<PathBuf> = None;
     let mut goal_parts = Vec::new();
 
     let mut i = 0;
@@ -51,6 +55,14 @@ fn parse_args() -> CliArgs {
                     std::process::exit(1);
                 });
                 session_arg = OneShotSessionArg::Load(id.clone());
+                i += 2;
+            }
+            "--workspace" => {
+                let path = args.get(i + 1).unwrap_or_else(|| {
+                    eprintln!("error: --workspace requires a path");
+                    std::process::exit(1);
+                });
+                workspace = Some(PathBuf::from(path));
                 i += 2;
             }
             flag if flag.starts_with('-') => {
@@ -73,6 +85,7 @@ fn parse_args() -> CliArgs {
         return CliArgs {
             mode: RunMode::Interactive,
             session_arg: chat_session,
+            workspace,
         };
     }
 
@@ -81,20 +94,21 @@ fn parse_args() -> CliArgs {
             goal: goal_parts.join(" "),
         },
         session_arg,
+        workspace,
     }
 }
 
 fn print_usage() {
     eprintln!("usage:");
-    eprintln!("  agent-v1                              # interactive session");
-    eprintln!("  agent-v1 --session <id>               # resume interactive session");
-    eprintln!("  agent-v1 \"<goal>\"                     # one-shot run");
+    eprintln!("  agent-v1 [--workspace <path>]                     # interactive");
+    eprintln!("  agent-v1 [--workspace <path>] --session <id>      # resume");
+    eprintln!("  agent-v1 [--workspace <path>] \"<goal>\"            # one-shot");
     eprintln!("  agent-v1 --new-session \"<goal>\"");
-    eprintln!("  agent-v1 --session <id> \"<goal>\"");
     eprintln!();
+    eprintln!("workspace: --workspace <path> or WORKSPACE_ROOT in .env (required)");
     eprintln!("interactive: type tasks at >, /exit to quit");
     eprintln!("cmds: /overview /intent <explore|plan|execute|review|clear> /plan /task");
-    eprintln!("example: agent-v1 \"fix the failing test in test_calc.py\"");
+    eprintln!("example: agent-v1 --workspace ~/code/my-app");
 }
 
 fn load_oneshot_session(
@@ -162,20 +176,41 @@ fn build_runtime(config: &config::Config) -> AgentRuntime {
     .with_semantic_policy(config.semantic_policy)
 }
 
+fn resolve_workspace(cli_workspace: Option<PathBuf>, from_env: PathBuf) -> PathBuf {
+    let raw = cli_workspace.unwrap_or(from_env);
+    if raw.as_os_str().is_empty() {
+        eprintln!("[agent-v1] error: workspace not set");
+        eprintln!("  Pass --workspace /path/to/repo");
+        eprintln!("  or set WORKSPACE_ROOT in agent-v1/.env");
+        eprintln!();
+        print_usage();
+        std::process::exit(1);
+    }
+    if !raw.exists() {
+        eprintln!(
+            "[agent-v1] error: workspace does not exist: {}",
+            raw.display()
+        );
+        eprintln!("  Pass --workspace /path/to/repo or set WORKSPACE_ROOT to an existing directory.");
+        std::process::exit(1);
+    }
+    if !raw.is_dir() {
+        eprintln!(
+            "[agent-v1] error: workspace is not a directory: {}",
+            raw.display()
+        );
+        std::process::exit(1);
+    }
+    raw.canonicalize().unwrap_or(raw)
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
 
     let cli = parse_args();
-    let config = config::Config::load();
-
-    if !config.workspace_root.exists() {
-        eprintln!(
-            "[agent-v1] error: workspace_root does not exist: {}",
-            config.workspace_root.display()
-        );
-        std::process::exit(1);
-    }
+    let mut config = config::Config::load();
+    config.workspace_root = resolve_workspace(cli.workspace, config.workspace_root);
 
     println!("[agent-v1] starting");
     println!("[agent-v1] provider: {}", config.llm_provider);

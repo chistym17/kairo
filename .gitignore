@@ -1,31 +1,24 @@
+# Secrets & local runtime
 .env
+*.env
+!.env.example
 target/
-Cargo.lock
 logs/
-.venv
 .venv/
-__pycache__
-agent-v1/phase-1-journey.md
-agent-v1/phase-1-overview.md
-.env
-agent-v1/phase2-plan.md
+__pycache__/
+*.pyc
+
+# Agent local state
+agent-v1/sessions/
+agent-v1/logs/
 agent-v1/benchmarks/worktrees/
 agent-v1/benchmarks/results/
-agent-v1/phase4-plan.md
-agent-v1/benchmarks/repo/
 agent-v1/benchmarks/workspaces/
-agent-v1/sessions/
-agent-v1/phase5.md
-agent-v1/future-plan.txt
-agent-v1/phase5.md
-agent-v1/src/phase5.3.md
+agent-v1/benchmarks/repo/
+
+# Local / scratch (not part of the product)
 js-real-repo/
 js-complex-repo/
-phase9.md
-../annotaa
-annotaa
-phasev2.md
+annotaa/
+phase*.md
 index.md
-phase12.md
-phase13.md
-
