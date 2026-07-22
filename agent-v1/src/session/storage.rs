@@ -46,10 +46,25 @@ pub fn load(base: &Path, session_id: &str) -> Result<Session> {
                 task_obj.entry("plan").or_insert(plan);
             }
         }
+        // Older sessions omitted schema_version — treat as v1.
+        if obj.get("schema_version").is_none() {
+            obj.insert("schema_version".into(), serde_json::json!(1));
+        }
     }
 
-    let session: Session = serde_json::from_value(value)
+    let mut session: Session = serde_json::from_value(value)
         .with_context(|| format!("failed to decode session file {}", path.display()))?;
+
+    if session.schema_version > crate::session::SESSION_SCHEMA_VERSION {
+        anyhow::bail!(
+            "session {} schema_version {} is newer than supported {} — upgrade agent-v1",
+            session_id,
+            session.schema_version,
+            crate::session::SESSION_SCHEMA_VERSION
+        );
+    }
+    // Forward-fill so re-saves stamp the current version.
+    session.schema_version = crate::session::SESSION_SCHEMA_VERSION;
     Ok(session)
 }
 
@@ -76,11 +91,28 @@ mod tests {
         let loaded = load(base.path(), &session.id).unwrap();
 
         assert_eq!(loaded.id, session.id);
+        assert_eq!(loaded.schema_version, crate::session::SESSION_SCHEMA_VERSION);
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0], Message::user("fix the bug"));
         let plan = loaded.task.plan.expect("plan persisted");
         assert_eq!(plan.objective, "Fix bug");
         assert_eq!(plan.version, 1);
         assert_eq!(plan.steps.len(), 2);
+    }
+
+    #[test]
+    fn load_adds_schema_version_when_missing() {
+        let base = tempfile::tempdir().unwrap();
+        let session = Session::new("/tmp/project", SessionSettings::default());
+        let dir = session_dir(base.path(), &session.id);
+        fs::create_dir_all(&dir).unwrap();
+        let path = session_file_path(base.path(), &session.id);
+        // Write legacy JSON without schema_version.
+        let mut v = serde_json::to_value(&session).unwrap();
+        v.as_object_mut().unwrap().remove("schema_version");
+        fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let loaded = load(base.path(), &session.id).unwrap();
+        assert_eq!(loaded.schema_version, crate::session::SESSION_SCHEMA_VERSION);
     }
 }

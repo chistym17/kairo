@@ -41,6 +41,9 @@ pub struct CompactionState {
 /// Long-lived agent session for a single workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
+    /// Bump when on-disk session JSON shape changes incompatibly.
+    #[serde(default = "current_schema_version")]
+    pub schema_version: u32,
     pub id: String,
     pub workspace_root: PathBuf,
     pub messages: Vec<Message>,
@@ -62,11 +65,19 @@ pub struct Session {
     pub updated_at: String,
 }
 
+/// Current on-disk session schema. Older files migrate forward on load.
+pub const SESSION_SCHEMA_VERSION: u32 = 1;
+
+fn current_schema_version() -> u32 {
+    SESSION_SCHEMA_VERSION
+}
+
 impl Session {
     pub fn new(workspace_root: impl Into<PathBuf>, settings: SessionSettings) -> Self {
         let now = Utc::now().to_rfc3339();
         let authorization = AuthorizationState::new(settings.edit_policy);
         Self {
+            schema_version: SESSION_SCHEMA_VERSION,
             id: Uuid::new_v4().to_string(),
             workspace_root: workspace_root.into(),
             messages: Vec::new(),

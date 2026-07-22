@@ -1061,6 +1061,7 @@ fn produce_tool_result(
                 summarize_repo_with_state(state, depth, path, focus.as_deref())
             }
             Action::Finish { summary } => {
+                let grounded = crate::state::ground_finish_summary(state, summary);
                 let stop_reason = if verified_for_finish {
                     StopReason::TaskComplete
                 } else {
@@ -1068,7 +1069,7 @@ fn produce_tool_result(
                 };
                 ToolResult {
                     success: true,
-                    output: summary.clone(),
+                    output: grounded,
                     diff: None,
                     error: None,
                     stop_reason: Some(stop_reason),

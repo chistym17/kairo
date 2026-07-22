@@ -8,5 +8,5 @@ pub mod intent;
 pub use manager::SessionManager;
 pub use message::Message;
 pub use intent::TurnIntent;
-pub use session::{CompactionState, Session, SessionSettings};
+pub use session::{CompactionState, Session, SessionSettings, SESSION_SCHEMA_VERSION};
 pub use task_state::{Decision, DecisionStatus, TaskSessionState, VerificationSummary};

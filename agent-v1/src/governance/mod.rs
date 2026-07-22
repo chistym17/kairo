@@ -14,7 +14,8 @@ mod tests;
 
 pub use decide::{classify_progress, ActionProgress, GovernanceBlockCode, GovernanceDecision};
 pub use fingerprint::{
-    classify_shell, fingerprint, fingerprint_hash, ActionFingerprint, VerificationFamily,
+    classify_shell, fingerprint, fingerprint_hash, verification_family_for_command,
+    ActionFingerprint, VerificationFamily,
 };
 pub use policy::ToolPolicy;
 pub use pre_edit::{PreEditTracker, PRE_EDIT_STAGNATION_WINDOW};

@@ -138,23 +138,41 @@ pub fn tool_effect(action: &Action) -> ToolEffect {
 
         Action::WriteFile { .. } | Action::ApplyPatch { .. } => ToolEffect::WorkspaceMutation,
 
-        // Archaeology / read-like shells do not need ExternalSideEffect approval.
-        // Verify/build/test shells remain ExternalSideEffect.
-        Action::RunCommand { cmd, .. } => {
-            if crate::tools::shell_cache::is_explore_shell(cmd) {
-                ToolEffect::ReadOnly
-            } else {
-                ToolEffect::ExternalSideEffect
-            }
-        }
-        Action::RunShell { command, .. } => {
-            if crate::tools::shell_cache::is_explore_shell(command) {
-                ToolEffect::ReadOnly
-            } else {
-                ToolEffect::ExternalSideEffect
-            }
-        }
+        // Explore shells and ordinary verify/test/lint shells are read-only for
+        // authorization (no approval spam). Installs / package mutation stay external.
+        Action::RunCommand { cmd, .. } => classify_shell_effect(cmd),
+        Action::RunShell { command, .. } => classify_shell_effect(command),
     }
+}
+
+fn classify_shell_effect(command: &str) -> ToolEffect {
+    if crate::tools::shell_cache::is_explore_shell(command) {
+        return ToolEffect::ReadOnly;
+    }
+    if is_package_install_shell(command) {
+        return ToolEffect::ExternalSideEffect;
+    }
+    // Ordinary verification / build / lint — no EditPolicy approval required.
+    if crate::governance::verification_family_for_command(command).is_some() {
+        return ToolEffect::ReadOnly;
+    }
+    ToolEffect::ExternalSideEffect
+}
+
+fn is_package_install_shell(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains("npm install")
+        || lower.contains("npm i ")
+        || lower.contains("npm i\t")
+        || lower.contains("pnpm install")
+        || lower.contains("pnpm add")
+        || lower.contains("yarn add")
+        || lower.contains("yarn install")
+        || lower.contains("pip install")
+        || lower.contains("pip3 install")
+        || lower.contains("cargo install")
+        || lower.contains("apt install")
+        || lower.contains("brew install")
 }
 
 pub fn build_approval_request(action: &Action, effect: ToolEffect) -> ApprovalRequest {
@@ -295,7 +313,24 @@ mod tests {
             ToolEffect::ReadOnly
         );
         assert_eq!(tool_effect(&patch_action()), ToolEffect::WorkspaceMutation);
-        assert_eq!(tool_effect(&shell_action()), ToolEffect::ExternalSideEffect);
+        // Ordinary verify shells are read-only for approval (ApproveForTask UX).
+        assert_eq!(tool_effect(&shell_action()), ToolEffect::ReadOnly);
+        assert_eq!(
+            tool_effect(&Action::RunShell {
+                command: "npm run lint".into(),
+                cwd: PathBuf::from("frontend-v2"),
+                timeout_secs: 60,
+            }),
+            ToolEffect::ReadOnly
+        );
+        assert_eq!(
+            tool_effect(&Action::RunShell {
+                command: "npm install lodash".into(),
+                cwd: PathBuf::from("."),
+                timeout_secs: 60,
+            }),
+            ToolEffect::ExternalSideEffect
+        );
         assert_eq!(
             tool_effect(&Action::RunShell {
                 command: "cat -n frontend-v2/src/lib/api.ts".into(),
@@ -321,7 +356,7 @@ mod tests {
             authorize(ToolEffect::ReadOnly, &auth),
             AuthorizationDecision::Allow
         ));
-        // Real verify shells still require approval.
+        // Package installs still require approval.
         assert!(matches!(
             authorize(ToolEffect::ExternalSideEffect, &auth),
             AuthorizationDecision::RequireApproval(_)
