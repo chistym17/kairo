@@ -1,9 +1,12 @@
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::context::LlmRequest;
-use crate::llm::protocol::{normalize_openai_chat_choice, AgentResponse};
-use crate::llm::{LlmClient, LlmError};
+use crate::llm::protocol::normalize_openai_chat_choice;
+use crate::llm::usage::parse_openai_usage;
+use crate::llm::{LlmClient, LlmError, LlmTurn};
 
 const GROQ_API_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -25,7 +28,7 @@ impl GroqClient {
 
 #[async_trait]
 impl LlmClient for GroqClient {
-    async fn respond(&self, request: &LlmRequest) -> Result<AgentResponse, LlmError> {
+    async fn respond(&self, request: &LlmRequest) -> Result<LlmTurn, LlmError> {
         let body = json!({
             "model": self.model,
             "messages": request.messages.clone(),
@@ -35,6 +38,7 @@ impl LlmClient for GroqClient {
             "temperature": 0.0
         });
 
+        let started = Instant::now();
         let response = self
             .http
             .post(GROQ_API_URL)
@@ -63,14 +67,29 @@ impl LlmClient for GroqClient {
             .await
             .map_err(|e| LlmError::ApiError(format!("failed to parse response JSON: {}", e)))?;
 
-        let choice = response_json["choices"]
-            .get(0)
-            .ok_or_else(|| LlmError::ApiError("response has no choices".to_string()))?;
-
-        Ok(normalize_openai_chat_choice(choice))
+        openai_turn_from_json(&response_json, started)
     }
 
     fn model_id(&self) -> &str {
         &self.model
     }
+}
+
+pub(crate) fn openai_turn_from_json(
+    response_json: &Value,
+    started: Instant,
+) -> Result<LlmTurn, LlmError> {
+    let choice = response_json["choices"]
+        .get(0)
+        .ok_or_else(|| LlmError::ApiError("response has no choices".to_string()))?;
+
+    let mut usage = parse_openai_usage(&response_json["usage"]);
+    usage.total_latency_ms = started.elapsed().as_millis() as u64;
+    // TTFT unavailable without streaming.
+    usage.time_to_first_token_ms = None;
+
+    Ok(LlmTurn {
+        response: normalize_openai_chat_choice(choice),
+        usage,
+    })
 }

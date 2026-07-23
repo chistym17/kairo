@@ -10,8 +10,13 @@ pub mod groq_client;
 pub mod parse;
 pub mod protocol;
 pub mod schema;
+pub mod usage;
 
 pub use protocol::{AgentResponse, ProtocolError};
+pub use usage::{
+    parse_openai_usage, render_call_line, ModelPricing, ModelUsage, UsageAccumulator,
+    UsageTotals,
+};
 
 use crate::config::Config;
 
@@ -24,6 +29,13 @@ use self::groq_client::GroqClient;
 pub struct LlmToolCall {
     pub action: Action,
     pub tool_call_id: String,
+}
+
+/// One successful model HTTP turn: normalized response + usage metrics.
+#[derive(Debug, Clone)]
+pub struct LlmTurn {
+    pub response: AgentResponse,
+    pub usage: ModelUsage,
 }
 
 /// Build the configured LLM client (`LLM_PROVIDER=groq|deepseek|agentrouter`).
@@ -48,15 +60,27 @@ pub fn build_client(config: &Config) -> Box<dyn LlmClient> {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    /// Provider-normalized model turn.
+    /// Provider-normalized model turn with usage metrics.
     ///
     /// Transport failures (`ApiError`, `RateLimited`, `ToolUseFailed` from HTTP)
-    /// remain as `Err`. Model outcomes are always an [`AgentResponse`].
-    async fn respond(&self, request: &LlmRequest) -> Result<AgentResponse, LlmError>;
+    /// remain as `Err`. Model outcomes are always an [`AgentResponse`] inside [`LlmTurn`].
+    async fn respond(&self, request: &LlmRequest) -> Result<LlmTurn, LlmError>;
 
     /// Legacy adapter for the loop engine — maps [`AgentResponse`] to the old Result shape.
     async fn next_actions(&self, request: &LlmRequest) -> Result<Vec<LlmToolCall>, LlmError> {
-        self.respond(request).await?.into_llm_result()
+        self.respond(request).await?.response.into_llm_result()
+    }
+
+    /// Like [`Self::next_actions`], but always returns usage when the HTTP turn succeeded
+    /// (including FinalAnswer / malformed tool call outcomes).
+    async fn next_actions_with_usage(
+        &self,
+        request: &LlmRequest,
+    ) -> (Result<Vec<LlmToolCall>, LlmError>, Option<ModelUsage>) {
+        match self.respond(request).await {
+            Ok(turn) => (turn.response.into_llm_result(), Some(turn.usage)),
+            Err(err) => (Err(err), None),
+        }
     }
 
     fn model_id(&self) -> &str;

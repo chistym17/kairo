@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::context::LlmRequest;
-use crate::llm::protocol::{normalize_openai_chat_choice, AgentResponse};
-use crate::llm::{LlmClient, LlmError};
+use crate::llm::groq_client::openai_turn_from_json;
+use crate::llm::{LlmClient, LlmError, LlmTurn};
 
 const DEFAULT_BASE_URL: &str = "https://agentrouter.org/v1";
 
@@ -129,7 +129,7 @@ impl AgentRouterClient {
 
 #[async_trait]
 impl LlmClient for AgentRouterClient {
-    async fn respond(&self, request: &LlmRequest) -> Result<AgentResponse, LlmError> {
+    async fn respond(&self, request: &LlmRequest) -> Result<LlmTurn, LlmError> {
         let body = json!({
             "model": self.model,
             "messages": request.messages.clone(),
@@ -139,13 +139,9 @@ impl LlmClient for AgentRouterClient {
             "temperature": 0.0
         });
 
+        let started = std::time::Instant::now();
         let response_json = self.post_json(&body).await?;
-
-        let choice = response_json["choices"]
-            .get(0)
-            .ok_or_else(|| LlmError::ApiError("response has no choices".to_string()))?;
-
-        Ok(normalize_openai_chat_choice(choice))
+        openai_turn_from_json(&response_json, started)
     }
 
     fn model_id(&self) -> &str {

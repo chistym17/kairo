@@ -24,6 +24,7 @@ pub struct RunResult {
     pub changed_files: Vec<String>,
     pub log_path: PathBuf,
     pub efficiency: crate::state::RunEfficiency,
+    pub usage: crate::llm::UsageTotals,
 }
 
 pub struct AgentRuntime {
@@ -162,6 +163,7 @@ impl AgentRuntime {
             changed_files,
             log_path,
             efficiency,
+            usage: state.model_usage.totals(),
         };
 
         if let Some(obs) = observer {
@@ -207,7 +209,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::context::LlmRequest;
-    use crate::llm::{AgentResponse, LlmClient, LlmError, LlmToolCall};
+    use crate::llm::{AgentResponse, LlmClient, LlmError, LlmToolCall, LlmTurn};
     use crate::tools::shell_cache;
 
     struct FakeLlm {
@@ -235,7 +237,7 @@ mod tests {
         async fn respond(
             &self,
             _request: &LlmRequest,
-        ) -> std::result::Result<AgentResponse, LlmError> {
+        ) -> std::result::Result<LlmTurn, LlmError> {
             let mut batches = self.batches.lock().unwrap();
             let actions = if batches.is_empty() {
                 vec![Action::Finish {
@@ -244,15 +246,18 @@ mod tests {
             } else {
                 batches.remove(0)
             };
-            Ok(AgentResponse::ToolCalls(
-                actions
-                    .into_iter()
-                    .map(|action| LlmToolCall {
-                        tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
-                        action,
-                    })
-                    .collect(),
-            ))
+            Ok(LlmTurn {
+                response: AgentResponse::ToolCalls(
+                    actions
+                        .into_iter()
+                        .map(|action| LlmToolCall {
+                            tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
+                            action,
+                        })
+                        .collect(),
+                ),
+                usage: crate::llm::ModelUsage::default(),
+            })
         }
 
         fn model_id(&self) -> &str {

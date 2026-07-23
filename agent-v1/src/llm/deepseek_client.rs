@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::context::LlmRequest;
-use crate::llm::protocol::{normalize_openai_chat_choice, AgentResponse};
-use crate::llm::{LlmClient, LlmError};
+use crate::llm::groq_client::openai_turn_from_json;
+use crate::llm::{LlmClient, LlmError, LlmTurn};
 
 const DEFAULT_DEEPSEEK_API_URL: &str = "https://api.deepseek.com/chat/completions";
 
@@ -92,7 +92,7 @@ impl DeepSeekClient {
 
 #[async_trait]
 impl LlmClient for DeepSeekClient {
-    async fn respond(&self, request: &LlmRequest) -> Result<AgentResponse, LlmError> {
+    async fn respond(&self, request: &LlmRequest) -> Result<LlmTurn, LlmError> {
         // V4 thinking mode rejects tool_choice=required; auto + thinking disabled
         // keeps agent tool loops reliable.
         let body = json!({
@@ -105,13 +105,9 @@ impl LlmClient for DeepSeekClient {
             "thinking": {"type": "disabled"}
         });
 
+        let started = std::time::Instant::now();
         let response_json = self.post_json(&body).await?;
-
-        let choice = response_json["choices"]
-            .get(0)
-            .ok_or_else(|| LlmError::ApiError("response has no choices".to_string()))?;
-
-        Ok(normalize_openai_chat_choice(choice))
+        openai_turn_from_json(&response_json, started)
     }
 
     fn model_id(&self) -> &str {

@@ -11,6 +11,7 @@ use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
 use crate::state::progress::ProgressState;
 use crate::state::step::Step;
+use crate::llm::{ModelPricing, UsageAccumulator};
 use crate::tools::project_snapshot::ProjectSnapshot;
 use crate::tools::read_cache::ReadCache;
 use crate::tools::shell_cache::ShellCommandCache;
@@ -67,6 +68,9 @@ pub struct AgentState {
     pub parallel_tool_groups: u32,
     pub ms_to_first_edit: Option<u64>,
     pub ms_to_first_verification: Option<u64>,
+
+    /// Per-call model usage for this run (Phase 13A).
+    pub model_usage: UsageAccumulator,
 }
 
 impl AgentState {
@@ -76,9 +80,10 @@ impl AgentState {
         model_id: impl Into<String>,
         max_steps: u32,
     ) -> Self {
+        let model_id = model_id.into();
         Self {
             run_id: Uuid::new_v4().to_string(),
-            model_id: model_id.into(),
+            model_id: model_id.clone(),
             goal: goal.into(),
             workspace_root: workspace_root.into(),
             history: Vec::new(),
@@ -100,6 +105,7 @@ impl AgentState {
             parallel_tool_groups: 0,
             ms_to_first_edit: None,
             ms_to_first_verification: None,
+            model_usage: UsageAccumulator::new(model_id, ModelPricing::from_env()),
         }
     }
 

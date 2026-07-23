@@ -313,6 +313,10 @@ async fn main() {
                 println!("[agent-v1] summary: {summary}");
             }
             println!("[agent-v1] log: {}", result.log_path.display());
+            println!();
+            for line in result.usage.render_report().lines() {
+                println!("[agent-v1] {line}");
+            }
 
             match result.stop_reason {
                 StopReason::TaskComplete | StopReason::CompletedUnverified => {

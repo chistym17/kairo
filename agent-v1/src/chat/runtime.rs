@@ -293,6 +293,10 @@ impl ChatRuntime {
             println!("[agent-v1] summary: {summary}");
         }
         println!("[agent-v1] log: {}", result.log_path.display());
+        println!();
+        for line in result.usage.render_report().lines() {
+            println!("[agent-v1] {line}");
+        }
     }
 }
 
@@ -346,20 +350,23 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::context::LlmRequest;
-    use crate::llm::{AgentResponse, LlmClient, LlmError, LlmToolCall};
+    use crate::llm::{AgentResponse, LlmClient, LlmError, LlmToolCall, LlmTurn};
     use crate::state::step::Action;
 
     struct FakeLlm;
 
     #[async_trait]
     impl LlmClient for FakeLlm {
-        async fn respond(&self, _request: &LlmRequest) -> Result<AgentResponse, LlmError> {
-            Ok(AgentResponse::ToolCalls(vec![LlmToolCall {
-                tool_call_id: "call_fake_finish".to_string(),
-                action: Action::Finish {
-                    summary: "done".to_string(),
-                },
-            }]))
+        async fn respond(&self, _request: &LlmRequest) -> Result<LlmTurn, LlmError> {
+            Ok(LlmTurn {
+                response: AgentResponse::ToolCalls(vec![LlmToolCall {
+                    tool_call_id: "call_fake_finish".to_string(),
+                    action: Action::Finish {
+                        summary: "done".to_string(),
+                    },
+                }]),
+                usage: crate::llm::ModelUsage::default(),
+            })
         }
 
         fn model_id(&self) -> &str {

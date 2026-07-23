@@ -4,7 +4,7 @@ use crate::authorization::{
 };
 use crate::context::{ContextBuilder, ContextManager};
 use crate::governance::{classify_progress, GovernanceDecision};
-use crate::llm::{LlmClient, LlmError, LlmToolCall};
+use crate::llm::{render_call_line, LlmClient, LlmError, LlmToolCall, ModelUsage};
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
@@ -198,7 +198,11 @@ pub async fn run(
                 write_event(&state.run_id, "context_reduction", &detail, 0);
             }
 
-            match llm.next_actions(&request).await {
+            let (actions_result, usage) = llm.next_actions_with_usage(&request).await;
+            if let Some(usage) = usage {
+                record_model_usage(state, usage);
+            }
+            match actions_result {
                 Ok(calls) if calls.is_empty() => {
                     let msg = "model returned empty tool_calls".to_string();
                     println!("[agent] {}", msg);
@@ -379,7 +383,11 @@ pub async fn run(
                             write_event(&state.run_id, "context_reduction", &detail, 0);
                         }
 
-                        match llm.next_actions(&request).await {
+                        let (actions_result, usage) = llm.next_actions_with_usage(&request).await;
+                        if let Some(usage) = usage {
+                            record_model_usage(state, usage);
+                        }
+                        match actions_result {
                             Ok(calls) if !calls.is_empty() => {
                                 println!(
                                     "[agent] {} tool call(s) after tool_use_failed retry {}",
@@ -1652,6 +1660,20 @@ fn write_summary(state: &AgentState, reason: &StopReason) {
         reason,
         &state.efficiency_snapshot(),
     );
+    let totals = state.model_usage.totals();
+    if let Ok(json) = serde_json::to_string(&totals) {
+        write_event(&state.run_id, "usage_totals", &json, 0);
+    }
+}
+
+fn record_model_usage(state: &mut AgentState, usage: ModelUsage) {
+    state.model_usage.record(usage);
+    if let Some(last) = state.model_usage.last() {
+        println!("[usage] {}", render_call_line(last));
+        if let Ok(json) = serde_json::to_string(last) {
+            write_event(&state.run_id, "model_usage", &json, 0);
+        }
+    }
 }
 
 fn emit(observer: Option<&dyn AgentObserver>, event: AgentEvent) {

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use agent_v1::agent::AgentRuntime;
 use agent_v1::context::LlmRequest;
-use agent_v1::llm::{AgentResponse, LlmClient, LlmError, LlmToolCall};
+use agent_v1::llm::{AgentResponse, LlmClient, LlmError, LlmToolCall, LlmTurn, ModelUsage};
 use agent_v1::state::step::Action;
 use async_trait::async_trait;
 
@@ -28,7 +28,7 @@ impl FakeLlm {
 
 #[async_trait]
 impl LlmClient for FakeLlm {
-    async fn respond(&self, _request: &LlmRequest) -> Result<AgentResponse, LlmError> {
+    async fn respond(&self, _request: &LlmRequest) -> Result<LlmTurn, LlmError> {
         if self
             .rate_limit_once
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -44,10 +44,13 @@ impl LlmClient for FakeLlm {
         } else {
             actions.remove(0)
         };
-        Ok(AgentResponse::ToolCalls(vec![LlmToolCall {
-            tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
-            action,
-        }]))
+        Ok(LlmTurn {
+            response: AgentResponse::ToolCalls(vec![LlmToolCall {
+                tool_call_id: format!("call_fake_{}", uuid::Uuid::new_v4()),
+                action,
+            }]),
+            usage: ModelUsage::default(),
+        })
     }
 
     fn model_id(&self) -> &str {
