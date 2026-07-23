@@ -58,6 +58,24 @@ pub fn execute(path: &Path, patch: &str, workspace_root: &Path) -> ToolResult {
         }
     };
 
+    // Malformed / context-only hunks can "apply" with zero content change. Treat as
+    // failure so the agent cannot infinite-loop on successful no-ops (resets edit
+    // trackers and never reaches verify/finish).
+    if new_content == old_content {
+        return ToolResult {
+            success: false,
+            output: String::new(),
+            diff: None,
+            error: Some(format!(
+                "Patch applied with no content change to {}.\n\
+                 The hunk did not add, remove, or modify any lines.\n\
+                 Regenerate a real unified diff (+/- lines), or run tests / finish if the file is already correct.",
+                path.display()
+            )),
+            stop_reason: None,
+        };
+    }
+
     let file_diff = diff::generate(&old_content, &new_content);
 
     match std::fs::write(&canonical_path, &new_content) {
@@ -309,5 +327,52 @@ export const api = {\n\
         let result = execute(Path::new("a.txt"), patch, dir.path());
         assert!(result.success, "{:?}", result.error);
         assert_eq!(fs::read_to_string(&path).unwrap(), "hello there\n");
+    }
+
+    #[test]
+    fn context_only_hunk_is_rejected_as_noop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.js");
+        let body = "\
+export function listIssues({ status, dueBefore } = {}) {
+  if (dueBefore) {
+    const cutoff = toDayString(dueBefore);
+    rows = rows.filter((i) => {
+      if (!i.dueDate) return false;
+      const day = toDayString(i.dueDate);
+      return day && day <= cutoff;
+    });
+  }
+  return rows.map((i) => ({ ...i }));
+}
+
+export function updateIssue(id, patch) {
+}
+";
+        fs::write(&path, body).unwrap();
+        // Claims +1 line but body is context-only (no +/-) — the live loop bug.
+        let noop = "\
+--- store.js
++++ store.js
+@@ -1,6 +1,7 @@
+ export function listIssues({ status, dueBefore } = {}) {
+   if (dueBefore) {
+     const cutoff = toDayString(dueBefore);
+     rows = rows.filter((i) => {
+       if (!i.dueDate) return false;
+       const day = toDayString(i.dueDate);
+       return day && day <= cutoff;
+     });
+   }
+   return rows.map((i) => ({ ...i }));
+ }
+ 
+ export function updateIssue(id, patch) {
+";
+        let result = execute(Path::new("store.js"), noop, dir.path());
+        assert!(!result.success, "expected no-op rejection, got {:?}", result);
+        let err = result.error.unwrap();
+        assert!(err.contains("no content change"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), body);
     }
 }

@@ -106,7 +106,8 @@ impl Config {
             agentrouter_api_key,
             agentrouter_base_url,
             model_id: env_or("MODEL_ID", default_model),
-            max_steps: env_or("MAX_STEPS", "15")
+            // Ordinary tasks: 40. Raise explicitly for hard fixture experiments.
+            max_steps: env_or("MAX_STEPS", "40")
                 .parse::<u32>()
                 .expect("MAX_STEPS must be a positive integer"),
             // Empty until set via WORKSPACE_ROOT or `--workspace` (validated in main).

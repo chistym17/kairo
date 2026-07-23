@@ -30,4 +30,6 @@ pub const REVIEW_MODE_VIOLATIONS_BEFORE_TERMINATE: u32 = 3;
 pub const NO_EDIT_NUDGE_THRESHOLDS: [u32; 4] = [4, 6, 8, 10];
 pub const POST_VERIFY_FINISH_TURNS: u32 = 2;
 pub const MAX_NO_TOOL_TURNS: u32 = 2;
+/// After a green verify, this many text-only turns auto-`TaskComplete` (finish avoidance).
+pub const AUTO_FINISH_AFTER_VERIFY_NO_TOOL: u32 = 2;
 pub const KEEP_RECENT_STEPS: usize = 10;

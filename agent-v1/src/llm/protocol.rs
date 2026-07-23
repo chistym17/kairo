@@ -55,12 +55,36 @@ pub fn normalize_openai_chat_choice(choice: &Value) -> AgentResponse {
             )),
         }
     } else {
-        let text = message["content"]
-            .as_str()
-            .unwrap_or("[no content]")
-            .to_string();
-        AgentResponse::FinalAnswer(text)
+        AgentResponse::FinalAnswer(final_answer_text(choice, message))
     }
+}
+
+fn final_answer_text(choice: &Value, message: &Value) -> String {
+    let finish = choice["finish_reason"].as_str().unwrap_or("");
+    let content = message["content"].as_str().unwrap_or("").trim();
+    let reasoning = message["reasoning_content"]
+        .as_str()
+        .unwrap_or("")
+        .trim();
+
+    let mut text = if !content.is_empty() {
+        content.to_string()
+    } else if !reasoning.is_empty() {
+        format!(
+            "[reasoning_only] {}",
+            &reasoning[..reasoning.len().min(400)]
+        )
+    } else {
+        "[no content]".to_string()
+    };
+
+    if finish == "length" {
+        text = format!(
+            "[truncated: max_tokens reached with no tool call] {text}\n\
+             Next response must be a short tool call (prefer apply_patch/write_file)."
+        );
+    }
+    text
 }
 
 #[cfg(test)]
@@ -144,5 +168,25 @@ mod tests {
             bad.into_llm_result(),
             Err(LlmError::MalformedToolCall(_))
         ));
+    }
+
+    #[test]
+    fn length_truncation_surfaces_in_final_answer() {
+        let choice = json!({
+            "finish_reason": "length",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "planning a large multi-file patch"
+            }
+        });
+        match normalize_openai_chat_choice(&choice) {
+            AgentResponse::FinalAnswer(text) => {
+                assert!(text.contains("truncated"));
+                assert!(text.contains("reasoning_only") || text.contains("planning"));
+                assert!(text.contains("apply_patch"));
+            }
+            other => panic!("expected FinalAnswer, got {:?}", other),
+        }
     }
 }

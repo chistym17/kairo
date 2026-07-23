@@ -253,6 +253,60 @@ pub async fn run(
                         state.exploration.model_turns_since_edit.saturating_add(1);
                     state.exploration.consecutive_single_readonly_turns = 0;
                     state.governance.note_no_tool_turn();
+
+                    // Green verify + essay loop (DeepSeek tool_choice=auto): force finish.
+                    if state.completion.last_verify_success == Some(true) {
+                        let n = state.governance.consecutive_no_tool_turns;
+                        if n >= crate::governance::AUTO_FINISH_AFTER_VERIFY_NO_TOOL {
+                            let summary = {
+                                let t = text.trim();
+                                if t.is_empty() {
+                                    "Verification passed; model returned text instead of finish."
+                                        .to_string()
+                                } else {
+                                    t.chars().take(2000).collect()
+                                }
+                            };
+                            write_event(
+                                &state.run_id,
+                                "auto_finish_after_verify",
+                                &format!(
+                                    "no_tool_call x{n} after green verify — TaskComplete"
+                                ),
+                                0,
+                            );
+                            println!(
+                                "\n[agent] auto-finish: verification already passed and model \
+                                 returned text {n}× instead of finish"
+                            );
+                            let reason = StopReason::TaskComplete;
+                            // Surface the essay as the run's closing summary in the log.
+                            write_event(
+                                &state.run_id,
+                                "finish_summary",
+                                &summary[..summary.len().min(500)],
+                                0,
+                            );
+                            write_summary(state, &reason);
+                            return reason;
+                        }
+                        state.governance.pending_guidance = Some(
+                            "Verification already passed (tests/checks green). \
+                             Your next response MUST call the finish tool with a short summary. \
+                             Do not repeat the change list as plain text."
+                                .to_string(),
+                        );
+                        emit(
+                            observer,
+                            AgentEvent::Error {
+                                run_id: state.run_id.clone(),
+                                step_index: Some(state.step_count),
+                                message: "model returned text instead of tool call".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     if state.governance.semantic_policy
                         && state.governance.consecutive_no_tool_turns
                             >= crate::governance::MAX_NO_TOOL_TURNS
@@ -662,6 +716,30 @@ async fn execute_one_tool(
         );
     }
 
+    // Existing source files must use apply_patch — write_file rewrites break APIs.
+    if let Action::WriteFile { path, .. } = &action {
+        if let Some(denied) = state
+            .patch_recovery
+            .deny_write_existing_source(&state.workspace_root, path)
+        {
+            write_event(
+                &state.run_id,
+                "write_file_denied_existing_source",
+                &format!("{}", path.display()),
+                0,
+            );
+            return commit_tool_outcome(
+                state,
+                observer,
+                step_index,
+                model_turn,
+                action,
+                tool_call_id,
+                denied,
+            );
+        }
+    }
+
     let mut result = produce_tool_result(
         state,
         &action,
@@ -677,6 +755,22 @@ async fn execute_one_tool(
                 result.error = Some(err);
             }
         }
+    }
+
+    if let Action::ApplyPatch { path, .. } = &action {
+        if result.success {
+            state.patch_recovery.note_successful_mutation();
+        } else {
+            result = state.patch_recovery.after_patch_failure(path, result);
+            write_event(
+                &state.run_id,
+                "patch_recovery_granted",
+                &format!("{} (1 reread)", path.display()),
+                0,
+            );
+        }
+    } else if result.success && matches!(action, Action::WriteFile { .. }) {
+        state.patch_recovery.note_successful_mutation();
     }
 
     if result.success
@@ -865,6 +959,15 @@ async fn execute_readonly_group(
                     limit,
                 } = &action
                 {
+                    if state.patch_recovery.try_consume_read(path) {
+                        state.read_cache.invalidate_path(path);
+                        write_event(
+                            &state.run_id,
+                            "patch_recovery_read",
+                            &format!("{} (duplicate-read bypass)", path.display()),
+                            0,
+                        );
+                    }
                     match state.read_cache.resolve(&workspace, path, *offset, *limit) {
                         tools::read_cache::ReadResolve::AlreadyRead(hit) => {
                             write_event(
@@ -1373,6 +1476,15 @@ fn read_file_cached(
     limit: u32,
 ) -> ToolResult {
     let step_index = state.step_count;
+    if state.patch_recovery.try_consume_read(path) {
+        state.read_cache.invalidate_path(path);
+        write_event(
+            &state.run_id,
+            "patch_recovery_read",
+            &format!("{} (duplicate-read bypass)", path.display()),
+            0,
+        );
+    }
     match state
         .read_cache
         .resolve(&state.workspace_root, path, offset, limit)
@@ -1855,6 +1967,12 @@ fn apply_evidence_checkpoint_gate(
     state: &mut AgentState,
     action: &Action,
 ) -> Result<(), ToolResult> {
+    // Recovery reread after patch failure is not generic exploration thrash.
+    if let Action::ReadFile { path, .. } = action {
+        if state.patch_recovery.has_grant_for(path) {
+            return Ok(());
+        }
+    }
     match state.progress.check_exploration_allowed(action) {
         Ok(()) => Ok(()),
         Err(message) => {
@@ -2196,15 +2314,9 @@ fn post_edit_sanity_check(workspace_root: &std::path::Path, rel_path: &str) -> O
         .to_ascii_lowercase();
 
     // Only cheap, non-invasive checks.
+    // Prefer `node --check` over `new Function(src)` — the latter rejects ESM `export`.
     let (program, args): (&str, Vec<String>) = match ext.as_str() {
-        "js" | "cjs" | "mjs" => {
-            // Syntax-only parse, no execution: new Function(source)
-            let script = format!(
-                "const fs=require('fs'); const src=fs.readFileSync({:?},'utf8'); new Function(src); console.log('ok');",
-                rel
-            );
-            ("node", vec!["-e".to_string(), script])
-        }
+        "js" | "cjs" | "mjs" => ("node", vec!["--check".to_string(), rel.to_string()]),
         "py" => ("python3", vec!["-m".to_string(), "py_compile".to_string(), rel.to_string()]),
         _ => return None,
     };

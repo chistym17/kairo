@@ -16,6 +16,10 @@ const STAINLESS_PACKAGE_VERSION: &str = "6.34.0";
 ///
 /// AgentRouter is a gateway: same `/v1/chat/completions` shape as OpenAI,
 /// with model IDs chosen via `MODEL_ID` (DeepSeek, GLM, Claude, GPT, etc.).
+///
+/// For GLM/DeepSeek-style models we disable thinking and keep a higher
+/// `max_tokens` so hard turns (multi-file `apply_patch`) are not truncated
+/// into empty `no_tool_call` loops.
 pub struct AgentRouterClient {
     api_key: String,
     model: String,
@@ -47,7 +51,8 @@ impl AgentRouterClient {
                 {"role": "user", "content": "Reply with exactly: ok"}
             ],
             "max_tokens": 16,
-            "temperature": 0.0
+            "temperature": 0.0,
+            "thinking": {"type": "disabled"}
         });
 
         let response_json = self.post_json(&body).await?;
@@ -130,13 +135,16 @@ impl AgentRouterClient {
 #[async_trait]
 impl LlmClient for AgentRouterClient {
     async fn respond(&self, request: &LlmRequest) -> Result<LlmTurn, LlmError> {
+        // Mirror DeepSeek: thinking burns the output budget and often yields
+        // finish_reason=length with empty content / no tool_calls.
         let body = json!({
             "model": self.model,
             "messages": request.messages.clone(),
             "tools": request.tools.clone(),
             "tool_choice": "required",
-            "max_tokens": 2048,
-            "temperature": 0.0
+            "max_tokens": 8192,
+            "temperature": 0.0,
+            "thinking": {"type": "disabled"}
         });
 
         let started = std::time::Instant::now();

@@ -23,3 +23,8 @@ annotaa/
 phase*.md
 index.md
 cache.txt
+
+# Standalone eval fixture (has its own git + buggy-baseline tag)
+test-fixture/
+agent-v1/EVAL_FIXTURE.md
+agent-v1/CACHE_VERIFY.md
