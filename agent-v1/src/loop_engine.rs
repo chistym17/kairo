@@ -1698,13 +1698,21 @@ fn record_model_usage(state: &mut AgentState, usage: ModelUsage) {
 }
 
 fn log_prompt_diagnostics(
-    state: &AgentState,
+    state: &mut AgentState,
     diagnostics: &crate::context::PromptDiagnostics,
 ) {
     println!("[prompt] {}", diagnostics.render_compact());
     if let Ok(json) = serde_json::to_string(diagnostics) {
         write_event(&state.run_id, "prompt_diagnostics", &json, 0);
     }
+    if let Some(prev) = state.last_prompt_diagnostics.as_ref() {
+        let cmp = crate::context::PrefixCompare::compare(prev, diagnostics);
+        println!("[cache-verify] {}", cmp.render_compact());
+        if let Ok(json) = serde_json::to_string(&cmp) {
+            write_event(&state.run_id, "prefix_compare", &json, 0);
+        }
+    }
+    state.last_prompt_diagnostics = Some(diagnostics.clone());
 }
 
 fn emit(observer: Option<&dyn AgentObserver>, event: AgentEvent) {

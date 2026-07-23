@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod cache_verify;
 pub mod compressor;
 pub mod instructions;
 pub mod manager;
@@ -13,6 +14,7 @@ pub mod stats;
 pub mod types;
 
 pub use builder::ContextBuilder;
+pub use cache_verify::{PrefixChangeReason, PrefixCompare};
 pub use manager::{ContextManager, ContextReduction};
 pub use prompt_layout::{PromptDiagnostics, PromptLayout};
 pub use system::default_system_prompt;

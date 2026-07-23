@@ -71,6 +71,9 @@ pub struct AgentState {
 
     /// Per-call model usage for this run (Phase 13A).
     pub model_usage: UsageAccumulator,
+
+    /// Last prompt diagnostics (for consecutive-turn prefix compare).
+    pub last_prompt_diagnostics: Option<crate::context::PromptDiagnostics>,
 }
 
 impl AgentState {
@@ -106,6 +109,7 @@ impl AgentState {
             ms_to_first_edit: None,
             ms_to_first_verification: None,
             model_usage: UsageAccumulator::new(model_id, ModelPricing::from_env()),
+            last_prompt_diagnostics: None,
         }
     }
 

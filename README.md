@@ -80,3 +80,7 @@ See [`agent-v1/.env.example`](agent-v1/.env.example). Important vars:
 | Missing API key panic | Set the key for your `LLM_PROVIDER` in `.env` |
 | `.env` ignored | Run from `agent-v1/` (or export vars yourself) |
 | Edits denied in one-shot | Use interactive mode, or set `EDIT_POLICY=auto` |
+
+## Cache / cost verification
+
+After Phase 13A instrumentation, see [`agent-v1/CACHE_VERIFY.md`](agent-v1/CACHE_VERIFY.md) for the prompt-cache verification matrix (local tests + live checklist).
