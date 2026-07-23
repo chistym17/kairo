@@ -4,7 +4,7 @@ use crate::session::Message;
 use crate::state::step::Step;
 
 use super::instructions::load_instructions;
-use super::messages::build_messages;
+use super::prompt_layout::build_prompt_layout;
 use super::stats::ContextStats;
 use super::system::{compose_system_prompt, default_system_prompt};
 use super::tools::{build_tools, build_tools_for_policy};
@@ -119,17 +119,23 @@ impl ContextBuilder {
             step_history,
             tool_policy,
         );
-        let messages = build_messages(
+
+        let layout = build_prompt_layout(
+            &self.system_prompt,
+            context.workspace.instructions.as_deref(),
             &context.system_prompt,
+            context.tools.clone(),
             &context.session_messages,
             &context.goal,
             context.run_summary.as_deref(),
             &context.step_history,
         );
 
+        let diagnostics = layout.diagnostics();
         let request = LlmRequest {
-            messages,
-            tools: context.tools,
+            messages: layout.assemble_messages(),
+            tools: layout.tools,
+            diagnostics,
         };
 
         let stats = ContextStats::from_llm_request(&request.messages, &request.tools);
@@ -170,6 +176,7 @@ mod tests {
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"], "fix divide");
         assert!(request.tools.as_array().unwrap().len() >= 4);
+        assert!(!request.diagnostics.stable_prefix_hash.is_empty());
     }
 
     #[test]
@@ -260,5 +267,16 @@ mod tests {
 
         assert_eq!(stats.message_count, request.messages.as_array().unwrap().len());
         assert!(stats.estimated_tokens > 0);
+    }
+
+    #[test]
+    fn builder_stable_prefix_independent_of_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = ContextBuilder::new().build(dir.path(), "goal one", &[], &[]);
+        let b = ContextBuilder::new().build(dir.path(), "goal two", &[], &[]);
+        assert_eq!(
+            a.diagnostics.stable_prefix_hash,
+            b.diagnostics.stable_prefix_hash
+        );
     }
 }

@@ -1,26 +1,15 @@
 use serde_json::Value;
 
+use crate::context::prompt_layout::sort_tools_by_name;
 use crate::governance::ToolPolicy;
 use crate::llm::schema::build_tools_schema;
 
 pub fn build_tools() -> Value {
-    build_tools_schema()
+    sort_tools_by_name(build_tools_schema())
 }
 
-pub fn build_tools_for_policy(policy: &ToolPolicy) -> Value {
-    let full = build_tools_schema();
-    let Some(arr) = full.as_array() else {
-        return full;
-    };
-    let filtered: Vec<Value> = arr
-        .iter()
-        .filter(|t| {
-            t.get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-                .is_some_and(|name| policy.allows_tool_name(name))
-        })
-        .cloned()
-        .collect();
-    Value::Array(filtered)
+/// Tool schemas stay the full stable set. Authorization / semantic policy gate
+/// execution — they must not reshape the cached tool prefix between turns.
+pub fn build_tools_for_policy(_policy: &ToolPolicy) -> Value {
+    build_tools()
 }

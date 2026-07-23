@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::context::prompt_layout::PromptDiagnostics;
 use crate::session::Message;
 use crate::state::step::Step;
 
@@ -29,4 +30,6 @@ pub struct AgentContext {
 pub struct LlmRequest {
     pub messages: Value,
     pub tools: Value,
+    /// Prefix fingerprints for logs — never sent to the model.
+    pub diagnostics: PromptDiagnostics,
 }

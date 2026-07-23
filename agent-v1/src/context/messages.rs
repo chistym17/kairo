@@ -35,8 +35,14 @@ pub fn build_messages(
         }
     }
 
-    // Group consecutive steps from the same model turn into one assistant
-    // message with multiple tool_calls, followed by one tool result each.
+    messages.extend(steps_to_messages(step_history));
+
+    json!(messages)
+}
+
+/// Convert step history into assistant tool_call + tool result messages.
+pub fn steps_to_messages(step_history: &[Step]) -> Vec<Value> {
+    let mut messages = Vec::new();
     let mut i = 0;
     while i < step_history.len() {
         let turn = step_history[i].model_turn;
@@ -55,11 +61,10 @@ pub fn build_messages(
         }
         i = j;
     }
-
-    json!(messages)
+    messages
 }
 
-fn session_message_to_api(msg: &Message) -> Value {
+pub fn session_message_to_api(msg: &Message) -> Value {
     match msg {
         Message::User { content } => json!({
             "role": "user",

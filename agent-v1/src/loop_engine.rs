@@ -187,6 +187,7 @@ pub async fn run(
                 );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
+            log_prompt_diagnostics(state, &request.diagnostics);
             if reduction.trimmed {
                 let detail = json!({
                     "budget_tokens": reduction.budget_tokens,
@@ -372,6 +373,7 @@ pub async fn run(
                             &bounded_stats.to_json_string(),
                             0,
                         );
+                        log_prompt_diagnostics(state, &request.diagnostics);
                         if reduction.trimmed {
                             let detail = json!({
                                 "budget_tokens": reduction.budget_tokens,
@@ -1673,6 +1675,16 @@ fn record_model_usage(state: &mut AgentState, usage: ModelUsage) {
         if let Ok(json) = serde_json::to_string(last) {
             write_event(&state.run_id, "model_usage", &json, 0);
         }
+    }
+}
+
+fn log_prompt_diagnostics(
+    state: &AgentState,
+    diagnostics: &crate::context::PromptDiagnostics,
+) {
+    println!("[prompt] {}", diagnostics.render_compact());
+    if let Ok(json) = serde_json::to_string(diagnostics) {
+        write_event(&state.run_id, "prompt_diagnostics", &json, 0);
     }
 }
 
