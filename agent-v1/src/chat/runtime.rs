@@ -94,6 +94,11 @@ impl ChatRuntime {
                         eprintln!("[agent-v1] {e}");
                     }
                 }
+                ChatInput::SetEditPolicy(policy) => {
+                    if let Err(e) = self.set_edit_policy(policy) {
+                        eprintln!("[agent-v1] {e}");
+                    }
+                }
                 ChatInput::Message(message) => {
                     if let Err(e) = self.handle_message(&message).await {
                         eprintln!("[agent-v1] error: {e:#}");
@@ -154,7 +159,7 @@ impl ChatRuntime {
         );
         println!("[agent-v1] type a task, or /exit to quit");
         println!(
-            "[agent-v1] cmds: /overview  /intent <explore|plan|execute|review|clear>  /plan  /approve-plan  /constrain <text>  /decision <text>  /task  /exit"
+            "[agent-v1] cmds: /overview  /intent <explore|plan|execute|review|clear>  /edit-policy <auto|confirm|readonly>  /plan  /approve-plan  /constrain <text>  /decision <text>  /task  /exit"
         );
         if !self.session.messages.is_empty() {
             println!(
@@ -228,6 +233,8 @@ impl ChatRuntime {
             .session
             .task
             .record_decision(format!("approved plan v{version}"));
+        self.session
+            .append_session_update(format!("Plan v{version} approved."));
         self.manager.save(&self.session)?;
         println!("[agent-v1] plan approved (v{version})");
         if let Some(plan) = &self.session.task.plan {
@@ -249,6 +256,8 @@ impl ChatRuntime {
             .session
             .task
             .record_decision(format!("constraint: {text}"));
+        self.session
+            .append_session_update(format!("Constraint added (plan v{version}): {text}"));
         self.manager.save(&self.session)?;
         println!("[agent-v1] constraint added; plan back to draft (v{version})");
         if let Some(plan) = &self.session.task.plan {
@@ -262,6 +271,8 @@ impl ChatRuntime {
             .task
             .record_decision(text)
             .map_err(anyhow::Error::msg)?;
+        self.session
+            .append_session_update(format!("Decision recorded: {text}"));
         self.manager.save(&self.session)?;
         println!("[agent-v1] decision recorded: {text}");
         Ok(())
@@ -281,6 +292,16 @@ impl ChatRuntime {
         self.session.clear_intent_pin();
         self.manager.save(&self.session)?;
         println!("[agent-v1] turn_intent pin cleared — will infer from messages");
+        Ok(())
+    }
+
+    fn set_edit_policy(&mut self, policy: crate::authorization::EditPolicy) -> Result<()> {
+        self.session.set_edit_policy(policy);
+        self.manager.save(&self.session)?;
+        println!(
+            "[agent-v1] edit_policy set to {} (appended session update)",
+            policy.as_str()
+        );
         Ok(())
     }
 

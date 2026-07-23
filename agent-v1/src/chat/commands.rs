@@ -22,6 +22,8 @@ pub enum ChatInput {
     SetIntent(crate::session::TurnIntent),
     /// Clear pinned intent (resume inference from messages).
     ClearIntent,
+    /// Change edit policy (appends session update; does not rewrite history).
+    SetEditPolicy(crate::authorization::EditPolicy),
     Message(String),
 }
 
@@ -74,7 +76,14 @@ pub fn parse_input(line: &str) -> ChatInput {
                 ChatInput::RecordDecision(text.to_string())
             }
         }
-        other if other == "/constrain" || other == "/decision" => {
+        other if other.starts_with("/edit-policy ") => {
+            let name = other["/edit-policy ".len()..].trim();
+            match crate::authorization::EditPolicy::parse(name) {
+                Some(policy) => ChatInput::SetEditPolicy(policy),
+                None => ChatInput::Message(other.to_string()),
+            }
+        }
+        other if other == "/constrain" || other == "/decision" || other == "/edit-policy" => {
             ChatInput::Message(other.to_string())
         }
         msg => ChatInput::Message(msg.to_string()),
@@ -133,5 +142,13 @@ mod tests {
             ChatInput::SetIntent(crate::session::TurnIntent::Plan)
         );
         assert_eq!(parse_input("/intent clear"), ChatInput::ClearIntent);
+        assert_eq!(
+            parse_input("/edit-policy auto"),
+            ChatInput::SetEditPolicy(crate::authorization::EditPolicy::Auto)
+        );
+        assert_eq!(
+            parse_input("/edit-policy confirm"),
+            ChatInput::SetEditPolicy(crate::authorization::EditPolicy::ConfirmBeforeFirstEdit)
+        );
     }
 }

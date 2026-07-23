@@ -1,11 +1,15 @@
-//! Stable vs dynamic prompt layout + fingerprints (Phase 13A Day 2).
+//! Stable vs dynamic prompt layout + fingerprints (Phase 13A Day 2–3).
 //!
 //! Diagnostics are for logs only — never inject hashes into the model prompt.
+//!
+//! Stable prefix must not include: timestamps, run IDs, usage/cache stats,
+//! approval counters, or unordered map serialization.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::context::messages::{session_message_to_api, steps_to_messages};
+use crate::context::normalize::{canonicalize_json, canonicalize_json_string, normalize_text};
 use crate::session::Message;
 use crate::state::step::Step;
 
@@ -17,12 +21,14 @@ pub struct PromptDiagnostics {
     pub tool_schema_hash: String,
     pub system_prompt_hash: String,
     pub project_instructions_hash: Option<String>,
+    /// Hash of stable messages after the system message (session history).
+    pub session_messages_hash: String,
 }
 
 impl PromptDiagnostics {
     pub fn render_compact(&self) -> String {
         format!(
-            "stable={} bytes={} tools={} system={} instructions={}",
+            "stable={} bytes={} tools={} system={} instructions={} session={}",
             &self.stable_prefix_hash[..self.stable_prefix_hash.len().min(8)],
             self.stable_prefix_bytes,
             &self.tool_schema_hash[..self.tool_schema_hash.len().min(8)],
@@ -30,7 +36,8 @@ impl PromptDiagnostics {
             self.project_instructions_hash
                 .as_ref()
                 .map(|h| h[..h.len().min(8)].to_string())
-                .unwrap_or_else(|| "none".to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            &self.session_messages_hash[..self.session_messages_hash.len().min(8)],
         )
     }
 }
@@ -52,7 +59,8 @@ impl PromptLayout {
     pub fn assemble_messages(&self) -> Value {
         let mut all = self.stable_messages.clone();
         all.extend(self.dynamic_messages.iter().cloned());
-        Value::Array(all)
+        // Canonical key order so the wire JSON does not churn.
+        canonicalize_json(&Value::Array(all))
     }
 
     pub fn stable_prefix_bytes(&self) -> usize {
@@ -64,23 +72,27 @@ impl PromptLayout {
     }
 
     pub fn diagnostics(&self) -> PromptDiagnostics {
+        let session_only: Vec<Value> = self.stable_messages.iter().skip(1).cloned().collect();
         PromptDiagnostics {
             stable_prefix_hash: self.stable_prefix_hash(),
             stable_prefix_bytes: self.stable_prefix_bytes(),
-            tool_schema_hash: hash_hex(serde_json::to_string(&self.tools).unwrap_or_default().as_bytes()),
+            tool_schema_hash: hash_hex(canonicalize_json_string(&self.tools).as_bytes()),
             system_prompt_hash: hash_hex(self.base_system_prompt.as_bytes()),
             project_instructions_hash: self
                 .project_instructions
                 .as_ref()
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| hash_hex(s.as_bytes())),
+            session_messages_hash: hash_hex(
+                canonicalize_json_string(&Value::Array(session_only)).as_bytes(),
+            ),
         }
     }
 }
 
 fn stable_prefix_payload(tools: &Value, stable_messages: &[Value]) -> Vec<u8> {
-    let tools_s = serde_json::to_string(tools).unwrap_or_default();
-    let msgs_s = serde_json::to_string(stable_messages).unwrap_or_default();
+    let tools_s = canonicalize_json_string(tools);
+    let msgs_s = canonicalize_json_string(&Value::Array(stable_messages.to_vec()));
     let mut out = Vec::with_capacity(tools_s.len() + msgs_s.len() + 1);
     out.extend_from_slice(tools_s.as_bytes());
     out.push(b'\n');
@@ -98,13 +110,13 @@ pub fn hash_hex(data: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-/// Sort tools by function name for a stable schema prefix.
+/// Sort tools by function name, then canonicalize object keys.
 pub fn sort_tools_by_name(tools: Value) -> Value {
     let Some(mut arr) = tools.as_array().cloned() else {
-        return tools;
+        return canonicalize_json(&tools);
     };
     arr.sort_by(|a, b| tool_name(a).cmp(&tool_name(b)));
-    Value::Array(arr)
+    canonicalize_json(&Value::Array(arr))
 }
 
 fn tool_name(tool: &Value) -> String {
@@ -128,13 +140,18 @@ pub fn build_prompt_layout(
     step_history: &[Step],
 ) -> PromptLayout {
     let tools = sort_tools_by_name(tools);
+    let base_system_prompt = normalize_text(base_system_prompt);
+    let project_instructions = project_instructions
+        .map(normalize_text)
+        .filter(|s| !s.is_empty());
+    let composed_system_prompt = normalize_text(composed_system_prompt);
 
     let mut stable_messages = vec![json!({
         "role": "system",
         "content": composed_system_prompt
     })];
     for msg in session_messages {
-        stable_messages.push(session_message_to_api(msg));
+        stable_messages.push(canonicalize_json(&session_message_to_api(msg)));
     }
 
     let mut dynamic_messages = vec![json!({
@@ -152,14 +169,16 @@ pub fn build_prompt_layout(
     }
 
     dynamic_messages.extend(steps_to_messages(step_history));
+    dynamic_messages = dynamic_messages
+        .into_iter()
+        .map(|m| canonicalize_json(&m))
+        .collect();
 
     PromptLayout {
         tools,
-        base_system_prompt: base_system_prompt.to_string(),
-        project_instructions: project_instructions
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.to_string()),
-        composed_system_prompt: composed_system_prompt.to_string(),
+        base_system_prompt,
+        project_instructions,
+        composed_system_prompt,
         stable_messages,
         dynamic_messages,
     }
@@ -170,6 +189,7 @@ mod tests {
     use super::*;
     use crate::context::system::default_system_prompt;
     use crate::context::tools::build_tools;
+    use crate::context::ContextBuilder;
     use crate::llm::schema::build_tools_schema;
     use crate::state::step::Action;
     use crate::tools::ToolResult;
@@ -185,13 +205,21 @@ mod tests {
     }
 
     #[test]
-    fn identical_state_same_stable_prefix() {
+    fn identical_state_same_stable_prefix_bytes() {
         let tools = build_tools();
         let first = layout_with(tools.clone(), &[], "goal", &[]);
         let second = layout_with(tools, &[], "goal", &[]);
         assert_eq!(first.stable_prefix_bytes(), second.stable_prefix_bytes());
         assert_eq!(first.stable_prefix_hash(), second.stable_prefix_hash());
         assert_eq!(first.diagnostics(), second.diagnostics());
+        assert_eq!(
+            serde_json::to_string(&first.tools).unwrap(),
+            serde_json::to_string(&second.tools).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&first.stable_messages).unwrap(),
+            serde_json::to_string(&second.stable_messages).unwrap()
+        );
     }
 
     #[test]
@@ -261,5 +289,49 @@ mod tests {
         let with_step = layout_with(tools, &[], "goal", &[step]);
         assert_eq!(without.stable_prefix_hash(), with_step.stable_prefix_hash());
         assert!(with_step.dynamic_messages.len() > without.dynamic_messages.len());
+    }
+
+    #[test]
+    fn tool_key_order_does_not_change_schema_hash() {
+        let a = json!([{
+            "type": "function",
+            "function": {
+                "name": "zzz",
+                "description": "d",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }]);
+        let b = json!([{
+            "function": {
+                "parameters": {"properties": {}, "type": "object"},
+                "description": "d",
+                "name": "zzz"
+            },
+            "type": "function"
+        }]);
+        let la = layout_with(a, &[], "g", &[]);
+        let lb = layout_with(b, &[], "g", &[]);
+        assert_eq!(
+            la.diagnostics().tool_schema_hash,
+            lb.diagnostics().tool_schema_hash
+        );
+        assert_eq!(la.stable_prefix_hash(), lb.stable_prefix_hash());
+    }
+
+    #[test]
+    fn agents_line_endings_do_not_churn_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "rule A\r\nrule B\r\n").unwrap();
+        let a = ContextBuilder::new().build(dir.path(), "goal", &[], &[]);
+        std::fs::write(dir.path().join("AGENTS.md"), "rule A\nrule B\n").unwrap();
+        let b = ContextBuilder::new().build(dir.path(), "goal", &[], &[]);
+        assert_eq!(
+            a.diagnostics.stable_prefix_hash,
+            b.diagnostics.stable_prefix_hash
+        );
+        assert_eq!(
+            a.diagnostics.project_instructions_hash,
+            b.diagnostics.project_instructions_hash
+        );
     }
 }

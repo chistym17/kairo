@@ -12,11 +12,13 @@ pub fn default_system_prompt() -> String {
 }
 
 pub fn compose_system_prompt(base: &str, project_instructions: Option<&str>) -> String {
+    let base = crate::context::normalize::normalize_text(base);
     match project_instructions {
         Some(text) if !text.trim().is_empty() => {
+            let text = crate::context::normalize::normalize_text(text);
             format!("{base}\n\n## Project instructions\n\n{text}")
         }
-        _ => base.to_string(),
+        _ => base,
     }
 }
 

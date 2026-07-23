@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::context::compressor::compress_tool_output;
+use crate::context::normalize::normalize_rel_path;
 use crate::session::Message;
 use crate::state::step::{Action, Step};
 use crate::tools::ToolResult;
@@ -148,42 +149,42 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
         } => (
             "read_file",
             json!({
-                "path": path.to_string_lossy(),
+                "path": normalize_rel_path(path),
                 "offset": offset.to_string(),
                 "limit": limit.to_string(),
             }),
         ),
-        Action::ListFiles { path } => ("list_files", json!({ "path": path.to_string_lossy() })),
+        Action::ListFiles { path } => ("list_files", json!({ "path": normalize_rel_path(path) })),
         Action::SearchCode { query, path } => (
             "search_code",
             json!({
                 "query": query,
-                "path": path.to_string_lossy()
+                "path": normalize_rel_path(path)
             }),
         ),
         Action::Locate { query, path } => (
             "locate",
             json!({
                 "query": query,
-                "path": path.to_string_lossy()
+                "path": normalize_rel_path(path)
             }),
         ),
         Action::FindFiles { pattern, path } => (
             "find_files",
             json!({
                 "pattern": pattern,
-                "path": path.to_string_lossy()
+                "path": normalize_rel_path(path)
             }),
         ),
         Action::DetectProjectSnapshot { path } => (
             "detect_project_snapshot",
-            json!({ "path": path.to_string_lossy() }),
+            json!({ "path": normalize_rel_path(path) }),
         ),
         Action::SummarizeRepo { depth, path, focus } => (
             "summarize_repo",
             json!({
                 "depth": depth,
-                "path": path.to_string_lossy(),
+                "path": normalize_rel_path(path),
                 "focus": focus,
             }),
         ),
@@ -191,21 +192,21 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
         Action::GitDiff { path } => {
             let mut args = json!({});
             if let Some(p) = path {
-                args["path"] = json!(p.to_string_lossy());
+                args["path"] = json!(normalize_rel_path(p));
             }
             ("git_diff", args)
         }
         Action::WriteFile { path, content } => (
             "write_file",
             json!({
-                "path": path.to_string_lossy(),
+                "path": normalize_rel_path(path),
                 "content": content
             }),
         ),
         Action::ApplyPatch { path, diff } => (
             "apply_patch",
             json!({
-                "path": path.to_string_lossy(),
+                "path": normalize_rel_path(path),
                 "diff": diff
             }),
         ),
@@ -217,7 +218,7 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
             "run_command",
             json!({
                 "cmd": cmd,
-                "working_directory": cwd.to_string_lossy(),
+                "working_directory": normalize_rel_path(cwd),
                 "timeout_secs": timeout_secs.to_string(),
             }),
         ),
@@ -229,7 +230,7 @@ fn action_to_tool_call_parts(action: &Action) -> (&'static str, Value) {
             "run_shell",
             json!({
                 "command": command,
-                "working_directory": cwd.to_string_lossy(),
+                "working_directory": normalize_rel_path(cwd),
                 "timeout_secs": timeout_secs.to_string(),
             }),
         ),

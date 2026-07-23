@@ -29,6 +29,14 @@ impl EditPolicy {
             _ => None,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::ConfirmBeforeFirstEdit => "confirm",
+            Self::ReadOnly => "readonly",
+        }
+    }
 }
 
 /// Declared side effect of a tool call.

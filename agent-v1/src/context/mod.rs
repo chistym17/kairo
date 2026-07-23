@@ -3,6 +3,7 @@ pub mod compressor;
 pub mod instructions;
 pub mod manager;
 pub mod messages;
+pub mod normalize;
 pub mod prompt_layout;
 pub mod run_context;
 pub mod system;

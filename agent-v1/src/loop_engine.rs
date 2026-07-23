@@ -688,6 +688,20 @@ async fn execute_one_tool(
         *verified_in_batch = true;
     }
 
+    let plan_update_version =
+        if result.success && matches!(action, Action::UpdatePlan { .. }) {
+            Some(
+                state
+                    .task
+                    .plan
+                    .as_ref()
+                    .map(|p| p.version)
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
+
     let stop = commit_tool_outcome(
         state,
         observer,
@@ -699,6 +713,11 @@ async fn execute_one_tool(
     );
     // Persist task memory (plan / files / verification / decisions) when a session is attached.
     sync_task_to_session(state, session);
+    if let Some(version) = plan_update_version {
+        if let Some(session) = session.as_deref_mut() {
+            session.append_session_update(format!("Plan updated to v{version}."));
+        }
+    }
     stop
 }
 
@@ -1890,6 +1909,7 @@ fn resolve_tool_authorization(
             );
             apply_decision(&mut state.authorization, effect, &decision);
             sync_authorization_to_session(state, session);
+            append_authorization_session_update(session, effect, &decision);
 
             match decision {
                 ApprovalDecision::Reject => {
@@ -1903,6 +1923,31 @@ fn resolve_tool_authorization(
             }
         }
     }
+}
+
+fn append_authorization_session_update(
+    session: &mut Option<&mut Session>,
+    effect: crate::authorization::ToolEffect,
+    decision: &ApprovalDecision,
+) {
+    let Some(session) = session.as_deref_mut() else {
+        return;
+    };
+    let body = match decision {
+        ApprovalDecision::ApproveForTask => {
+            format!(
+                "Authorization: ApproveForTask for {:?} — workspace mutations approved for this task.",
+                effect
+            )
+        }
+        ApprovalDecision::ApproveOnce => {
+            format!("Authorization: ApproveOnce for {:?}.", effect)
+        }
+        ApprovalDecision::Reject => {
+            format!("Authorization: rejected for {:?}.", effect)
+        }
+    };
+    session.append_session_update(body);
 }
 
 fn sync_authorization_to_session(state: &AgentState, session: &mut Option<&mut Session>) {
