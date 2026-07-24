@@ -1575,7 +1575,7 @@ fn commit_tool_outcome(
     model_turn: u32,
     action: Action,
     tool_call_id: String,
-    result: ToolResult,
+    mut result: ToolResult,
 ) -> Option<StopReason> {
     emit(
         observer,
@@ -1626,6 +1626,40 @@ fn commit_tool_outcome(
                 &path,
                 0,
             );
+
+            // Harness-owned verify: preferred discovered check after a successful edit.
+            // Keeps the edit marked successful; appends evidence for the model.
+            if let Some(snapshot) = state.project_snapshot.clone() {
+                if let Some(report) =
+                    crate::verification::try_auto_post_edit_verify(&snapshot, &state.workspace_root)
+                {
+                    result.output.push_str(&report.output_suffix);
+                    state.shell_cache.store_live(
+                        "run_shell",
+                        &report.check.command(),
+                        &report.check.cwd,
+                        step_index,
+                        &report.result,
+                    );
+                    state.note_verification();
+                    state.task.note_verification(&report.outcome);
+                    state
+                        .completion
+                        .note_verification_outcome(model_turn, report.outcome.clone());
+                    write_event(
+                        &state.run_id,
+                        "auto_post_edit_verify",
+                        &format!(
+                            "check={} status={:?} summary={}",
+                            report.check.id,
+                            report.outcome.status,
+                            report.outcome.summary.chars().take(200).collect::<String>()
+                        ),
+                        0,
+                    );
+                }
+            }
+
             emit(
                 observer,
                 AgentEvent::FileModified {

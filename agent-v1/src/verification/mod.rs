@@ -135,6 +135,115 @@ pub fn preferred_check(checks: &[Check]) -> Option<&Check> {
     checks.iter().find(|c| browserish_penalty(c) == 0)
 }
 
+/// Default on. Set `AUTO_POST_EDIT_VERIFY=0` (or false/off/no) to disable.
+pub fn auto_post_edit_verify_enabled() -> bool {
+    match std::env::var("AUTO_POST_EDIT_VERIFY") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "off" || v == "no")
+        }
+        Err(_) => true,
+    }
+}
+
+pub const AUTO_VERIFY_TIMEOUT_SECS: u64 = 120;
+
+/// Result of a harness-owned post-edit verification run.
+#[derive(Debug)]
+pub struct AutoVerifyReport {
+    pub check: Check,
+    pub result: ToolResult,
+    pub outcome: VerificationOutcome,
+    pub output_suffix: String,
+}
+
+/// Run the preferred discovered check after a successful file mutation.
+///
+/// Does not change whether the edit itself succeeded — it only produces evidence
+/// for the model (and completion tracking). Returns `None` when disabled, no
+/// suitable check exists, or the snapshot has nothing to run.
+pub fn try_auto_post_edit_verify(
+    snapshot: &ProjectSnapshot,
+    workspace_root: &Path,
+) -> Option<AutoVerifyReport> {
+    if !auto_post_edit_verify_enabled() {
+        return None;
+    }
+    let checks = discover_checks(snapshot);
+    let check = preferred_check(&checks)?.clone();
+    let result = execute_discovered_check(&check, workspace_root, AUTO_VERIFY_TIMEOUT_SECS);
+    let outcome = outcome_for(&check, &result);
+    let output_suffix = format_auto_verify_suffix(&check, &result, &outcome);
+    Some(AutoVerifyReport {
+        check,
+        result,
+        outcome,
+        output_suffix,
+    })
+}
+
+fn execute_discovered_check(
+    check: &Check,
+    workspace_root: &Path,
+    timeout_secs: u64,
+) -> ToolResult {
+    let cmd = check.command();
+    crate::tools::run_shell::execute(
+        crate::tools::run_shell::RunShellOpts {
+            command: &cmd,
+            cwd: &check.cwd,
+            timeout_secs,
+        },
+        workspace_root,
+    )
+}
+
+fn format_auto_verify_suffix(
+    check: &Check,
+    result: &ToolResult,
+    outcome: &VerificationOutcome,
+) -> String {
+    let cwd = check.cwd.display();
+    let cmd = check.command();
+    let status = match outcome.status {
+        VerificationStatus::Passed => "passed",
+        VerificationStatus::Failed => "failed",
+        VerificationStatus::EnvironmentBlocked => "environment_blocked",
+    };
+    let body = if result.output.trim().is_empty() {
+        result
+            .error
+            .as_deref()
+            .unwrap_or("(no output)")
+            .to_string()
+    } else {
+        let mut out = result.output.clone();
+        if let Some(err) = &result.error {
+            if !err.is_empty() {
+                out.push_str("\n");
+                out.push_str(err);
+            }
+        }
+        out
+    };
+    // Cap so a huge test log does not blow the next model turn.
+    let body = truncate_chars(&body, 6_000);
+    format!(
+        "\n\n[auto-verify — ran `{cmd}` in `{cwd}` after edit — {status}]\n\
+         {body}\n\
+         If this check failed, fix the code (or a coherent failure group) before finishing. \
+         Do not re-run this same command identically without another edit."
+    )
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max).collect();
+    format!("{truncated}\n…[auto-verify output truncated]")
+}
+
 /// Match a command execution to a discovered check.
 ///
 /// Handles direct commands and simple `cd dir && command` shell sequences.
@@ -445,6 +554,39 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn auto_verify_can_be_disabled() {
+        std::env::set_var("AUTO_POST_EDIT_VERIFY", "0");
+        let none = try_auto_post_edit_verify(&snapshot(), Path::new("."));
+        std::env::remove_var("AUTO_POST_EDIT_VERIFY");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn auto_verify_suffix_marks_failure() {
+        let check = Check {
+            id: "root:test".into(),
+            kind: CheckKind::Test,
+            program: "npm".into(),
+            args: vec!["test".into()],
+            cwd: PathBuf::from("."),
+            confidence: 0.9,
+        };
+        let result = ToolResult {
+            success: false,
+            output: "# fail 2\n".into(),
+            diff: None,
+            error: Some("exited with code 1".into()),
+            stop_reason: None,
+        };
+        let outcome = outcome_for(&check, &result);
+        let suffix = format_auto_verify_suffix(&check, &result, &outcome);
+        assert!(suffix.contains("[auto-verify"));
+        assert!(suffix.contains("failed"));
+        assert!(suffix.contains("npm test"));
+        assert!(suffix.contains("# fail 2"));
     }
 
     #[test]

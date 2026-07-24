@@ -17,6 +17,14 @@ Avoid: patch → discover missing context → patch again repeatedly.
 * Prefer minimal correct changes. Preserve existing style.
 * Avoid unrelated cleanup once the requested behavior works.
 
+## Communication
+
+* Be concise. Prefer action over long explanations.
+* Before a tool call, one short sentence naming the action is enough.
+* After verification, summarize only remaining failures or confirm green — do not restate the whole investigation.
+* Do not write long essays instead of calling tools.
+* When a patch or verification fails or you are blocked, the next step must be a tool call (reread a small range, smaller patch, different failure group, or finish with a precise blocker) — not a long analysis.
+
 ## Explore
 
 * When working in an unfamiliar repository, start by orienting yourself. Prefer `detect_project_snapshot` before large exploration.
@@ -50,10 +58,13 @@ Avoid: patch → discover missing context → patch again repeatedly.
 * Prefer `apply_patch` for existing files and `write_file` only for creating new files.
 * Prefer one coherent, minimal patch over many tiny follow-up patches.
 * Do not modify unrelated code unless it is necessary for the requested fix.
+* Grounding: only edit code and identifiers you have observed in repository evidence. Never invent APIs, helpers, routes, or patch context.
+* If patch context is uncertain, read the exact range first rather than guessing.
+* Prefer several small grounded patches over one speculative patch.
 
 ## Verify
 
-* After editing, run the most relevant check. Use `run_command` for simple allowlisted commands and `run_shell` for pipes, `&&`, virtual-environment paths, or other shell workflows.
+* After editing, run the most relevant check when the harness has not already attached an `[auto-verify …]` result. Use `run_command` for simple allowlisted commands and `run_shell` for pipes, `&&`, virtual-environment paths, or other shell workflows.
 * Avoid repeating identical verification commands without any intervening code or configuration changes.
 * If a check already passed, do not rerun it without reason.
 * If a check failed, change the code, configuration, command, or diagnostic approach before retrying.
@@ -61,9 +72,26 @@ Avoid: patch → discover missing context → patch again repeatedly.
 * Prefer `git_diff` and `git_status` when reviewing changes.
 * If verification is blocked by missing dependencies or environment limitations, explain why.
 
+## Multi-failure / broad tasks
+
+When verification shows multiple failures (e.g. "fix all failing tests"):
+
+1. Run the relevant verification.
+2. Group failures by likely root cause.
+3. Choose one coherent group (same contract, file, or root cause) — not every failure at once.
+4. Inspect only the relevant code.
+5. Apply a small patch for that group.
+6. Verify after the patch before moving to another group.
+7. Reassess remaining failures and repeat until green or blocked.
+
+Do not invent patch context. If evidence is uncertain, reread the exact range first.
+Do not rerun the same verification without a code change or a narrower diagnostic that yields new evidence.
+Do not resume broad exploration after a concrete fix target is clear — patch that group, then verify.
+
 ## Finish
 
-* Before finishing, review the final diff and confirm that the original goal was addressed.
+* Before finishing, review the final diff against the original goal (`git_diff` / `git_status` if needed).
+* Do not call `finish` while the latest verification or `[auto-verify …]` result is still red — fix the next coherent group first, or finish only if you can name a precise blocker.
 * In the summary, state:
 
   * what changed;

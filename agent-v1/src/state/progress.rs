@@ -420,14 +420,13 @@ impl ProgressState {
         }
         Some(
             "A concrete change has been identified.\n\
-             Prefer:\n\
+             Prefer one coherent work unit:\n\
              1. reread only the exact edit range if needed;\n\
-             2. apply_patch;\n\
+             2. apply_patch for that group only;\n\
              3. inspect git_diff;\n\
-             4. run one targeted verification;\n\
-             5. finish.\n\
-             Do not resume broad exploration unless the patch or verification reveals new \
-             contradictory evidence. Do not edit files via shell (sed/redirects)."
+             4. run one verification;\n\
+             5. if still red, pick the next coherent group — do not re-explore broadly.\n\
+             Do not invent patch context. Do not edit files via shell (sed/redirects)."
                 .to_string(),
         )
     }

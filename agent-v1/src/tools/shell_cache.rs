@@ -3,9 +3,13 @@ use std::path::Path;
 
 use crate::tools::ToolResult;
 
-/// Max times the same verify command may be returned without an intervening edit:
+/// Max times the same non-verify command may be returned without an intervening edit:
 /// 1 = real execution, 2 = cached replay, 3+ = blocked.
 pub const MAX_IDENTICAL_SHELL_WITHOUT_EDIT: u32 = 2;
+
+/// Verify commands (tests/lint/build) get no soft cache replay: second identical
+/// attempt without an intervening edit is denied immediately.
+pub const MAX_IDENTICAL_VERIFY_WITHOUT_EDIT: u32 = 1;
 
 /// After an edit, only this many explore shells (git/grep/sed/…) are allowed
 /// until the next edit. Stops pathspec-thrash that bypasses exact-string dedup.
@@ -96,8 +100,16 @@ impl ShellCommandCache {
         };
         let entry = self.entries.get_mut(&key)?;
         entry.times_seen += 1;
+        let verify = is_verify_shell(command);
 
-        if entry.times_seen <= MAX_IDENTICAL_SHELL_WITHOUT_EDIT {
+        // Verify: no soft replay — identical re-run without a mutation is denied.
+        let allow_soft = if verify {
+            entry.times_seen <= MAX_IDENTICAL_VERIFY_WITHOUT_EDIT
+        } else {
+            entry.times_seen <= MAX_IDENTICAL_SHELL_WITHOUT_EDIT
+        };
+
+        if allow_soft {
             self.cache_hits += 1;
             let mut out = entry.result.clone();
             out.output = format!(
@@ -109,14 +121,19 @@ impl ShellCommandCache {
             Some(out)
         } else {
             self.blocked += 1;
+            let hint = if verify {
+                "Verification already ran with this exact command and nothing has changed since. \
+                 Do not re-verify identically. Apply a patch (or a narrower diagnostic), then verify again."
+            } else {
+                "Do not retry it. Call finish if the task is done, or apply a new edit / different command."
+            };
             Some(ToolResult {
                 success: false,
                 output: String::new(),
                 diff: None,
                 error: Some(format!(
                     "Blocked: identical {} already returned {} times since the last edit \
-                     (first at step {}). Do not retry it. Call finish if the task is done, \
-                     or apply a new edit / different command.",
+                     (first at step {}). {hint}",
                     kind_label(key.kind),
                     entry.times_seen,
                     entry.first_step
@@ -157,6 +174,35 @@ impl ShellCommandCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.explore_since_edit = 0;
+    }
+}
+
+/// True for test/lint/build-style commands that should not be re-run identically
+/// without an intervening edit.
+pub fn is_verify_shell(command: &str) -> bool {
+    let c = normalize_command(command).to_ascii_lowercase();
+    if c.contains("npm test")
+        || c.contains("npm run test")
+        || c.contains("yarn test")
+        || c.contains("pnpm test")
+        || c.contains("cargo test")
+        || c.contains("cargo check")
+        || c.contains("cargo build")
+        || c.contains("pytest")
+        || c.contains("node --test")
+        || c.contains("npx tsc")
+        || c.contains("npm run lint")
+        || c.contains("npm run build")
+        || c.contains("make test")
+        || c.contains("make check")
+    {
+        return true;
+    }
+    let bin = primary_binary(command);
+    match bin.as_str() {
+        "pytest" | "jest" | "vitest" | "mocha" | "phpunit" => true,
+        "go" => c.contains(" test"),
+        _ => false,
     }
 }
 
@@ -285,6 +331,35 @@ mod tests {
             "cd backend && .venv/bin/python manage.py test tasks"
         ));
         assert!(!is_explore_shell("npx tsc --noEmit"));
+    }
+
+    #[test]
+    fn classifies_verify_shells() {
+        assert!(is_verify_shell("npm test"));
+        assert!(is_verify_shell("cd fixture && npm test"));
+        assert!(is_verify_shell("cargo test --lib"));
+        assert!(is_verify_shell("npx tsc --noEmit"));
+        assert!(!is_verify_shell("git status"));
+        assert!(!is_verify_shell("echo hello"));
+    }
+
+    #[test]
+    fn identical_verify_is_blocked_without_soft_replay() {
+        let mut cache = ShellCommandCache::new();
+        let cwd = PathBuf::from(".");
+        let cmd = "npm test";
+
+        cache.store_live("run_shell", cmd, &cwd, 3, &ok("fail 10"));
+
+        let blocked = cache.before_execute("run_shell", cmd, &cwd).unwrap();
+        assert!(!blocked.success);
+        assert!(blocked
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Verification already ran"));
+        assert_eq!(cache.blocked, 1);
+        assert_eq!(cache.cache_hits, 0);
     }
 
     #[test]

@@ -98,11 +98,25 @@ fn format_patch_failure(
     engine_err: &impl std::fmt::Display,
 ) -> String {
     let expected = extract_expected_lines(patch);
+    let invented = invented_identifiers(patch, old_content);
     let mut out = format!(
         "Patch hunk did not match {}.\n\
-         Engine: {engine_err}\n",
+         Engine: {engine_err}\n\
+         Use only identifiers and exact lines that exist in the file — do not invent APIs or context.\n",
         path.display()
     );
+
+    if !invented.is_empty() {
+        out.push_str("\nIdentifiers in the patch that do not appear in the file:\n");
+        for id in invented.iter().take(8) {
+            out.push_str("  - ");
+            out.push_str(id);
+            out.push('\n');
+        }
+        out.push_str(
+            "These look invented or stale. Reread the file and patch only what is actually there.\n",
+        );
+    }
 
     if !expected.is_empty() {
         out.push_str("\nExpected context / lines to replace:\n");
@@ -136,6 +150,86 @@ fn format_patch_failure(
          Do not use sed/shell to edit the file.",
     );
     out
+}
+
+/// Tokens from patch +/- lines that look like identifiers but never appear in the file.
+fn invented_identifiers(patch: &str, file_content: &str) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if line.starts_with("---") || line.starts_with("+++") {
+            continue;
+        }
+        if !in_hunk {
+            if line.starts_with(' ') || line.starts_with('-') || line.starts_with('+') {
+                in_hunk = true;
+            } else {
+                continue;
+            }
+        }
+        let body = if let Some(rest) = line.strip_prefix('+').filter(|r| !r.starts_with('+')) {
+            rest
+        } else if let Some(rest) = line.strip_prefix('-').filter(|r| !r.starts_with('-')) {
+            rest
+        } else {
+            continue;
+        };
+        for tok in tokenize_identifiers(body) {
+            if !candidates.iter().any(|c| c == &tok) {
+                candidates.push(tok);
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .filter(|id| !file_content.contains(id.as_str()))
+        .collect()
+}
+
+fn tokenize_identifiers(s: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "if", "else", "for", "while", "return", "const", "let", "var", "function", "class",
+        "export", "import", "from", "default", "true", "false", "null", "undefined", "new",
+        "this", "typeof", "await", "async", "try", "catch", "throw", "switch", "case", "break",
+        "continue", "in", "of", "as", "type", "interface", "enum", "public", "private",
+        "static", "void", "string", "number", "boolean", "object", "any", "and", "or", "not",
+        "fn", "mut", "self", "impl", "use", "mod", "pub", "struct", "match", "Some", "None",
+        "Ok", "Err", "true", "false",
+    ];
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            push_ident(&mut out, &cur, STOP);
+            cur.clear();
+        }
+    }
+    if !cur.is_empty() {
+        push_ident(&mut out, &cur, STOP);
+    }
+    out
+}
+
+fn push_ident(out: &mut Vec<String>, cur: &str, stop: &[&str]) {
+    if cur.len() < 3 {
+        return;
+    }
+    if cur.chars().all(|c| c.is_ascii_digit()) {
+        return;
+    }
+    if !cur.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+        return;
+    }
+    if stop.iter().any(|s| s.eq_ignore_ascii_case(cur)) {
+        return;
+    }
+    out.push(cur.to_string());
 }
 
 /// Lines the hunk claims exist (context ` ` and removals `-`), without prefixes.
@@ -302,10 +396,11 @@ export const api = {\n\
         assert!(!result.success, "expected failure, got success: {:?}", result);
         let err = result.error.unwrap();
         assert!(err.contains("Patch hunk did not match"), "{err}");
+        assert!(err.contains("do not invent"), "{err}");
         assert!(err.contains("Regenerate the patch"), "{err}");
         assert!(
-            err.contains("due_date")
-                || err.contains("getTasks")
+            err.contains("Identifiers in the patch that do not appear")
+                || err.contains("due_date")
                 || err.contains("Expected")
                 || err.contains("Actual nearby"),
             "{err}"
