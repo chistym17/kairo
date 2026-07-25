@@ -1,5 +1,4 @@
 use crate::state::step::{Action, Step};
-use crate::tools::ToolResult;
 
 /// Bounded view of run step history for LLM context.
 #[derive(Debug, Clone)]

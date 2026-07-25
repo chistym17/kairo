@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::tools::run_command::{self, DEFAULT_TIMEOUT_SECS, MAX_TIMEOUT_SECS};
+use crate::tools::run_command::{self, MAX_TIMEOUT_SECS};
 use crate::tools::{resolve_workspace_cwd, truncate_output, ToolResult};
 
 pub struct RunShellOpts<'a> {
