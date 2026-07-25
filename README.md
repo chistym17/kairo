@@ -6,21 +6,23 @@ Local coding agent ([kairo.so](https://kairo.so)). Point it at a repo, **ask** r
 
 ### 1. Install
 
-**Option A — from GitHub**
+You need a stable [Rust toolchain](https://rustup.rs/).
 
 ```bash
-cargo install --git https://github.com/chistym17/agent-harness --bin kairo
+cargo install kairo
 ```
 
-**Option B — from a clone**
+That puts `kairo` on your `PATH`. Alternatives:
 
 ```bash
+# latest from GitHub (before / between crates.io releases)
+cargo install --git https://github.com/chistym17/agent-harness --bin kairo
+
+# from a local clone
 git clone https://github.com/chistym17/agent-harness.git
 cd agent-harness
 cargo install --path kairo
 ```
-
-You need a stable [Rust toolchain](https://rustup.rs/).
 
 ### 2. API key
 
