@@ -17,6 +17,6 @@ pub use builder::ContextBuilder;
 pub use cache_verify::{PrefixChangeReason, PrefixCompare};
 pub use manager::{ContextManager, ContextReduction};
 pub use prompt_layout::{PromptDiagnostics, PromptLayout};
-pub use system::default_system_prompt;
+pub use system::{ask_system_prompt, default_system_prompt};
 pub use stats::ContextStats;
 pub use types::{AgentContext, LlmRequest, WorkspaceContext};

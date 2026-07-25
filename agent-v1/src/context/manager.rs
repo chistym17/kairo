@@ -295,11 +295,10 @@ mod tests {
     fn prefers_keeping_recent_messages() {
         let dir = tempfile::tempdir().unwrap();
         let builder = ContextBuilder::new();
-        let mgr = ContextManager::new(4000, 0, 5); // keep last 5 if possible
 
         let mut msgs = Vec::new();
         for i in 0..30 {
-            msgs.push(Message::user(format!("old {i} {}", "x".repeat(50))));
+            msgs.push(Message::user(format!("old {i} {}", "x".repeat(200))));
         }
         // make last messages distinct
         msgs.push(Message::user("RECENT A"));
@@ -308,9 +307,16 @@ mod tests {
         msgs.push(Message::user("RECENT D"));
         msgs.push(Message::user("RECENT E"));
 
-        let (req, _full, _bounded, _reduction) =
+        // Calibrate the budget against the actual stable prefix so prompt or
+        // tool-schema growth does not turn this into a false failure: room for
+        // the five recent messages and the bounded summary of what was dropped,
+        // but not the full history.
+        let (_, recent_only) = builder.build_with_stats(dir.path(), "goal", &msgs[30..], &[]);
+        let mgr = ContextManager::new(recent_only.estimated_tokens + 500, 0, 5);
+
+        let (req, _full, _bounded, reduction) =
             mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None);
-        // If trimming happens, the policy should prefer keeping the most recent messages.
+        assert!(reduction.trimmed);
 
         let arr = req.messages.as_array().unwrap();
         let joined = arr
@@ -319,9 +325,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Expect recent messages to survive into context view.
+        // Trimming drops oldest first: the recent window survives while the
+        // oldest messages are represented only by the summary.
         assert!(joined.contains("RECENT A"));
         assert!(joined.contains("RECENT E"));
+        assert_eq!(reduction.dropped_session_messages, 30);
     }
 
     #[test]

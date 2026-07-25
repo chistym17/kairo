@@ -11,6 +11,18 @@ pub fn default_system_prompt() -> String {
         .to_string()
 }
 
+/// Active ask-mode prompt version (file under `prompts/`).
+pub const ACTIVE_ASK_PROMPT_VERSION: &str = "ask_v1";
+
+/// System prompt for read-only question answering ([`crate::api::AgentMode::Ask`]).
+///
+/// Source of truth: `prompts/prompt_ask_v1.md`.
+pub fn ask_system_prompt() -> String {
+    include_str!("../../prompts/prompt_ask_v1.md")
+        .trim()
+        .to_string()
+}
+
 pub fn compose_system_prompt(base: &str, project_instructions: Option<&str>) -> String {
     let base = crate::context::normalize::normalize_text(base);
     match project_instructions {
@@ -52,5 +64,17 @@ mod tests {
         assert!(p.contains("remaining risks"));
         assert!(!p.contains("unified diff"));
         assert!(!p.contains("RULE 0.1"));
+    }
+
+    #[test]
+    fn ask_prompt_is_read_only_and_finishes_with_an_answer() {
+        let p = ask_system_prompt();
+        assert!(p.contains("code-reading assistant"));
+        assert!(p.contains("every write tool is denied"));
+        assert!(p.contains("calling `finish` with the answer"));
+        assert!(p.contains("do not attempt to apply it"));
+        // Ask mode must not carry edit/verify workflow instructions.
+        assert!(!p.contains("## Edit"));
+        assert!(!p.contains("apply_patch` for existing files"));
     }
 }

@@ -73,7 +73,7 @@ pub async fn run(
         0,
     );
 
-    println!(
+    crate::agent_println!(
         "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n[agent] turn_intent: {} (metadata)\n",
         state.run_id,
         state.goal,
@@ -83,13 +83,13 @@ pub async fn run(
         state.turn_intent.as_str()
     );
     if step_delay_ms > 0 {
-        println!("[agent] step_delay: {}ms (opt-in pacing)", step_delay_ms);
+        crate::agent_println!("[agent] step_delay: {}ms (opt-in pacing)", step_delay_ms);
     }
 
     // Orientation once per run (no step cost). Refreshable via detect_project_snapshot.
     if state.project_snapshot.is_none() {
         let snap = tools::project_snapshot::detect(&state.workspace_root);
-        println!(
+        crate::agent_println!(
             "[agent] project snapshot: {} unit(s){}",
             snap.units.len(),
             if snap.truncated { " (truncated)" } else { "" }
@@ -104,7 +104,7 @@ pub async fn run(
             state.workspace_root.display().to_string(),
         ) {
             Ok((intel, stats)) => {
-                println!(
+                crate::agent_println!(
                     "[agent] repo index: {} file(s) in {}ms{}",
                     stats.files_indexed,
                     stats.build_ms,
@@ -125,7 +125,7 @@ pub async fn run(
                 state.repo_intel = Some(intel);
             }
             Err(e) => {
-                println!("[agent] repo index build failed: {e} — locate will rebuild per call");
+                crate::agent_println!("[agent] repo index build failed: {e} — locate will rebuild per call");
                 write_event(&state.run_id, "repo_index_build_failed", &e.to_string(), 0);
             }
         }
@@ -134,7 +134,7 @@ pub async fn run(
     loop {
         // ── 1. Check step limit before asking the LLM ──────────────────
         if state.is_exhausted() {
-            println!(
+            crate::agent_println!(
                 "\n[agent] max model turns ({}) reached — stopping ({} tool calls)",
                 state.max_steps, state.step_count
             );
@@ -143,14 +143,14 @@ pub async fn run(
             return reason;
         }
 
-        println!(
+        crate::agent_println!(
             "\n[agent] ── model turn {} (tool calls so far: {}) ──────────",
             state.model_turns, state.step_count
         );
 
         // ── 1.5. Throttle: wait before hitting the API ─────────────────
         if step_delay_ms > 0 && state.model_turns > 0 {
-            println!("[agent] waiting {}ms before next API call", step_delay_ms);
+            crate::agent_println!("[agent] waiting {}ms before next API call", step_delay_ms);
             write_event(
                 &state.run_id,
                 "step_delay",
@@ -206,7 +206,7 @@ pub async fn run(
             match actions_result {
                 Ok(calls) if calls.is_empty() => {
                     let msg = "model returned empty tool_calls".to_string();
-                    println!("[agent] {}", msg);
+                    crate::agent_println!("[agent] {}", msg);
                     write_event(&state.run_id, "malformed_tool_call", &msg, 0);
                     state.model_turns += 1;
                     emit(
@@ -220,7 +220,7 @@ pub async fn run(
                     continue;
                 }
                 Ok(calls) => {
-                    println!(
+                    crate::agent_println!(
                         "[agent] {} tool call(s): {}",
                         calls.len(),
                         calls
@@ -238,7 +238,7 @@ pub async fn run(
                 }
 
                 Err(LlmError::NoToolCall(text)) => {
-                    println!(
+                    crate::agent_println!(
                         "[agent] model returned text instead of tool call:\n{}",
                         &text[..text.len().min(300)]
                     );
@@ -253,6 +253,17 @@ pub async fn run(
                         state.exploration.model_turns_since_edit.saturating_add(1);
                     state.exploration.consecutive_single_readonly_turns = 0;
                     state.governance.note_no_tool_turn();
+
+                    if !text.trim().is_empty() {
+                        emit(
+                            observer,
+                            AgentEvent::ModelText {
+                                run_id: state.run_id.clone(),
+                                step_index: Some(state.step_count),
+                                text: text.clone(),
+                            },
+                        );
+                    }
 
                     // Green verify + essay loop (DeepSeek tool_choice=auto): force finish.
                     if state.completion.last_verify_success == Some(true) {
@@ -275,7 +286,7 @@ pub async fn run(
                                 ),
                                 0,
                             );
-                            println!(
+                            crate::agent_println!(
                                 "\n[agent] auto-finish: verification already passed and model \
                                  returned text {n}× instead of finish"
                             );
@@ -337,7 +348,7 @@ pub async fn run(
                 }
 
                 Err(LlmError::MalformedToolCall(msg)) => {
-                    println!("[agent] malformed tool call: {}", msg);
+                    crate::agent_println!("[agent] malformed tool call: {}", msg);
                     write_event(&state.run_id, "malformed_tool_call", &msg, 0);
                     state.model_turns += 1;
                     emit(
@@ -353,7 +364,7 @@ pub async fn run(
 
                 Err(LlmError::RateLimited) => {
                     let wait_ms: u64 = 15_000;
-                    println!("[agent] rate limited — waiting {}ms", wait_ms);
+                    crate::agent_println!("[agent] rate limited — waiting {}ms", wait_ms);
                     write_event(
                         &state.run_id,
                         "rate_limited",
@@ -366,7 +377,7 @@ pub async fn run(
 
                 Err(LlmError::ToolUseFailed(mut msg)) => {
                     if tool_use_max_retries == 0 {
-                        println!("[agent] tool_use_failed — retries disabled, stopping");
+                        crate::agent_println!("[agent] tool_use_failed — retries disabled, stopping");
                         write_event(
                             &state.run_id,
                             "tool_use_failed",
@@ -379,7 +390,7 @@ pub async fn run(
                     }
 
                     for attempt in 1..=tool_use_max_retries {
-                        println!(
+                        crate::agent_println!(
                             "[agent] tool_use_failed — retry {}/{} in {}ms",
                             attempt, tool_use_max_retries, tool_use_retry_delay_ms
                         );
@@ -445,7 +456,7 @@ pub async fn run(
                         }
                         match actions_result {
                             Ok(calls) if !calls.is_empty() => {
-                                println!(
+                                crate::agent_println!(
                                     "[agent] {} tool call(s) after tool_use_failed retry {}",
                                     calls.len(),
                                     attempt
@@ -472,7 +483,7 @@ pub async fn run(
                             Err(LlmError::ToolUseFailed(retry_msg)) => {
                                 msg = retry_msg;
                                 if attempt == tool_use_max_retries {
-                                    println!(
+                                    crate::agent_println!(
                                         "[agent] tool_use_failed — exhausted {} retries, stopping",
                                         tool_use_max_retries
                                     );
@@ -489,7 +500,7 @@ pub async fn run(
                             }
                             Err(LlmError::RateLimited) => {
                                 let wait_ms: u64 = 15_000;
-                                println!("[agent] rate limited — waiting {}ms", wait_ms);
+                                crate::agent_println!("[agent] rate limited — waiting {}ms", wait_ms);
                                 write_event(
                                     &state.run_id,
                                     "rate_limited",
@@ -602,7 +613,7 @@ pub async fn run(
                 ),
                 0,
             );
-            println!(
+            crate::agent_println!(
                 "\n[agent] post-edit idle complete — {:?}",
                 reason
             );
@@ -808,11 +819,28 @@ async fn execute_one_tool(
     // Persist task memory (plan / files / verification / decisions) when a session is attached.
     sync_task_to_session(state, session);
     if let Some(version) = plan_update_version {
+        emit_plan_updated(state, observer);
         if let Some(session) = session.as_deref_mut() {
             session.append_session_update(format!("Plan updated to v{version}."));
         }
     }
     stop
+}
+
+/// Surface the working plan to observers after a successful `update_plan`.
+fn emit_plan_updated(state: &AgentState, observer: Option<&dyn AgentObserver>) {
+    let Some(plan) = state.task.plan.as_ref() else {
+        return;
+    };
+    emit(
+        observer,
+        AgentEvent::PlanUpdated {
+            run_id: state.run_id.clone(),
+            version: plan.version,
+            objective: plan.objective.clone(),
+            steps: plan.steps.clone(),
+        },
+    );
 }
 
 /// Run a consecutive group of read-only tools concurrently (order preserved in history).
@@ -840,7 +868,7 @@ async fn execute_readonly_group(
     }
 
     state.parallel_tool_groups += 1;
-    println!(
+    crate::agent_println!(
         "[agent] parallel read-only group ({} tools): {}",
         group.len(),
         group
@@ -1646,6 +1674,15 @@ fn commit_tool_outcome(
                     state
                         .completion
                         .note_verification_outcome(model_turn, report.outcome.clone());
+                    emit(
+                        observer,
+                        AgentEvent::VerificationCompleted {
+                            run_id: state.run_id.clone(),
+                            command: report.check.command(),
+                            success: report.outcome.passed(),
+                            summary: report.outcome.summary.clone(),
+                        },
+                    );
                     write_event(
                         &state.run_id,
                         "auto_post_edit_verify",
@@ -1737,6 +1774,15 @@ fn commit_tool_outcome(
                 if let Some(outcome) = matched {
                     state.note_verification();
                     state.task.note_verification(&outcome);
+                    emit(
+                        observer,
+                        AgentEvent::VerificationCompleted {
+                            run_id: state.run_id.clone(),
+                            command: cmd.clone(),
+                            success: outcome.passed(),
+                            summary: outcome.summary.clone(),
+                        },
+                    );
                     state
                         .completion
                         .note_verification_outcome(model_turn, outcome);
@@ -1758,7 +1804,7 @@ fn commit_tool_outcome(
         );
     }
 
-    println!(
+    crate::agent_println!(
         "[agent] result: success={} output_len={}{}",
         result.success,
         result.output.len(),
@@ -1772,9 +1818,9 @@ fn commit_tool_outcome(
     if let Some(diff) = &result.diff {
         if !diff.is_empty() {
             let preview: String = diff.lines().take(10).collect::<Vec<_>>().join("\n");
-            println!("[agent] diff preview:\n{}", preview);
+            crate::agent_println!("[agent] diff preview:\n{}", preview);
             if diff.lines().count() > 10 {
-                println!("[agent] ... ({} total diff lines)", diff.lines().count());
+                crate::agent_println!("[agent] ... ({} total diff lines)", diff.lines().count());
             }
         }
     }
@@ -1812,7 +1858,7 @@ fn commit_tool_outcome(
     );
 
     if let Some(reason) = stop_reason {
-        println!("\n[agent] stopping: {:?}", reason);
+        crate::agent_println!("\n[agent] stopping: {:?}", reason);
         write_summary(state, &reason);
         Some(reason)
     } else {
@@ -1836,7 +1882,7 @@ fn write_summary(state: &AgentState, reason: &StopReason) {
 fn record_model_usage(state: &mut AgentState, usage: ModelUsage) {
     state.model_usage.record(usage);
     if let Some(last) = state.model_usage.last() {
-        println!("[usage] {}", render_call_line(last));
+        crate::agent_println!("[usage] {}", render_call_line(last));
         if let Ok(json) = serde_json::to_string(last) {
             write_event(&state.run_id, "model_usage", &json, 0);
         }
@@ -1847,13 +1893,13 @@ fn log_prompt_diagnostics(
     state: &mut AgentState,
     diagnostics: &crate::context::PromptDiagnostics,
 ) {
-    println!("[prompt] {}", diagnostics.render_compact());
+    crate::agent_println!("[prompt] {}", diagnostics.render_compact());
     if let Ok(json) = serde_json::to_string(diagnostics) {
         write_event(&state.run_id, "prompt_diagnostics", &json, 0);
     }
     if let Some(prev) = state.last_prompt_diagnostics.as_ref() {
         let cmp = crate::context::PrefixCompare::compare(prev, diagnostics);
-        println!("[cache-verify] {}", cmp.render_compact());
+        crate::agent_println!("[cache-verify] {}", cmp.render_compact());
         if let Ok(json) = serde_json::to_string(&cmp) {
             write_event(&state.run_id, "prefix_compare", &json, 0);
         }
@@ -2422,11 +2468,11 @@ fn mutating_path(action: &crate::state::step::Action) -> Option<String> {
 fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
     match err {
         LlmError::ApiError(msg) => {
-            println!("[agent] API error: {}", msg);
+            crate::agent_println!("[agent] API error: {}", msg);
             write_event(&state.run_id, "api_error", &msg, 0);
         }
         other => {
-            println!("[agent] unrecoverable LLM error: {}", other);
+            crate::agent_println!("[agent] unrecoverable LLM error: {}", other);
             write_event(
                 &state.run_id,
                 "llm_error",

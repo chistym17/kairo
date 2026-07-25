@@ -761,6 +761,6 @@ mod tests {
         );
         let g = p.after_decision_guidance().unwrap();
         assert!(g.contains("apply_patch"));
-        assert!(g.contains("Do not resume broad exploration"));
+        assert!(g.contains("do not re-explore broadly"));
     }
 }

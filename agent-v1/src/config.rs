@@ -5,7 +5,7 @@ use std::path::PathBuf;
 ///
 /// Phase 3 will extend this with benchmark-specific config
 /// (task file path, number of trials, output directory).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Which LLM backend to use: `groq`, `deepseek`, or `agentrouter`
     pub llm_provider: String,

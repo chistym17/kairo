@@ -47,6 +47,26 @@ pub enum AgentEvent {
         cmd: String,
         success: bool,
     },
+    /// Assistant prose (model answered with text instead of a tool call).
+    ModelText {
+        run_id: String,
+        step_index: Option<u32>,
+        text: String,
+    },
+    /// Working plan after a successful `update_plan`.
+    PlanUpdated {
+        run_id: String,
+        version: u32,
+        objective: String,
+        steps: Vec<crate::state::plan::PlanStep>,
+    },
+    /// A command that matched a repository-discovered check (model-run or auto-verify).
+    VerificationCompleted {
+        run_id: String,
+        command: String,
+        success: bool,
+        summary: String,
+    },
     Error {
         run_id: String,
         step_index: Option<u32>,
