@@ -24,24 +24,25 @@ You need a stable [Rust toolchain](https://rustup.rs/).
 
 ### 2. API key
 
-Create `~/.config/agent-v1/.env` or export vars in your shell. Easiest while developing: copy the example next to the binary’s working directory.
+On first run, `agent-v1` prompts for provider, API key, and model, then saves
+`~/.config/agent-v1/config.toml` (mode `0600`). After that, `cd` any repo and run
+without a project `.env`.
+
+To override (or for CI/dev), export env vars or use a local `.env`:
 
 ```bash
 # from a clone:
 cp agent-v1/.env.example agent-v1/.env
 ```
 
-Edit and set **one** provider:
-
-| Provider | In `.env` |
-|----------|-----------|
+| Provider | Env |
+|----------|-----|
 | [Groq](https://console.groq.com) | `LLM_PROVIDER=groq` + `GROQ_API_KEY=…` |
 | [DeepSeek](https://platform.deepseek.com) | `LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY=…` |
 | [AgentRouter](https://agentrouter.org/console/token) | `LLM_PROVIDER=agentrouter` + `AGENTROUTER_API_KEY=…` |
 
-Optional: `MODEL_ID`. Full list: [`agent-v1/.env.example`](agent-v1/.env.example).
-
-Never commit `.env` — it is gitignored.
+Optional: `MODEL_ID`. Priority: env / `.env` → user `config.toml` → defaults.
+Never commit secrets.
 
 ### 3. Run
 
@@ -53,6 +54,7 @@ agent-v1                              # interactive agent
 agent-v1 ask "Where is authentication handled?"
 agent-v1 agent --edit-policy auto --task "Fix the failing tests"
 agent-v1 serve --port 8787            # → http://127.0.0.1:8787
+agent-v1 config                       # change provider / model / API key
 ```
 
 Override with `--workspace /other/path` when needed. Without `cargo install`, use `cargo run -p agent-v1 --release --` from the harness repo (load `.env` from `agent-v1/` or export keys).
@@ -107,8 +109,8 @@ cargo run -p agent-v1 --example basic_agent -- --ask /path/to/repo "…"
 |---------|-----|
 | Wrong workspace | `cd` to the repo, or pass `--workspace` |
 | `workspace does not exist` | Path must be an existing directory |
-| Missing API key | Set the key for your `LLM_PROVIDER` (see table above) |
-| `.env` ignored | Run from a dir with `.env`, or export vars; `dotenv` loads cwd `.env` |
+| Missing API key | Run `agent-v1` once for the setup wizard, or set `*_API_KEY` / edit `~/.config/agent-v1/config.toml` |
+| `.env` ignored | Env overrides user config; `dotenv` loads cwd `.env` — or rely on `config.toml` |
 | Edits blocked in oneshot + confirm | Use interactive/`serve`, or `--edit-policy auto` |
 | Port in use | `serve --port 8790` |
 

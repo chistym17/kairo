@@ -1,7 +1,7 @@
 //! Product CLI for `agent-v1`.
 //!
-//! Subcommands: `ask`, `agent`, `serve`. Bare `agent-v1` starts interactive agent
-//! mode and auto-detects the workspace from the nearest `.git` root.
+//! Subcommands: `ask`, `agent`, `serve`, `config`. Bare `agent-v1` starts interactive
+//! agent mode and auto-detects the workspace from the nearest `.git` root.
 
 mod args;
 mod output;
@@ -22,11 +22,17 @@ Usage:
   agent-v1 ask [\"question\"]
   agent-v1 agent [--edit-policy confirm|auto|readonly] [--task \"…\" | \"…\"]
   agent-v1 serve [--port 8787]
+  agent-v1 config                       # view / edit provider, model, API key
 
 Workspace (auto-detected; --workspace optional):
   1. --workspace <path>
   2. nearest parent directory containing .git
   3. current directory
+
+Provider config (~/.config/agent-v1/config.toml):
+  First run prompts for provider, API key, and model.
+  `agent-v1 config` edits the same file later.
+  Env vars (LLM_PROVIDER, *_API_KEY, MODEL_ID) override the file.
 
 Options:
   --workspace <path>     Override auto-detected repo root
@@ -43,6 +49,7 @@ Examples:
   agent-v1 ask \"Where is auth handled?\"
   agent-v1 agent --edit-policy auto --task \"Fix the failing tests\"
   agent-v1 serve --port 8787
+  agent-v1 config
 "
     );
 }

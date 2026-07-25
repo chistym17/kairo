@@ -3,6 +3,7 @@ pub mod authorization;
 pub mod governance;
 pub mod cli;
 pub mod config;
+pub mod user_config;
 pub mod llm;
 pub mod logging;
 pub mod loop_engine;

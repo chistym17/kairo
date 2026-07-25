@@ -1,10 +1,11 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
 use crate::api::{AgentConfig, AgentEvent, AgentMode, AgentSession, EditPolicy, RunResult, SessionSource};
 use crate::logging;
+use crate::user_config;
 
 use super::args::{CliArgs, Command, OutputFormat, SessionArg};
 use super::output::{exit_code, EventSink};
@@ -12,6 +13,11 @@ use super::print_usage;
 use super::workspace::{current_branch, detect_workspace, display_path};
 
 pub async fn run(cli: CliArgs) -> Result<i32> {
+    if matches!(cli.command, Command::Config) {
+        user_config::run_config_menu().context("config")?;
+        return Ok(0);
+    }
+
     if matches!(cli.command, Command::Serve) {
         return run_serve(cli).await;
     }
@@ -19,6 +25,11 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
     if matches!(cli.output, OutputFormat::Jsonl) {
         logging::set_quiet(true);
     }
+
+    let interactive_setup = io::stdin().is_terminal()
+        && !matches!(cli.output, OutputFormat::Jsonl);
+    user_config::ensure_configured(interactive_setup)
+        .context("provider setup")?;
 
     let workspace = resolve_workspace(cli.workspace.clone())?;
     print_workspace_banner(&workspace, matches!(cli.output, OutputFormat::Jsonl));
@@ -69,6 +80,10 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
 }
 
 async fn run_serve(cli: CliArgs) -> Result<i32> {
+    let interactive_setup = io::stdin().is_terminal();
+    user_config::ensure_configured(interactive_setup)
+        .context("provider setup")?;
+
     let workspace = resolve_workspace(cli.workspace.clone())?;
     print_workspace_banner(&workspace, false);
     let mode = AgentMode::Agent;

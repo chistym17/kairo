@@ -98,7 +98,8 @@ pub enum SessionSource {
 /// Everything needed to open an [`crate::api::AgentSession`].
 ///
 /// Build with [`AgentConfig::builder`]. Provider credentials come from the
-/// environment (`LLM_PROVIDER`, `*_API_KEY`) unless set explicitly.
+/// builder, then environment (`LLM_PROVIDER`, `*_API_KEY`, `MODEL_ID`), then
+/// `~/.config/agent-v1/config.toml`.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub(crate) workspace: PathBuf,
@@ -240,26 +241,21 @@ impl AgentConfigBuilder {
             AgentMode::Agent => self.edit_policy.unwrap_or(mode.default_edit_policy()),
         };
 
-        let provider = self
-            .provider
-            .unwrap_or_else(|| env_or("LLM_PROVIDER", "groq"))
-            .to_ascii_lowercase();
-        let model = self
-            .model
-            .unwrap_or_else(|| env_or("MODEL_ID", default_model_for(&provider)));
-
-        let key_var = match provider.as_str() {
-            "groq" => "GROQ_API_KEY",
-            "deepseek" => "DEEPSEEK_API_KEY",
-            "agentrouter" => "AGENTROUTER_API_KEY",
-            other => bail!(
-                "unknown provider {other:?}: use \"groq\", \"deepseek\", or \"agentrouter\""
-            ),
-        };
-        let api_key = match self.api_key {
-            Some(key) => key,
-            None => std::env::var(key_var).unwrap_or_default(),
-        };
+        let provider = crate::user_config::resolve_provider(self.provider);
+        if !crate::user_config::is_known_provider(&provider) {
+            bail!(
+                "unknown provider {provider:?}: use \"groq\", \"deepseek\", or \"agentrouter\""
+            );
+        }
+        let model = crate::user_config::resolve_model(self.model, &provider);
+        let key_var = crate::user_config::key_env_var(&provider);
+        let api_key = crate::user_config::resolve_api_key(self.api_key, &provider);
+        if api_key.trim().is_empty() {
+            bail!(
+                "missing API key for provider {provider}. \
+                 Set {key_var}, or run agent-v1 once to save ~/.config/agent-v1/config.toml"
+            );
+        }
 
         let base_url = self
             .base_url
@@ -314,14 +310,6 @@ impl AgentConfigBuilder {
                 .unwrap_or(std::time::Duration::from_secs(600)),
             inner,
         })
-    }
-}
-
-fn default_model_for(provider: &str) -> &'static str {
-    match provider {
-        "deepseek" => "deepseek-v4-flash",
-        "agentrouter" => "glm-5.2",
-        _ => "llama-3.1-70b-versatile",
     }
 }
 
