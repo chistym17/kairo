@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::api::{AgentConfig, AgentEvent, AgentMode, AgentSession, EditPolicy, RunResult, SessionSource};
 use crate::logging;
@@ -9,6 +9,7 @@ use crate::logging;
 use super::args::{CliArgs, Command, OutputFormat, SessionArg};
 use super::output::{exit_code, EventSink};
 use super::print_usage;
+use super::workspace::{current_branch, detect_workspace, display_path};
 
 pub async fn run(cli: CliArgs) -> Result<i32> {
     if matches!(cli.command, Command::Serve) {
@@ -20,6 +21,8 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
     }
 
     let workspace = resolve_workspace(cli.workspace.clone())?;
+    print_workspace_banner(&workspace, matches!(cli.output, OutputFormat::Jsonl));
+
     let mode = cli.mode();
     let edit_policy = match mode {
         AgentMode::Ask => EditPolicy::ReadOnly,
@@ -67,6 +70,7 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
 
 async fn run_serve(cli: CliArgs) -> Result<i32> {
     let workspace = resolve_workspace(cli.workspace.clone())?;
+    print_workspace_banner(&workspace, false);
     let mode = AgentMode::Agent;
     let edit_policy = cli
         .edit_policy
@@ -155,26 +159,20 @@ async fn drain_turn(
 }
 
 fn resolve_workspace(cli_workspace: Option<PathBuf>) -> Result<PathBuf> {
-    let raw = cli_workspace
-        .or_else(|| {
-            std::env::var("WORKSPACE_ROOT")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .map(PathBuf::from)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "workspace not set — pass --workspace <path> or set WORKSPACE_ROOT in .env"
-            )
-        })?;
+    detect_workspace(cli_workspace).context("failed to detect workspace")
+}
 
-    if !raw.exists() {
-        bail!("workspace does not exist: {}", raw.display());
+fn print_workspace_banner(workspace: &std::path::Path, jsonl: bool) {
+    let branch = current_branch(workspace).unwrap_or_else(|| "(not a git repo)".to_string());
+    let line_ws = format!("Workspace: {}", display_path(workspace));
+    let line_br = format!("Branch: {branch}");
+    if jsonl {
+        eprintln!("[agent-v1] {line_ws}");
+        eprintln!("[agent-v1] {line_br}");
+    } else {
+        println!("{line_ws}");
+        println!("{line_br}");
     }
-    if !raw.is_dir() {
-        bail!("workspace is not a directory: {}", raw.display());
-    }
-    Ok(raw.canonicalize().unwrap_or(raw))
 }
 
 fn session_label(arg: &SessionArg) -> String {

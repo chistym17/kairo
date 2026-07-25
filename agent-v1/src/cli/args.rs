@@ -58,9 +58,17 @@ pub struct CliArgs {
 
 /// Parse `argv` (without the program name). Returns `None` when help was printed.
 pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
+    // Bare `agent-v1` → interactive agent; workspace is auto-detected at run time.
     if args.is_empty() {
-        print_usage();
-        return Ok(None);
+        return Ok(Some(CliArgs {
+            command: Command::Agent,
+            workspace: None,
+            edit_policy: None,
+            output: OutputFormat::Text,
+            task: None,
+            session: SessionArg::New,
+            port: 8787,
+        }));
     }
 
     let first = args[0].as_str();
@@ -73,15 +81,12 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         "ask" => (Command::Ask, &args[1..]),
         "agent" => (Command::Agent, &args[1..]),
         "serve" => (Command::Serve, &args[1..]),
-        other if other.starts_with('-') => {
-            return Err(format!(
-                "missing subcommand before '{other}'. Use: ask | agent | serve\n\
-                 Try: agent-v1 --help"
-            ));
-        }
+        // Flags without a subcommand → agent (e.g. `agent-v1 --edit-policy auto`).
+        flag if flag.starts_with('-') => (Command::Agent, args),
         other => {
             return Err(format!(
                 "unknown subcommand '{other}'. Use: ask | agent | serve\n\
+                 Or run bare `agent-v1` for interactive agent mode.\n\
                  Try: agent-v1 --help"
             ));
         }
@@ -215,6 +220,24 @@ mod tests {
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn bare_invocation_is_interactive_agent() {
+        let cli = parse_args(&[]).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Agent);
+        assert!(cli.task.is_none());
+        assert_eq!(cli.session, SessionArg::New);
+        assert!(cli.workspace.is_none());
+    }
+
+    #[test]
+    fn flags_without_subcommand_default_to_agent() {
+        let cli = parse_args(&args(&["--edit-policy", "auto"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cli.command, Command::Agent);
+        assert_eq!(cli.edit_policy, Some(EditPolicy::Auto));
     }
 
     #[test]

@@ -39,44 +39,45 @@ Edit and set **one** provider:
 | [DeepSeek](https://platform.deepseek.com) | `LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY=…` |
 | [AgentRouter](https://agentrouter.org/console/token) | `LLM_PROVIDER=agentrouter` + `AGENTROUTER_API_KEY=…` |
 
-Optional: `MODEL_ID`, `WORKSPACE_ROOT`. Full list: [`agent-v1/.env.example`](agent-v1/.env.example).
+Optional: `MODEL_ID`. Full list: [`agent-v1/.env.example`](agent-v1/.env.example).
 
 Never commit `.env` — it is gitignored.
 
 ### 3. Run
 
-From a directory where `.env` is loadable (e.g. `agent-v1/`), or with vars exported:
+From your project (workspace is auto-detected from the nearest `.git` root):
 
 ```bash
-# Ask — read-only, answers from the repo
-agent-v1 ask --workspace /path/to/your/repo "Where is authentication handled?"
-
-# Agent — edits; default policy is confirm (you approve the first edit)
-agent-v1 agent --workspace /path/to/your/repo
-
-# One-shot change (auto-apply; use only when you trust the run)
-agent-v1 agent --workspace /path/to/your/repo --edit-policy auto --task "Fix the failing tests"
-
-# Local web UI (127.0.0.1 only)
-agent-v1 serve --workspace /path/to/your/repo --port 8787
-# → open http://127.0.0.1:8787
+cd /path/to/your/repo
+agent-v1                              # interactive agent
+agent-v1 ask "Where is authentication handled?"
+agent-v1 agent --edit-policy auto --task "Fix the failing tests"
+agent-v1 serve --port 8787            # → http://127.0.0.1:8787
 ```
 
-Without `cargo install`, prefix with `cargo run -p agent-v1 --release --` from the repo root (or `cd agent-v1 && cargo run --release --`).
+Override with `--workspace /other/path` when needed. Without `cargo install`, use `cargo run -p agent-v1 --release --` from the harness repo (load `.env` from `agent-v1/` or export keys).
+
+Startup prints:
+
+```text
+Workspace: ~/projects/shop
+Branch: main
+```
 
 ## What to try first
 
-1. **Ask:** `What's in this repo? Give a short overview.`
-2. **Ask:** `Why might the tests be failing?` (no edits)
-3. **Agent:** `Fix the failing tests.` — approve the first edit with **Enter** / `t`
-4. **Serve:** open the UI, toggle Ask ↔ Agent, send the same prompts
+1. `cd` into a repo and run `agent-v1`
+2. **Ask:** `What's in this repo? Give a short overview.`
+3. **Ask:** `Why might the tests be failing?` (no edits)
+4. **Agent:** `Fix the failing tests.` — approve the first edit with **Enter** / `t`
+5. **Serve:** open the UI, toggle Ask ↔ Agent, send the same prompts
 
 ## Modes and safety
 
 | Command | Default edit policy | Behavior |
 |---------|---------------------|----------|
+| `agent-v1` / `agent` | `confirm` | Pause before the first workspace edit |
 | `ask` | always `readonly` | Explore and answer; cannot write |
-| `agent` | `confirm` | Pause before the first workspace edit |
 | `agent --edit-policy auto` | `auto` | Apply edits without prompting |
 | `serve` | `confirm` (overridable) | Same engine; approvals in the browser |
 
@@ -104,10 +105,10 @@ cargo run -p agent-v1 --example basic_agent -- --ask /path/to/repo "…"
 
 | Symptom | Fix |
 |---------|-----|
-| `workspace not set` | Pass `--workspace` or set `WORKSPACE_ROOT` |
+| Wrong workspace | `cd` to the repo, or pass `--workspace` |
 | `workspace does not exist` | Path must be an existing directory |
 | Missing API key | Set the key for your `LLM_PROVIDER` (see table above) |
-| `.env` ignored | Run from `agent-v1/`, or export vars; `dotenv` loads cwd `.env` |
+| `.env` ignored | Run from a dir with `.env`, or export vars; `dotenv` loads cwd `.env` |
 | Edits blocked in oneshot + confirm | Use interactive/`serve`, or `--edit-policy auto` |
 | Port in use | `serve --port 8790` |
 

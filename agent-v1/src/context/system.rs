@@ -47,6 +47,10 @@ mod tests {
         assert!(p.contains("## Communication"));
         assert!(p.contains("Prefer action over long explanations"));
         assert!(p.contains("next step must be a tool call"));
+        assert!(p.contains("## Talk vs edit"));
+        assert!(p.contains("latest user message is the active objective"));
+        assert!(p.contains("Do not write or update markdown/docs"));
+        assert!(p.contains("files you did not touch"));
         assert!(p.contains("## Explore"));
         assert!(p.contains("## Contracts and boundaries"));
         assert!(p.contains("## Plan"));

@@ -1,13 +1,16 @@
 //! Product CLI for `agent-v1`.
 //!
-//! Subcommands: `ask`, `agent`, `serve` (stub until Milestone 4).
+//! Subcommands: `ask`, `agent`, `serve`. Bare `agent-v1` starts interactive agent
+//! mode and auto-detects the workspace from the nearest `.git` root.
 
 mod args;
 mod output;
 mod run;
+mod workspace;
 
 pub use args::{parse_args, CliArgs, Command, OutputFormat, SessionArg};
 pub use run::{main_from_env, run};
+pub use workspace::{current_branch, detect_workspace, display_path};
 
 pub fn print_usage() {
     eprintln!(
@@ -15,14 +18,18 @@ pub fn print_usage() {
 agent-v1 — local coding agent
 
 Usage:
-  agent-v1 ask   --workspace <path> [--session <id>] [\"question\"]
-  agent-v1 agent --workspace <path> [--edit-policy confirm|auto|readonly]
-                 [--session <id>] [--output text|jsonl] [--task \"…\" | \"…\"]
-  agent-v1 serve --workspace <path> [--port 8787] [--edit-policy confirm|auto]
-                 # local web UI (localhost only)
+  agent-v1                              # interactive agent in this repo
+  agent-v1 ask [\"question\"]
+  agent-v1 agent [--edit-policy confirm|auto|readonly] [--task \"…\" | \"…\"]
+  agent-v1 serve [--port 8787]
+
+Workspace (auto-detected; --workspace optional):
+  1. --workspace <path>
+  2. nearest parent directory containing .git
+  3. current directory
 
 Options:
-  --workspace <path>     Repository root (or WORKSPACE_ROOT in .env)
+  --workspace <path>     Override auto-detected repo root
   --edit-policy <p>      Agent mode: confirm (default) | auto | readonly
   --output <fmt>         text (default) | jsonl  (machine-readable events)
   --task <text>          One-shot task (otherwise interactive)
@@ -32,11 +39,10 @@ Options:
   -h, --help             Show this help
 
 Examples:
-  agent-v1 ask --workspace ./my-app \"Where is auth handled?\"
-  agent-v1 agent --workspace ./my-app
-  agent-v1 agent --workspace ./my-app --edit-policy auto --task \"Fix the failing tests\"
-  agent-v1 agent --workspace ./my-app --task \"Fix tests\" --output jsonl
-  agent-v1 serve --workspace ./my-app --port 8787
+  cd ~/projects/shop && agent-v1
+  agent-v1 ask \"Where is auth handled?\"
+  agent-v1 agent --edit-policy auto --task \"Fix the failing tests\"
+  agent-v1 serve --port 8787
 "
     );
 }

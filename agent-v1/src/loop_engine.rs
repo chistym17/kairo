@@ -42,6 +42,9 @@ pub async fn run(
 ) -> StopReason {
     if let Some(session) = session.as_deref_mut() {
         state.authorization = session.authorization.clone();
+        // New user message = new turn: ApproveForTask does not carry across sends.
+        state.authorization.revoke_task_approvals();
+        session.authorization.revoke_task_approvals();
         state.task = session.task.clone();
         if session.intent_pinned {
             state.turn_intent = session.declared_intent;

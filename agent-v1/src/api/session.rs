@@ -561,6 +561,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approve_for_task_does_not_carry_to_the_next_send() {
+        let dir = workspace();
+        let session = AgentSession::open_with_client(
+            config(&dir, AgentMode::Agent, EditPolicy::Confirm),
+            ScriptedLlm::boxed(vec![
+                write_action(),
+                Action::Finish {
+                    summary: "created created.txt".to_string(),
+                },
+                Action::WriteFile {
+                    path: PathBuf::from("second.txt"),
+                    content: "second\n".to_string(),
+                },
+                Action::Finish {
+                    summary: "created second.txt".to_string(),
+                },
+            ]),
+        )
+        .unwrap();
+        let mut events = session.subscribe().unwrap();
+
+        session.send("create created.txt").await.unwrap();
+        let (_, first) =
+            run_turn(&session, &mut events, Some(ApprovalDecision::ApproveForTask)).await;
+        assert!(first
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        assert!(dir.path().join("created.txt").exists());
+
+        // New send must ask again even after ApproveForTask on the previous turn.
+        session.send("create second.txt").await.unwrap();
+        let (_, second) =
+            run_turn(&session, &mut events, Some(ApprovalDecision::ApproveForTask)).await;
+        assert!(
+            second
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })),
+            "expected a fresh approval on the next send, got: {second:?}"
+        );
+        assert!(dir.path().join("second.txt").exists());
+        session.shutdown().unwrap();
+    }
+
+    #[tokio::test]
     async fn rejected_edit_leaves_the_workspace_untouched() {
         let dir = workspace();
         let session = AgentSession::open_with_client(
