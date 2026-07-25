@@ -1,6 +1,6 @@
 [workspace]
-members = ["agent-v1"]
+members = ["kairo"]
 resolver = "2"
 
 # Keep the agent binary as the install target; benchmarks stay in-tree.
-default-members = ["agent-v1"]
+default-members = ["kairo"]

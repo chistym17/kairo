@@ -9,12 +9,12 @@ __pycache__/
 *.pyc
 
 # Agent local state
-agent-v1/sessions/
-agent-v1/logs/
-agent-v1/benchmarks/worktrees/
-agent-v1/benchmarks/results/
-agent-v1/benchmarks/workspaces/
-agent-v1/benchmarks/repo/
+kairo/sessions/
+kairo/logs/
+kairo/benchmarks/worktrees/
+kairo/benchmarks/results/
+kairo/benchmarks/workspaces/
+kairo/benchmarks/repo/
 
 # Local / scratch (not part of the product)
 js-real-repo/
@@ -26,8 +26,8 @@ cache.txt
 
 # Standalone eval fixture (has its own git + buggy-baseline tag)
 test-fixture/
-agent-v1/EVAL_FIXTURE.md
-agent-v1/CACHE_VERIFY.md
-agent-v1/imporv.md
+kairo/EVAL_FIXTURE.md
+kairo/CACHE_VERIFY.md
+kairo/imporv.md
 final-plan.md
 portfolio-v1-gaps.md
