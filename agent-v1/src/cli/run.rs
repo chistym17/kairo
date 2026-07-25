@@ -111,14 +111,19 @@ async fn run_oneshot(
     task: String,
 ) -> Result<i32> {
     let mut events = session.subscribe().context("event stream")?;
-    session.send(task).await?;
-    let result = drain_turn(session, &mut events, sink).await?;
-    Ok(exit_code(&result))
+    sink.begin_turn();
+    match run_turn(session, &mut events, sink, task).await {
+        Ok(result) => Ok(exit_code(&result)),
+        Err(e) => {
+            sink.turn_failed(&e);
+            Ok(1)
+        }
+    }
 }
 
 async fn run_interactive(session: &AgentSession, sink: &mut EventSink) -> Result<i32> {
     let mut events = session.subscribe().context("event stream")?;
-    sink.info("interactive — type a task, /exit to quit");
+    sink.info("Type a task. /help for commands, /exit to quit.");
 
     let mut last_code = 0;
     loop {
@@ -133,20 +138,42 @@ async fn run_interactive(session: &AgentSession, sink: &mut EventSink) -> Result
             continue;
         }
         if matches!(line.as_str(), "/exit" | "/quit" | "exit" | "quit") {
-            sink.info("exiting");
+            sink.info("Bye.");
             break;
         }
         if line == "/help" {
-            eprintln!("commands: /exit  /help");
+            eprintln!("commands: /exit  /help  /config");
             eprintln!("type any other line to send it as a task");
             continue;
         }
+        if line == "/config" {
+            eprintln!("Run `agent-v1 config` in another terminal, or exit and reconfigure.");
+            continue;
+        }
 
-        session.send(line).await?;
-        let result = drain_turn(session, &mut events, sink).await?;
-        last_code = exit_code(&result);
+        sink.begin_turn();
+        match run_turn(session, &mut events, sink, line).await {
+            Ok(result) => {
+                last_code = exit_code(&result);
+            }
+            Err(e) => {
+                // Keep the session open so the user can retry.
+                sink.turn_failed(&e);
+                last_code = 1;
+            }
+        }
     }
     Ok(last_code)
+}
+
+async fn run_turn(
+    session: &AgentSession,
+    events: &mut crate::api::EventStream,
+    sink: &mut EventSink,
+    task: String,
+) -> Result<RunResult> {
+    session.send(task).await.context("failed to start turn")?;
+    drain_turn(session, events, sink).await
 }
 
 async fn drain_turn(
@@ -168,7 +195,12 @@ async fn drain_turn(
         sink.emit(&event);
 
         if let Some(request) = approval {
-            sink.handle_approval(session, request).await?;
+            let id = request.id.clone();
+            if let Err(e) = sink.handle_approval(session, request).await {
+                // Unblock the worker so this turn can finish; keep the REPL alive.
+                let _ = session.reject(id).await;
+                sink.turn_failed(&e);
+            }
         }
 
         if let AgentEvent::Finished { result } = event {
