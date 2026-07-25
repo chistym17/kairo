@@ -1,75 +1,104 @@
 # agent-harness
 
-Minimal Rust coding-agent runtime: point it at **any** git repo, explore, plan, edit (with approval), and finish.
+Local coding agent in Rust. Point it at a repo, **ask** read-only questions, or run **agent** mode to plan, edit (with approval), and verify — from the terminal or a localhost UI.
 
-## Prerequisites
+## Five minutes to first run
 
-- Rust toolchain ([rustup](https://rustup.rs/)) — stable
-- An LLM API key (Groq, DeepSeek, or AgentRouter)
+### 1. Install
 
-## Install
-
-```bash
-git clone <this-repo-url>
-cd agent-harness/agent-v1
-cp .env.example .env
-# edit .env: set LLM_PROVIDER, API key, and optionally WORKSPACE_ROOT
-cargo build --release
-```
-
-Optional install:
+**Option A — from GitHub**
 
 ```bash
-cargo install --path .
+cargo install --git https://github.com/chistym17/agent-harness --bin agent-v1
 ```
 
-## Run
-
-From `agent-v1/` (so `.env` loads):
+**Option B — from a clone**
 
 ```bash
-# Interactive — confirm-before-edit by default
-cargo run --release -- --workspace /path/to/your/repo
-
-# Or set WORKSPACE_ROOT in .env, then:
-cargo run --release
-
-# One-shot
-cargo run --release -- --workspace /path/to/your/repo "fix the failing test"
+git clone https://github.com/chistym17/agent-harness.git
+cd agent-harness
+cargo install --path agent-v1
 ```
 
-Resume a session:
+You need a stable [Rust toolchain](https://rustup.rs/).
+
+### 2. API key
+
+Create `~/.config/agent-v1/.env` or export vars in your shell. Easiest while developing: copy the example next to the binary’s working directory.
 
 ```bash
-cargo run --release -- --workspace /path/to/your/repo --session <id>
+# from a clone:
+cp agent-v1/.env.example agent-v1/.env
 ```
 
-## First session (suggested)
+Edit and set **one** provider:
 
-1. `What’s in this repo? Give a short overview.`
-2. `Find one small issue and propose a plan (don’t edit yet).` — or paste your own bug
-3. `Execute the plan.` — on the first edit: **Enter** or `t` = approve for the rest of the task
-4. `Show the diff and summarize.`
+| Provider | In `.env` |
+|----------|-----------|
+| [Groq](https://console.groq.com) | `LLM_PROVIDER=groq` + `GROQ_API_KEY=…` |
+| [DeepSeek](https://platform.deepseek.com) | `LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY=…` |
+| [AgentRouter](https://agentrouter.org/console/token) | `LLM_PROVIDER=agentrouter` + `AGENTROUTER_API_KEY=…` |
 
-Useful slash commands: `/overview` `/intent plan` `/intent execute` `/plan` `/task` `/exit`
+Optional: `MODEL_ID`, `WORKSPACE_ROOT`. Full list: [`agent-v1/.env.example`](agent-v1/.env.example).
 
-## Safety defaults
+Never commit `.env` — it is gitignored.
 
-| Mode | Edit policy |
-|------|-------------|
-| Interactive | `confirm` unless `EDIT_POLICY` is set |
-| One-shot | `auto` unless `EDIT_POLICY` is set |
+### 3. Run
 
-Approvals: **Enter** / `t` = approve for task · `a` = once · `r` = reject. Shell commands that mutate the workspace (e.g. `sed -i`) are blocked — use `apply_patch`.
+From a directory where `.env` is loadable (e.g. `agent-v1/`), or with vars exported:
 
-## Config
+```bash
+# Ask — read-only, answers from the repo
+agent-v1 ask --workspace /path/to/your/repo "Where is authentication handled?"
 
-See [`agent-v1/.env.example`](agent-v1/.env.example). Important vars:
+# Agent — edits; default policy is confirm (you approve the first edit)
+agent-v1 agent --workspace /path/to/your/repo
 
-- `LLM_PROVIDER` / provider API key
-- `WORKSPACE_ROOT` (or `--workspace`)
-- `EDIT_POLICY` — `auto` \| `confirm` \| `readonly`
-- `MAX_STEPS`
+# One-shot change (auto-apply; use only when you trust the run)
+agent-v1 agent --workspace /path/to/your/repo --edit-policy auto --task "Fix the failing tests"
+
+# Local web UI (127.0.0.1 only)
+agent-v1 serve --workspace /path/to/your/repo --port 8787
+# → open http://127.0.0.1:8787
+```
+
+Without `cargo install`, prefix with `cargo run -p agent-v1 --release --` from the repo root (or `cd agent-v1 && cargo run --release --`).
+
+## What to try first
+
+1. **Ask:** `What's in this repo? Give a short overview.`
+2. **Ask:** `Why might the tests be failing?` (no edits)
+3. **Agent:** `Fix the failing tests.` — approve the first edit with **Enter** / `t`
+4. **Serve:** open the UI, toggle Ask ↔ Agent, send the same prompts
+
+## Modes and safety
+
+| Command | Default edit policy | Behavior |
+|---------|---------------------|----------|
+| `ask` | always `readonly` | Explore and answer; cannot write |
+| `agent` | `confirm` | Pause before the first workspace edit |
+| `agent --edit-policy auto` | `auto` | Apply edits without prompting |
+| `serve` | `confirm` (overridable) | Same engine; approvals in the browser |
+
+Approvals (terminal): **Enter** / `t` = approve for task · `a` = once · `r` = reject.
+
+Machine-readable events:
+
+```bash
+agent-v1 ask --workspace ./repo --output jsonl "…"
+```
+
+## Embed as a library
+
+```rust
+use agent_v1::api::{AgentConfig, AgentEvent, AgentMode, AgentSession, EditPolicy};
+
+// see agent-v1/examples/basic_agent.rs
+```
+
+```bash
+cargo run -p agent-v1 --example basic_agent -- --ask /path/to/repo "…"
+```
 
 ## Troubleshooting
 
@@ -77,10 +106,13 @@ See [`agent-v1/.env.example`](agent-v1/.env.example). Important vars:
 |---------|-----|
 | `workspace not set` | Pass `--workspace` or set `WORKSPACE_ROOT` |
 | `workspace does not exist` | Path must be an existing directory |
-| Missing API key panic | Set the key for your `LLM_PROVIDER` in `.env` |
-| `.env` ignored | Run from `agent-v1/` (or export vars yourself) |
-| Edits denied in one-shot | Use interactive mode, or set `EDIT_POLICY=auto` |
+| Missing API key | Set the key for your `LLM_PROVIDER` (see table above) |
+| `.env` ignored | Run from `agent-v1/`, or export vars; `dotenv` loads cwd `.env` |
+| Edits blocked in oneshot + confirm | Use interactive/`serve`, or `--edit-policy auto` |
+| Port in use | `serve --port 8790` |
 
-## Cache / cost verification
+## More
 
-After Phase 13A instrumentation, see [`agent-v1/CACHE_VERIFY.md`](agent-v1/CACHE_VERIFY.md) for the prompt-cache verification matrix (local tests + live checklist).
+- Agent package notes: [`agent-v1/README.md`](agent-v1/README.md)
+- Prompt-cache verification: [`agent-v1/CACHE_VERIFY.md`](agent-v1/CACHE_VERIFY.md)
+- Portfolio V1 plan: [`final-plan.md`](final-plan.md)

@@ -10,4 +10,6 @@ pub enum StopReason {
     MaxStepsExceeded,
     ToolError,
     ModelGaveUp,
+    /// Run stopped because the host called [`crate::api::AgentSession::request_stop`].
+    Cancelled,
 }

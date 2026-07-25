@@ -89,8 +89,21 @@ impl AgentRuntime {
         goal: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
         observer: Option<&dyn AgentObserver>,
+        session: Option<&mut Session>,
+        approval_gate: Option<&dyn ApprovalGate>,
+    ) -> Result<RunResult> {
+        self.run_with_cancel(goal, workspace_root, observer, session, approval_gate, None)
+            .await
+    }
+
+    pub async fn run_with_cancel(
+        &self,
+        goal: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+        observer: Option<&dyn AgentObserver>,
         mut session: Option<&mut Session>,
         approval_gate: Option<&dyn ApprovalGate>,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<RunResult> {
         let goal = goal.into();
         let workspace_root = workspace_root.into();
@@ -108,6 +121,9 @@ impl AgentRuntime {
             self.max_steps,
         );
         state.governance.semantic_policy = self.semantic_policy;
+        if let Some(cancel) = cancel {
+            state = state.with_cancel(cancel);
+        }
 
         if let Some(obs) = observer {
             obs.on_event(AgentEvent::RunStarted {

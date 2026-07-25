@@ -31,7 +31,7 @@ impl OutputFormat {
 pub enum Command {
     Ask,
     Agent,
-    /// Local web UI — stub until Milestone 4.
+    /// Local web UI (`agent-v1 serve`).
     Serve,
 }
 
@@ -52,6 +52,8 @@ pub struct CliArgs {
     pub output: OutputFormat,
     pub task: Option<String>,
     pub session: SessionArg,
+    /// HTTP port for `serve` (default 8787).
+    pub port: u16,
 }
 
 /// Parse `argv` (without the program name). Returns `None` when help was printed.
@@ -91,6 +93,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
     let mut task: Option<String> = None;
     let mut session = SessionArg::Ephemeral;
     let mut session_explicit = false;
+    let mut port: u16 = 8787;
     let mut positional: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -144,6 +147,18 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
                 session_explicit = true;
                 i += 1;
             }
+            "--port" => {
+                let raw = rest
+                    .get(i + 1)
+                    .ok_or_else(|| "--port requires a number".to_string())?;
+                port = raw
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid --port '{raw}'"))?;
+                if port == 0 {
+                    return Err("--port must be 1–65535".into());
+                }
+                i += 2;
+            }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown flag {flag}"));
             }
@@ -181,6 +196,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         output,
         task,
         session,
+        port,
     }))
 }
 
@@ -247,6 +263,22 @@ mod tests {
         assert_eq!(cli.output, OutputFormat::Jsonl);
         assert_eq!(cli.task.as_deref(), Some("fix tests"));
         assert_eq!(cli.session, SessionArg::Ephemeral);
+        assert_eq!(cli.port, 8787);
+    }
+
+    #[test]
+    fn serve_accepts_port() {
+        let cli = parse_args(&args(&[
+            "serve",
+            "--workspace",
+            "/tmp/repo",
+            "--port",
+            "9000",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(cli.command, Command::Serve);
+        assert_eq!(cli.port, 9000);
     }
 
     #[test]

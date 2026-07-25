@@ -132,6 +132,14 @@ pub async fn run(
     }
 
     loop {
+        if state.cancel_requested() {
+            crate::agent_println!("\n[agent] stop requested — cancelling run");
+            write_event(&state.run_id, "cancelled", "host requested stop", 0);
+            let reason = StopReason::Cancelled;
+            write_summary(state, &reason);
+            return reason;
+        }
+
         // ── 1. Check step limit before asking the LLM ──────────────────
         if state.is_exhausted() {
             crate::agent_println!(

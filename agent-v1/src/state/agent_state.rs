@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -78,6 +80,9 @@ pub struct AgentState {
 
     /// Last prompt diagnostics (for consecutive-turn prefix compare).
     pub last_prompt_diagnostics: Option<crate::context::PromptDiagnostics>,
+
+    /// Host-requested cooperative cancel (checked between model turns).
+    pub cancel: Arc<AtomicBool>,
 }
 
 impl AgentState {
@@ -115,7 +120,17 @@ impl AgentState {
             ms_to_first_verification: None,
             model_usage: UsageAccumulator::new(model_id, ModelPricing::from_env()),
             last_prompt_diagnostics: None,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 
     pub fn is_exhausted(&self) -> bool {

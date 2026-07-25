@@ -12,7 +12,7 @@ use super::print_usage;
 
 pub async fn run(cli: CliArgs) -> Result<i32> {
     if matches!(cli.command, Command::Serve) {
-        return run_serve(&cli);
+        return run_serve(cli).await;
     }
 
     if matches!(cli.output, OutputFormat::Jsonl) {
@@ -65,21 +65,21 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
     Ok(code)
 }
 
-fn run_serve(cli: &CliArgs) -> Result<i32> {
+async fn run_serve(cli: CliArgs) -> Result<i32> {
     let workspace = resolve_workspace(cli.workspace.clone())?;
-    eprintln!("[agent-v1] serve is not implemented yet (Milestone 4 — local web UI).");
-    eprintln!(
-        "[agent-v1] workspace would be: {}",
-        workspace.display()
-    );
-    eprintln!(
-        "[agent-v1] until then, use:\n  \
-         agent-v1 agent --workspace {}\n  \
-         agent-v1 ask --workspace {}",
-        workspace.display(),
-        workspace.display()
-    );
-    Ok(2)
+    let mode = AgentMode::Agent;
+    let edit_policy = cli
+        .edit_policy
+        .unwrap_or(EditPolicy::Confirm);
+
+    crate::server::serve(crate::server::ServeOptions::new(
+        workspace,
+        mode,
+        edit_policy,
+        cli.port,
+    ))
+    .await?;
+    Ok(0)
 }
 
 async fn run_oneshot(

@@ -1,24 +1,19 @@
 # agent-v1
 
-Coding-agent binary for this repo.
+Coding-agent package (CLI + library + localhost UI).
 
-Full install / run docs: **[../README.md](../README.md)**
+Root onboarding (install, keys, five-minute path): **[../README.md](../README.md)**
 
 ```bash
-cp .env.example .env   # set API key (+ optional WORKSPACE_ROOT)
+# from repo root
+cp agent-v1/.env.example agent-v1/.env   # set LLM_PROVIDER + API key
 
-# Ask (read-only)
-cargo run --release -- ask --workspace /path/to/repo "Where is auth handled?"
+cargo run -p agent-v1 --release -- ask --workspace /path/to/repo "Where is auth?"
+cargo run -p agent-v1 --release -- agent --workspace /path/to/repo
+cargo run -p agent-v1 --release -- serve --workspace /path/to/repo --port 8787
 
-# Agent (edits; default edit policy = confirm)
-cargo run --release -- agent --workspace /path/to/repo
-cargo run --release -- agent --workspace /path/to/repo --edit-policy auto --task "Fix the failing tests"
-
-# Machine-readable events (one JSON object per line on stdout)
-cargo run --release -- ask --workspace /path/to/repo --output jsonl "…"
-
-# Web UI (Milestone 4 — stub for now)
-cargo run --release -- serve --workspace /path/to/repo
+# after cargo install --path agent-v1  (or --git … --bin agent-v1)
+agent-v1 serve --workspace /path/to/repo
 ```
 
-Library embedding: see `examples/basic_agent.rs` and `agent_v1::api`.
+Library embedding: `examples/basic_agent.rs` and `agent_v1::api`.

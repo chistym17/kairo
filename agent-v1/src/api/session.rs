@@ -1,7 +1,8 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -32,6 +33,7 @@ pub struct AgentSession {
     decisions: Sender<DecisionMessage>,
     events: Mutex<Option<EventStream>>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    cancel: Arc<AtomicBool>,
 }
 
 enum Command {
@@ -116,6 +118,7 @@ impl AgentSession {
         let (event_tx, event_rx) = unbounded_channel();
         let (command_tx, command_rx) = std::sync::mpsc::channel();
         let (decision_tx, decision_rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
 
         let session_id = session.id.clone();
         let worker = Worker {
@@ -125,10 +128,12 @@ impl AgentSession {
             workspace: config.workspace.clone(),
             mode: config.mode,
             events: event_tx.clone(),
+            cancel: Arc::clone(&cancel),
             gate: ChannelGate {
                 events: event_tx,
                 decisions: Mutex::new(decision_rx),
                 timeout: config.approval_timeout,
+                cancel: Arc::clone(&cancel),
             },
         };
 
@@ -146,6 +151,7 @@ impl AgentSession {
             decisions: decision_tx,
             events: Mutex::new(Some(EventStream { rx: event_rx })),
             worker: Mutex::new(Some(handle)),
+            cancel,
         })
     }
 
@@ -203,6 +209,17 @@ impl AgentSession {
         self.decide(approval_id, ApprovalDecision::Reject)
     }
 
+    /// Ask the running turn to stop after the current model/tool step.
+    /// Also rejects a pending approval wait so the loop can exit.
+    pub fn request_stop(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a cooperative stop has been requested for the current turn.
+    pub fn stop_requested(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
     fn decide(&self, approval_id: impl Into<String>, decision: ApprovalDecision) -> Result<()> {
         self.decisions
             .send(DecisionMessage {
@@ -247,6 +264,7 @@ struct Worker {
     mode: AgentMode,
     events: UnboundedSender<AgentEvent>,
     gate: ChannelGate,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -281,6 +299,7 @@ impl Worker {
     }
 
     async fn run_task(&mut self, message: String) {
+        self.cancel.store(false, Ordering::SeqCst);
         let observer = ChannelObserver {
             events: self.events.clone(),
             mode: self.mode,
@@ -288,12 +307,13 @@ impl Worker {
 
         let outcome = self
             .runtime
-            .run(
+            .run_with_cancel(
                 message,
                 self.workspace.clone(),
                 Some(&observer),
                 Some(&mut self.session),
                 Some(&self.gate),
+                Some(Arc::clone(&self.cancel)),
             )
             .await;
 
@@ -358,6 +378,7 @@ struct ChannelGate {
     events: UnboundedSender<AgentEvent>,
     decisions: Mutex<Receiver<DecisionMessage>>,
     timeout: Duration,
+    cancel: Arc<AtomicBool>,
 }
 
 impl ApprovalGate for ChannelGate {
@@ -377,20 +398,30 @@ impl ApprovalGate for ChannelGate {
             .lock()
             .expect("approval decision mutex poisoned");
 
+        let deadline = Instant::now() + self.timeout;
         loop {
-            match decisions.recv_timeout(self.timeout) {
+            if self.cancel.load(Ordering::Relaxed) {
+                let _ = self.events.send(AgentEvent::Error {
+                    message: format!("approval {approval_id} rejected — stop requested"),
+                });
+                return ApprovalDecision::Reject;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _ = self.events.send(AgentEvent::Error {
+                    message: format!(
+                        "approval {approval_id} timed out after {}s — rejected",
+                        self.timeout.as_secs()
+                    ),
+                });
+                return ApprovalDecision::Reject;
+            }
+            let slice = remaining.min(Duration::from_millis(200));
+            match decisions.recv_timeout(slice) {
                 // Decisions for an earlier request are stale — keep waiting.
                 Ok(message) if message.approval_id != approval_id => continue,
                 Ok(message) => return message.decision,
-                Err(RecvTimeoutError::Timeout) => {
-                    let _ = self.events.send(AgentEvent::Error {
-                        message: format!(
-                            "approval {approval_id} timed out after {}s — rejected",
-                            self.timeout.as_secs()
-                        ),
-                    });
-                    return ApprovalDecision::Reject;
-                }
+                Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return ApprovalDecision::Reject,
             }
         }

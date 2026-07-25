@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>agent-v1</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,500;8..60,700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #14201a;
+      --muted: #5a6b60;
+      --line: #c9d4cc;
+      --paper: #f3f6f2;
+      --panel: #fafcf9;
+      --accent: #0f6b4c;
+      --accent-soft: #d7eee3;
+      --warn: #8a4b12;
+      --warn-soft: #f5e6d4;
+      --danger: #8b1e2d;
+      --ok: #0f6b4c;
+      --user: #e8efe9;
+      --agent: #ffffff;
+      --radius: 6px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #e4efe8 0%, transparent 55%),
+        radial-gradient(900px 400px at 100% 0%, #dfeae3 0%, transparent 50%),
+        var(--paper);
+      color: var(--ink);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    #app {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 14px 16px 12px;
+      gap: 10px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      font-family: "Source Serif 4", Georgia, serif;
+      font-weight: 700;
+      font-size: 1.55rem;
+      letter-spacing: -0.02em;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .meta strong { color: var(--ink); font-weight: 500; }
+    .modes {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .modes button {
+      border: 0;
+      background: transparent;
+      padding: 7px 14px;
+      font: inherit;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .modes button.active {
+      background: var(--ink);
+      color: #f7faf7;
+    }
+    .modes button:disabled { opacity: 0.45; cursor: not-allowed; }
+    main {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1.4fr 0.9fr;
+      gap: 10px;
+    }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 10px 12px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+      font-weight: 500;
+    }
+    #chat {
+      flex: 1;
+      overflow: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .msg {
+      max-width: 92%;
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user { align-self: flex-end; background: var(--user); }
+    .msg.agent { align-self: flex-start; background: var(--agent); }
+    .msg.system { align-self: stretch; background: transparent; border-style: dashed; color: var(--muted); font-size: 12px; }
+    .side {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 0;
+    }
+    .side .panel { flex: 1; }
+    #plan, #activity {
+      flex: 1;
+      overflow: auto;
+      padding: 10px 12px;
+      margin: 0;
+      list-style: none;
+    }
+    #plan li, #activity li {
+      padding: 6px 0;
+      border-bottom: 1px solid #e4ebe5;
+    }
+    #plan li:last-child, #activity li:last-child { border-bottom: 0; }
+    .done { color: var(--ok); }
+    .pending { color: var(--muted); }
+    #approval {
+      display: none;
+      margin: 0 12px 12px;
+      padding: 12px;
+      border: 1px solid var(--warn);
+      background: var(--warn-soft);
+      border-radius: var(--radius);
+    }
+    #approval.visible { display: block; }
+    #approval .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    footer {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      align-items: end;
+    }
+    textarea {
+      width: 100%;
+      min-height: 64px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+      font: inherit;
+      background: #fff;
+      color: var(--ink);
+    }
+    textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+    button.primary, button.ghost, button.danger {
+      font: inherit;
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      cursor: pointer;
+      border: 1px solid var(--line);
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #f4fbf7;
+      font-weight: 500;
+    }
+    button.ghost { background: var(--panel); color: var(--ink); }
+    button.danger { background: #fff; color: var(--danger); border-color: #e2b4bb; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .empty { color: var(--muted); padding: 8px 0; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div>
+        <div class="brand">agent-v1</div>
+        <div class="meta" id="meta">connecting…</div>
+      </div>
+      <div class="modes" role="group" aria-label="Mode">
+        <button type="button" id="mode-ask" data-mode="ask">Ask</button>
+        <button type="button" id="mode-agent" data-mode="agent">Agent</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel" aria-label="Chat">
+        <h2>Chat</h2>
+        <div id="chat"></div>
+        <div id="approval"></div>
+      </section>
+      <aside class="side">
+        <section class="panel" aria-label="Plan">
+          <h2>Plan</h2>
+          <ul id="plan"><li class="empty">No plan yet</li></ul>
+        </section>
+        <section class="panel" aria-label="Activity">
+          <h2>Activity</h2>
+          <ul id="activity"><li class="empty">Waiting</li></ul>
+        </section>
+      </aside>
+    </main>
+
+    <footer>
+      <textarea id="input" placeholder="Ask a question or describe a change…" rows="3"></textarea>
+      <button type="button" class="danger" id="stop" disabled>Stop</button>
+      <button type="button" class="primary" id="send">Send</button>
+    </footer>
+  </div>
+
+  <script>
+    const state = {
+      mode: "agent",
+      busy: false,
+      pendingApproval: null,
+      ws: null,
+    };
+
+    const el = {
+      meta: document.getElementById("meta"),
+      chat: document.getElementById("chat"),
+      plan: document.getElementById("plan"),
+      activity: document.getElementById("activity"),
+      approval: document.getElementById("approval"),
+      input: document.getElementById("input"),
+      send: document.getElementById("send"),
+      stop: document.getElementById("stop"),
+      modeAsk: document.getElementById("mode-ask"),
+      modeAgent: document.getElementById("mode-agent"),
+    };
+
+    function shortPath(p) {
+      if (!p) return "";
+      const parts = p.split(/[/\\]/);
+      return parts.slice(-2).join("/");
+    }
+
+    function setBusy(busy) {
+      state.busy = busy;
+      el.send.disabled = busy;
+      el.stop.disabled = !busy;
+      el.modeAsk.disabled = busy;
+      el.modeAgent.disabled = busy;
+      el.input.disabled = busy;
+    }
+
+    function setModeButtons(mode) {
+      state.mode = mode;
+      el.modeAsk.classList.toggle("active", mode === "ask");
+      el.modeAgent.classList.toggle("active", mode === "agent");
+    }
+
+    function addMsg(kind, text) {
+      if (!text) return;
+      const div = document.createElement("div");
+      div.className = `msg ${kind}`;
+      div.textContent = text;
+      el.chat.appendChild(div);
+      el.chat.scrollTop = el.chat.scrollHeight;
+    }
+
+    function addActivity(text) {
+      if (el.activity.querySelector(".empty")) el.activity.innerHTML = "";
+      const li = document.createElement("li");
+      li.textContent = text;
+      el.activity.prepend(li);
+      while (el.activity.children.length > 80) el.activity.removeChild(el.activity.lastChild);
+    }
+
+    function renderPlan(event) {
+      el.plan.innerHTML = "";
+      const head = document.createElement("li");
+      head.innerHTML = `<strong>v${event.version}</strong> · ${event.objective}`;
+      el.plan.appendChild(head);
+      for (const step of event.steps || []) {
+        const li = document.createElement("li");
+        li.className = step.done ? "done" : "pending";
+        li.textContent = `${step.done ? "✓" : "○"} ${step.text}`;
+        el.plan.appendChild(li);
+      }
+    }
+
+    function showApproval(request) {
+      state.pendingApproval = request;
+      const paths = (request.paths || []).map(shortPath).join(", ");
+      el.approval.className = "visible";
+      el.approval.innerHTML = `
+        <div><strong>Approval needed</strong> · ${request.kind}</div>
+        <div style="margin-top:6px">${request.summary}</div>
+        <div class="meta" style="margin-top:6px">${request.reason}${paths ? " · " + paths : ""}</div>
+        <div class="actions">
+          <button type="button" class="primary" data-decision="task">Approve for task</button>
+          <button type="button" class="ghost" data-decision="once">Approve once</button>
+          <button type="button" class="danger" data-decision="reject">Reject</button>
+        </div>`;
+      el.approval.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", () => decide(request.id, btn.dataset.decision));
+      });
+    }
+
+    function clearApproval() {
+      state.pendingApproval = null;
+      el.approval.className = "";
+      el.approval.innerHTML = "";
+    }
+
+    async function refreshStatus() {
+      const res = await fetch("/api/status");
+      const s = await res.json();
+      setModeButtons(s.mode);
+      el.meta.innerHTML = `Workspace: <strong title="${s.workspace}">${shortPath(s.workspace)}</strong>
+        · ${s.model} · edit=${s.edit_policy} · session ${s.session_id.slice(0, 8)}`;
+      if (!state.busy) setBusy(!!s.busy);
+    }
+
+    async function send() {
+      const text = el.input.value.trim();
+      if (!text || state.busy) return;
+      addMsg("user", text);
+      el.input.value = "";
+      setBusy(true);
+      clearApproval();
+      const res = await fetch("/api/message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        addMsg("system", await res.text());
+        setBusy(false);
+      }
+    }
+
+    async function decide(id, decision) {
+      clearApproval();
+      const res = await fetch("/api/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, decision }),
+      });
+      if (!res.ok) addMsg("system", await res.text());
+    }
+
+    async function changeMode(mode) {
+      if (state.busy || mode === state.mode) return;
+      const res = await fetch("/api/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!res.ok) {
+        addMsg("system", await res.text());
+        return;
+      }
+      setModeButtons(mode);
+      addMsg("system", `Switched to ${mode} mode`);
+      await refreshStatus();
+    }
+
+    async function stop() {
+      await fetch("/api/stop", { method: "POST" });
+      addMsg("system", "Stop requested…");
+    }
+
+    function onEvent(event) {
+      switch (event.type) {
+        case "server_hello":
+          break;
+        case "started":
+          addActivity(`run ${event.run_id.slice(0, 8)} (${event.mode})`);
+          break;
+        case "text_delta":
+          addMsg("agent", event.content);
+          break;
+        case "plan_updated":
+          renderPlan(event);
+          addActivity(`plan v${event.version}`);
+          break;
+        case "tool_started":
+          addActivity(`→ ${event.tool}`);
+          break;
+        case "tool_completed":
+          addActivity(`← ${event.tool} ${event.success ? "ok" : "failed"}`);
+          break;
+        case "file_changed":
+          addActivity(`changed ${shortPath(event.path)}`);
+          break;
+        case "verification_completed":
+          addActivity(`verify ${event.success ? "green" : "red"}: ${event.command}`);
+          break;
+        case "approval_required":
+          showApproval(event.request);
+          addActivity("approval required");
+          break;
+        case "error":
+          addMsg("system", event.message);
+          break;
+        case "finished": {
+          const r = event.result || {};
+          const summary = r.summary || `(${r.status})`;
+          addMsg("agent", summary);
+          addActivity(`finished · ${r.status} · ${r.steps || 0} steps`);
+          setBusy(false);
+          clearApproval();
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    function connectWs() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      state.ws = ws;
+      ws.onmessage = (ev) => {
+        try { onEvent(JSON.parse(ev.data)); } catch (_) {}
+      };
+      ws.onclose = () => {
+        addMsg("system", "Disconnected — reconnecting…");
+        setTimeout(connectWs, 1200);
+      };
+    }
+
+    el.send.addEventListener("click", send);
+    el.stop.addEventListener("click", stop);
+    el.modeAsk.addEventListener("click", () => changeMode("ask"));
+    el.modeAgent.addEventListener("click", () => changeMode("agent"));
+    el.input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    refreshStatus().catch((e) => addMsg("system", String(e)));
+    connectWs();
+    setModeButtons("agent");
+  </script>
+</body>
+</html>

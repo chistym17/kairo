@@ -2,6 +2,7 @@
 name = "agent-v1"
 version = "0.1.0"
 edition = "2021"
+default-run = "agent-v1"
 
 [lib]
 name = "agent_v1"
@@ -31,3 +32,7 @@ anyhow = "1"
 async-trait = "0.1"
 tempfile = "3"
 mpatch = "1.6.4"
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
