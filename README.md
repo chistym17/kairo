@@ -55,6 +55,7 @@ agent-v1 ask "Where is authentication handled?"
 agent-v1 agent --edit-policy auto --task "Fix the failing tests"
 agent-v1 serve --port 8787            # → http://127.0.0.1:8787
 agent-v1 config                       # change provider / model / API key
+agent-v1 health                       # check config and workspace readiness
 ```
 
 Override with `--workspace /other/path` when needed. Without `cargo install`, use `cargo run -p agent-v1 --release --` from the harness repo (load `.env` from `agent-v1/` or export keys).

@@ -13,6 +13,10 @@ use super::print_usage;
 use super::workspace::{current_branch, detect_workspace, display_path};
 
 pub async fn run(cli: CliArgs) -> Result<i32> {
+    if matches!(cli.command, Command::Health) {
+        return Ok(super::health::run());
+    }
+
     if matches!(cli.command, Command::Config) {
         user_config::run_config_menu().context("config")?;
         return Ok(0);

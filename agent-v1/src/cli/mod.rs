@@ -1,9 +1,10 @@
 //! Product CLI for `agent-v1`.
 //!
-//! Subcommands: `ask`, `agent`, `serve`, `config`. Bare `agent-v1` starts interactive
-//! agent mode and auto-detects the workspace from the nearest `.git` root.
+//! Subcommands: `ask`, `agent`, `serve`, `config`, `health`. Bare `agent-v1` starts
+//! interactive agent mode and auto-detects the workspace from the nearest `.git` root.
 
 mod args;
+mod health;
 mod output;
 mod run;
 mod workspace;
@@ -23,6 +24,7 @@ Usage:
   agent-v1 agent [--edit-policy confirm|auto|readonly] [--task \"…\" | \"…\"]
   agent-v1 serve [--port 8787]
   agent-v1 config                       # view / edit provider, model, API key
+  agent-v1 health                       # check local readiness
 
 Workspace (auto-detected; --workspace optional):
   1. --workspace <path>
@@ -50,6 +52,7 @@ Examples:
   agent-v1 agent --edit-policy auto --task \"Fix the failing tests\"
   agent-v1 serve --port 8787
   agent-v1 config
+  agent-v1 health
 "
     );
 }

@@ -35,6 +35,8 @@ pub enum Command {
     Serve,
     /// Edit `~/.config/agent-v1/config.toml` interactively.
     Config,
+    /// Check local configuration and workspace readiness.
+    Health,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,29 +86,33 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         "agent" => (Command::Agent, &args[1..]),
         "serve" => (Command::Serve, &args[1..]),
         "config" => (Command::Config, &args[1..]),
+        "health" => (Command::Health, &args[1..]),
         // Flags without a subcommand → agent (e.g. `agent-v1 --edit-policy auto`).
         flag if flag.starts_with('-') => (Command::Agent, args),
         other => {
             return Err(format!(
-                "unknown subcommand '{other}'. Use: ask | agent | serve | config\n\
+                "unknown subcommand '{other}'. Use: ask | agent | serve | config | health\n\
                  Or run bare `agent-v1` for interactive agent mode.\n\
                  Try: agent-v1 --help"
             ));
         }
     };
 
-    if matches!(command, Command::Config) {
+    if matches!(command, Command::Config | Command::Health) {
         if rest.iter().any(|a| matches!(a.as_str(), "-h" | "--help")) {
             print_usage();
             return Ok(None);
         }
         if !rest.is_empty() {
-            return Err(
-                "config takes no arguments yet — run `agent-v1 config` for the menu".into(),
-            );
+            let name = if matches!(command, Command::Config) {
+                "config"
+            } else {
+                "health"
+            };
+            return Err(format!("{name} takes no arguments"));
         }
         return Ok(Some(CliArgs {
-            command: Command::Config,
+            command,
             workspace: None,
             edit_policy: None,
             output: OutputFormat::Text,
@@ -233,7 +239,7 @@ impl CliArgs {
     pub fn mode(&self) -> AgentMode {
         match self.command {
             Command::Ask => AgentMode::Ask,
-            Command::Agent | Command::Serve | Command::Config => AgentMode::Agent,
+            Command::Agent | Command::Serve | Command::Config | Command::Health => AgentMode::Agent,
         }
     }
 }
@@ -338,6 +344,12 @@ mod tests {
     fn config_rejects_extra_args() {
         let err = parse_args(&args(&["config", "show"])).unwrap_err();
         assert!(err.contains("no arguments"));
+    }
+
+    #[test]
+    fn health_subcommand() {
+        let cli = parse_args(&args(&["health"])).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Health);
     }
 
     #[test]
