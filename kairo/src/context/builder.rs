@@ -7,9 +7,10 @@ use super::instructions::load_instructions;
 use super::prompt_layout::build_prompt_layout;
 use super::stats::ContextStats;
 use super::system::{compose_system_prompt, default_system_prompt};
-use super::tools::{build_tools, build_tools_for_policy};
+use super::tools::build_tools_for_phase;
 use super::types::{AgentContext, LlmRequest, WorkspaceContext};
 use crate::governance::ToolPolicy;
+use crate::state::phase::Phase;
 
 /// Assembles the full context sent to the LLM for each decision.
 #[derive(Debug, Clone)]
@@ -40,7 +41,15 @@ impl ContextBuilder {
         session_messages: &[Message],
         step_history: &[Step],
     ) -> AgentContext {
-        self.build_context_with_policy(workspace_root, goal, session_messages, None, step_history, None)
+        self.build_context_with_policy(
+            workspace_root,
+            goal,
+            session_messages,
+            None,
+            step_history,
+            None,
+            Phase::Explore,
+        )
     }
 
     pub fn build_context_with_policy(
@@ -51,14 +60,12 @@ impl ContextBuilder {
         run_summary: Option<&str>,
         step_history: &[Step],
         tool_policy: Option<&ToolPolicy>,
+        phase: Phase,
     ) -> AgentContext {
         let instructions = load_instructions(workspace_root);
         let system_prompt =
             compose_system_prompt(&self.system_prompt, instructions.as_deref());
-        let tools = match tool_policy {
-            Some(policy) => build_tools_for_policy(policy),
-            None => build_tools(),
-        };
+        let tools = build_tools_for_phase(phase, tool_policy);
 
         AgentContext {
             system_prompt,
@@ -99,6 +106,7 @@ impl ContextBuilder {
             None,
             step_history,
             None,
+            Phase::Explore,
         )
     }
 
@@ -110,6 +118,7 @@ impl ContextBuilder {
         run_summary: Option<&str>,
         step_history: &[Step],
         tool_policy: Option<&ToolPolicy>,
+        phase: Phase,
     ) -> (LlmRequest, ContextStats) {
         let context = self.build_context_with_policy(
             workspace_root,
@@ -118,6 +127,7 @@ impl ContextBuilder {
             run_summary,
             step_history,
             tool_policy,
+            phase,
         );
 
         let layout = build_prompt_layout(

@@ -8,6 +8,7 @@ use crate::llm::{render_call_line, LlmClient, LlmError, LlmToolCall, ModelUsage}
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
+use crate::state::phase::Phase;
 use crate::state::step::{Action, Step};
 use crate::state::stop_reason::StopReason;
 use crate::tools;
@@ -195,6 +196,7 @@ pub async fn run(
                     &session_messages_snapshot,
                     &state.history,
                     tool_policy.as_ref(),
+                    state.run_control.phase,
                 );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
@@ -441,6 +443,7 @@ pub async fn run(
                                 &session_messages_snapshot,
                                 &state.history,
                                 tool_policy.as_ref(),
+                                state.run_control.phase,
                             );
 
                         write_event(
@@ -702,6 +705,18 @@ async fn execute_one_tool(
         }
     }
 
+    if let Err(denied) = apply_phase_tool_gate(state, &action) {
+        return commit_tool_outcome(
+            state,
+            observer,
+            step_index,
+            model_turn,
+            action,
+            tool_call_id,
+            denied,
+        );
+    }
+
     if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
         return commit_tool_outcome(
             state,
@@ -939,6 +954,11 @@ async fn execute_readonly_group(
                 write_summary(state, &reason);
                 return Some(reason);
             }
+        }
+
+        if let Err(denied) = apply_phase_tool_gate(state, &action) {
+            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
+            continue;
         }
 
         if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
@@ -2052,6 +2072,31 @@ fn apply_shell_mutation_gate(
         0,
     );
     Err(ToolResult::error(message))
+}
+
+fn apply_phase_tool_gate(state: &mut AgentState, action: &Action) -> Result<(), ToolResult> {
+    let phase = state.run_control.phase;
+    let name = tool_name(action);
+    if !phase.allows_tool(name) {
+        let message = format!(
+            "Tool `{name}` is not available in {} phase. Allowed: {}.",
+            phase.as_str(),
+            phase.allowed_tools().join(", ")
+        );
+        write_event(&state.run_id, "phase_tool_denied", &message, 0);
+        return Err(ToolResult::error(message));
+    }
+
+    if matches!(phase, Phase::Act) {
+        if let Action::ReadFile { path, .. } = action {
+            if let Err(message) = state.run_control.allow_act_read(path) {
+                write_event(&state.run_id, "phase_read_denied", &message, 0);
+                return Err(ToolResult::error(message));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_evidence_checkpoint_gate(
