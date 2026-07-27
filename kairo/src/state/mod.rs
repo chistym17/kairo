@@ -17,7 +17,7 @@ pub use efficiency::RunEfficiency;
 pub use exploration::ExplorationTracker;
 pub use finish_summary::ground_finish_summary;
 pub use patch_recovery::PatchRecoveryState;
-pub use phase::{Phase, RunState};
+pub use phase::{Phase, RunState, ACT_TRANSITION_MESSAGE, NO_PROGRESS_ACT_THRESHOLD};
 pub use plan::{AgentPlan, PlanConstraint, PlanStatus, PlanStep};
 pub use progress::ProgressState;
 pub use step::{Action, Step};

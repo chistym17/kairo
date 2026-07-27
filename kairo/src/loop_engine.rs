@@ -1771,6 +1771,20 @@ fn commit_tool_outcome(
         .progress
         .observe_tool(&action, &result, duplicate_read);
 
+    if let Some(message) = state.run_control.observe_tool_outcome(
+        &action,
+        &result,
+        duplicate_read,
+        state.progress.checkpoint_active,
+    ) {
+        write_event(&state.run_id, "phase_transition", message, 0);
+        crate::agent_println!(
+            "[agent] phase → {} — {}",
+            state.run_control.phase.as_str(),
+            message.lines().next().unwrap_or(message)
+        );
+    }
+
     if !read_cache_hit
         && !result_is_blocked
         && !matches!(
