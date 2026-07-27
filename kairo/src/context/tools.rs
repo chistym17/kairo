@@ -137,4 +137,20 @@ mod tests {
         assert!(!names.iter().any(|n| n == "search_code"));
         assert!(!names.iter().any(|n| n == "run_shell"));
     }
+
+    #[test]
+    fn verify_includes_shell_excludes_search() {
+        let names = tool_names(&tools_for_phase(Phase::Verify));
+        assert!(names.iter().any(|n| n == "run_shell"));
+        assert!(names.iter().any(|n| n == "apply_patch"));
+        assert!(names.iter().any(|n| n == "finish"));
+        assert!(!names.iter().any(|n| n == "search_code"));
+        assert!(!names.iter().any(|n| n == "update_plan"));
+    }
+
+    #[test]
+    fn finish_is_finish_only() {
+        let names = tool_names(&tools_for_phase(Phase::Finish));
+        assert_eq!(names, vec!["finish".to_string()]);
+    }
 }

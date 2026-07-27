@@ -18,8 +18,9 @@ pub use exploration::ExplorationTracker;
 pub use finish_summary::ground_finish_summary;
 pub use patch_recovery::PatchRecoveryState;
 pub use phase::{
-    Phase, RunState, ACT_TRANSITION_MESSAGE, NO_PROGRESS_ACT_THRESHOLD, PATCH_RECOVERY_MESSAGE,
-    PATCH_RECOVERY_TOOLS,
+    Phase, RunState, ACT_TRANSITION_MESSAGE, FINISH_PHASE_IDLE_TURNS, FINISH_TOOLS,
+    FINISH_UNVERIFIED_MESSAGE, FINISH_VERIFIED_MESSAGE, NO_PROGRESS_ACT_THRESHOLD,
+    PATCH_RECOVERY_MESSAGE, PATCH_RECOVERY_TOOLS, VERIFY_TOOLS, VERIFY_TRANSITION_MESSAGE,
 };
 pub use plan::{AgentPlan, PlanConstraint, PlanStatus, PlanStep};
 pub use progress::ProgressState;

@@ -1,21 +1,23 @@
-//! Runtime phase control for the agent loop (slice 1–4).
+//! Runtime phase control for the agent loop (slice 1–5).
 //!
 //! The model still chooses actions, but the runtime owns which phase the run is
 //! in. Tool schemas are filtered from [`Phase`] / recovery mode (slice 2–4).
 //! Explore → Act is driven by progress / evidence-checkpoint signals (slice 3).
 //! Failed `apply_patch` enters a sticky recovery tool set (slice 4).
-//!
-//! `Verify` and `Finish` exist so the enum is complete; their full behavior
-//! (verify selection, auto-finish) lands in a later slice.
+//! Successful edits enter Verify; pass / unusable verify enter Finish (slice 5).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::state::step::Action;
 use crate::tools::ToolResult;
+use crate::verification::{VerificationOutcome, VerificationStatus};
 
 /// Consecutive no-progress observations that force Explore → Act.
 pub const NO_PROGRESS_ACT_THRESHOLD: usize = 2;
+
+/// Extra model turns allowed in Finish before harness auto-completes.
+pub const FINISH_PHASE_IDLE_TURNS: u32 = 1;
 
 /// Message injected when Explore → Act (capability change is the real control).
 pub const ACT_TRANSITION_MESSAGE: &str = "\
@@ -28,15 +30,29 @@ Patch failed. Do not reopen exploration.
 Reread the failed file once if needed, then submit a smaller apply_patch \
 or finish with a blocker.";
 
+/// Message when a successful edit enters Verify.
+pub const VERIFY_TRANSITION_MESSAGE: &str = "\
+Edit applied. Verify with a focused check (or git_status/git_diff), \
+re-edit if needed, or finish.";
+
+/// Message when verification passed — finish-only tools.
+pub const FINISH_VERIFIED_MESSAGE: &str = "\
+Verification passed. Call finish with a short summary. \
+No further exploration or edits.";
+
+/// Message when verify is unusable (sandbox/exit 133) — finish unverified.
+pub const FINISH_UNVERIFIED_MESSAGE: &str = "\
+Verification could not run meaningfully in this environment. \
+Do not chase the same broken check. Call finish summarizing the edit \
+(unverified).";
+
 /// High-level loop phase. Tool availability is derived from this (slice 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
     #[default]
     Explore,
     Act,
-    /// Stub for the next slice — not driven yet.
     Verify,
-    /// Stub for the next slice — not driven yet.
     Finish,
 }
 
@@ -65,8 +81,9 @@ pub const ACT_TOOLS: &[&str] = &["read_file", "update_plan", "apply_patch", "fin
 /// After a failed patch: reread target → patch / finish only (slice 4).
 pub const PATCH_RECOVERY_TOOLS: &[&str] = &["read_file", "apply_patch", "finish"];
 
-/// Verify stub (next slice) — inspect + re-edit + finish.
+/// Verify: inspect + re-edit + finish (slice 5). No broad search.
 pub const VERIFY_TOOLS: &[&str] = &[
+    "read_file",
     "git_status",
     "git_diff",
     "run_command",
@@ -118,6 +135,8 @@ pub struct RunState {
     pub patch_fail_recovery: bool,
     /// Path that must be reread / re-patched while recovery is active.
     pub patch_fail_path: Option<PathBuf>,
+    /// Model turn when Finish phase began (slice 5 auto-complete).
+    pub entered_finish_turn: Option<u32>,
 }
 
 impl RunState {
@@ -130,6 +149,7 @@ impl RunState {
             justified_unseen_reads_left: 1,
             patch_fail_recovery: false,
             patch_fail_path: None,
+            entered_finish_turn: None,
         }
     }
 
@@ -139,6 +159,14 @@ impl RunState {
 
     pub fn is_act(&self) -> bool {
         matches!(self.phase, Phase::Act)
+    }
+
+    pub fn is_verify(&self) -> bool {
+        matches!(self.phase, Phase::Verify)
+    }
+
+    pub fn is_finish(&self) -> bool {
+        matches!(self.phase, Phase::Finish)
     }
 
     /// Tool names exposed for the current phase / recovery mode.
@@ -173,10 +201,10 @@ impl RunState {
         self.seen_searches.insert(signature.into())
     }
 
-    /// Whether Act / recovery may read this path.
+    /// Whether Act / Verify / recovery may read this path.
     ///
     /// Recovery: only the failed patch path.
-    /// Act: seen paths, or one justified unseen.
+    /// Act / Verify: seen paths, or one justified unseen (Act only for justified).
     pub fn allow_act_read(&mut self, path: &Path) -> Result<(), String> {
         if self.patch_fail_recovery {
             if self
@@ -200,15 +228,14 @@ impl RunState {
         if self.has_seen_file(path) {
             return Ok(());
         }
-        if self.justified_unseen_reads_left > 0 {
+        if matches!(self.phase, Phase::Act) && self.justified_unseen_reads_left > 0 {
             self.justified_unseen_reads_left -= 1;
             self.note_file_seen(path.to_path_buf());
             return Ok(());
         }
         Err(
-            "Act phase: read_file is limited to files already in context \
-             (plus one justified new file). Update the plan, apply a patch, \
-             or finish with a blocker."
+            "read_file is limited to files already in context. \
+             Update the plan, apply a patch, run a check, or finish."
                 .to_string(),
         )
     }
@@ -231,6 +258,10 @@ impl RunState {
     /// (or when the failed path changes).
     pub fn enter_patch_recovery(&mut self, path: &Path) -> Option<&'static str> {
         let _ = self.enter_act();
+        // Recovery overrides Verify/Finish tool sets via `patch_fail_recovery`.
+        if matches!(self.phase, Phase::Verify | Phase::Finish) {
+            self.phase = Phase::Act;
+        }
         let same_path = self
             .patch_fail_path
             .as_ref()
@@ -238,6 +269,7 @@ impl RunState {
         let already = self.patch_fail_recovery && same_path;
         self.patch_fail_recovery = true;
         self.patch_fail_path = Some(path.to_path_buf());
+        self.entered_finish_turn = None;
         if already {
             None
         } else {
@@ -249,6 +281,69 @@ impl RunState {
     pub fn clear_patch_recovery(&mut self) {
         self.patch_fail_recovery = false;
         self.patch_fail_path = None;
+    }
+
+    /// Enter Verify after a successful workspace mutation (slice 5).
+    pub fn enter_verify(&mut self) -> Option<&'static str> {
+        if self.patch_fail_recovery {
+            return None;
+        }
+        if matches!(self.phase, Phase::Verify) {
+            return None;
+        }
+        self.phase = Phase::Verify;
+        self.entered_finish_turn = None;
+        Some(VERIFY_TRANSITION_MESSAGE)
+    }
+
+    /// Enter Finish-only tools (slice 5).
+    pub fn enter_finish(
+        &mut self,
+        model_turn: u32,
+        verified: bool,
+    ) -> Option<&'static str> {
+        self.clear_patch_recovery();
+        let msg = if verified {
+            FINISH_VERIFIED_MESSAGE
+        } else {
+            FINISH_UNVERIFIED_MESSAGE
+        };
+        if matches!(self.phase, Phase::Finish) {
+            return None;
+        }
+        self.phase = Phase::Finish;
+        self.entered_finish_turn = Some(model_turn);
+        Some(msg)
+    }
+
+    /// React to a classified verification outcome (slice 5).
+    pub fn observe_verification(
+        &mut self,
+        outcome: &VerificationOutcome,
+        model_turn: u32,
+    ) -> Option<&'static str> {
+        match outcome.status {
+            VerificationStatus::Passed => self.enter_finish(model_turn, true),
+            VerificationStatus::EnvironmentBlocked => self.enter_finish(model_turn, false),
+            VerificationStatus::Failed => {
+                // Stay able to re-edit; ensure Verify tools (not Finish).
+                if matches!(self.phase, Phase::Finish | Phase::Explore) {
+                    self.enter_verify()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Auto-complete once the model has had a turn in Finish without calling finish.
+    pub fn should_auto_complete_finish(&self, current_turn: u32) -> bool {
+        match self.entered_finish_turn {
+            Some(entered) => {
+                current_turn.saturating_sub(entered) >= FINISH_PHASE_IDLE_TURNS
+            }
+            None => false,
+        }
     }
 
     /// Observe one tool outcome. May transition Explore → Act.
@@ -607,5 +702,62 @@ mod tests {
         assert!(state.patch_fail_path.is_none());
         assert_eq!(state.phase, Phase::Act);
         assert_eq!(state.effective_tools(), ACT_TOOLS);
+    }
+
+    fn outcome(status: VerificationStatus) -> VerificationOutcome {
+        VerificationOutcome {
+            check_id: "root:test".into(),
+            kind: crate::verification::CheckKind::Test,
+            status,
+            exit_code: Some(0),
+            summary: "x".into(),
+        }
+    }
+
+    #[test]
+    fn successful_edit_enters_verify() {
+        let mut state = RunState::new();
+        let msg = state.enter_verify();
+        assert_eq!(msg, Some(VERIFY_TRANSITION_MESSAGE));
+        assert_eq!(state.phase, Phase::Verify);
+        assert!(state.effective_tools().contains(&"run_shell"));
+        assert!(state.effective_tools().contains(&"apply_patch"));
+        assert!(!state.effective_tools().contains(&"search_code"));
+        assert!(!state.effective_tools().contains(&"update_plan"));
+    }
+
+    #[test]
+    fn passed_verify_enters_finish_only() {
+        let mut state = RunState::new();
+        let _ = state.enter_verify();
+        let msg = state.observe_verification(&outcome(VerificationStatus::Passed), 3);
+        assert_eq!(msg, Some(FINISH_VERIFIED_MESSAGE));
+        assert_eq!(state.phase, Phase::Finish);
+        assert_eq!(state.effective_tools(), FINISH_TOOLS);
+        assert_eq!(state.entered_finish_turn, Some(3));
+        assert!(!state.should_auto_complete_finish(3));
+        assert!(state.should_auto_complete_finish(4));
+    }
+
+    #[test]
+    fn env_blocked_verify_enters_finish_unverified() {
+        let mut state = RunState::new();
+        let _ = state.enter_verify();
+        let msg =
+            state.observe_verification(&outcome(VerificationStatus::EnvironmentBlocked), 5);
+        assert_eq!(msg, Some(FINISH_UNVERIFIED_MESSAGE));
+        assert_eq!(state.phase, Phase::Finish);
+        assert_eq!(state.effective_tools(), FINISH_TOOLS);
+    }
+
+    #[test]
+    fn failed_verify_stays_in_verify() {
+        let mut state = RunState::new();
+        let _ = state.enter_verify();
+        let msg = state.observe_verification(&outcome(VerificationStatus::Failed), 2);
+        assert!(msg.is_none());
+        assert_eq!(state.phase, Phase::Verify);
+        assert!(state.effective_tools().contains(&"apply_patch"));
+        assert!(state.effective_tools().contains(&"run_shell"));
     }
 }

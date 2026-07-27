@@ -634,6 +634,30 @@ pub async fn run(
             write_summary(state, &reason);
             return reason;
         }
+
+        if state.run_control.should_auto_complete_finish(model_turn) {
+            let reason = if state.completion.last_verify_success == Some(true) {
+                StopReason::TaskComplete
+            } else {
+                StopReason::CompletedUnverified
+            };
+            write_event(
+                &state.run_id,
+                "finish_phase_auto_complete",
+                &format!(
+                    "Finish phase idle >= {} — {:?}",
+                    crate::state::phase::FINISH_PHASE_IDLE_TURNS,
+                    reason
+                ),
+                0,
+            );
+            crate::agent_println!(
+                "\n[agent] finish-phase auto-complete — {:?}",
+                reason
+            );
+            write_summary(state, &reason);
+            return reason;
+        }
     }
 }
 
@@ -798,6 +822,9 @@ async fn execute_one_tool(
         if result.success {
             state.patch_recovery.note_successful_mutation();
             state.run_control.clear_patch_recovery();
+            if let Some(message) = state.run_control.enter_verify() {
+                log_phase_transition(state, message);
+            }
         } else {
             result = state.patch_recovery.after_patch_failure(path, result);
             write_event(
@@ -807,17 +834,15 @@ async fn execute_one_tool(
                 0,
             );
             if let Some(message) = state.run_control.enter_patch_recovery(path) {
-                write_event(&state.run_id, "phase_transition", message, 0);
-                crate::agent_println!(
-                    "[agent] phase → {} — {}",
-                    state.run_control.tool_mode_label(),
-                    message.lines().next().unwrap_or(message)
-                );
+                log_phase_transition(state, message);
             }
         }
     } else if result.success && matches!(action, Action::WriteFile { .. }) {
         state.patch_recovery.note_successful_mutation();
         state.run_control.clear_patch_recovery();
+        if let Some(message) = state.run_control.enter_verify() {
+            log_phase_transition(state, message);
+        }
     }
 
     if result.success
@@ -1712,9 +1737,17 @@ fn commit_tool_outcome(
                     );
                     state.note_verification();
                     state.task.note_verification(&report.outcome);
+                    // Auto-verify implies workspace was reviewed enough for milestones.
+                    state.completion.note_review(model_turn);
                     state
                         .completion
                         .note_verification_outcome(model_turn, report.outcome.clone());
+                    if let Some(message) = state
+                        .run_control
+                        .observe_verification(&report.outcome, model_turn)
+                    {
+                        log_phase_transition(state, message);
+                    }
                     emit(
                         observer,
                         AgentEvent::VerificationCompleted {
@@ -1787,12 +1820,7 @@ fn commit_tool_outcome(
         duplicate_read,
         state.progress.checkpoint_active,
     ) {
-        write_event(&state.run_id, "phase_transition", message, 0);
-        crate::agent_println!(
-            "[agent] phase → {} — {}",
-            state.run_control.tool_mode_label(),
-            message.lines().next().unwrap_or(message)
-        );
+        log_phase_transition(state, message);
     }
 
     if !read_cache_hit
@@ -1840,7 +1868,12 @@ fn commit_tool_outcome(
                     );
                     state
                         .completion
-                        .note_verification_outcome(model_turn, outcome);
+                        .note_verification_outcome(model_turn, outcome.clone());
+                    if let Some(message) =
+                        state.run_control.observe_verification(&outcome, model_turn)
+                    {
+                        log_phase_transition(state, message);
+                    }
                 }
             }
         }
@@ -2111,7 +2144,12 @@ fn apply_phase_tool_gate(state: &mut AgentState, action: &Action) -> Result<(), 
         return Err(ToolResult::error(message));
     }
 
-    if state.run_control.patch_fail_recovery || matches!(state.run_control.phase, Phase::Act) {
+    let gate_reads = state.run_control.patch_fail_recovery
+        || matches!(
+            state.run_control.phase,
+            Phase::Act | Phase::Verify
+        );
+    if gate_reads {
         if let Action::ReadFile { path, .. } = action {
             if let Err(message) = state.run_control.allow_act_read(path) {
                 write_event(&state.run_id, "phase_read_denied", &message, 0);
@@ -2121,6 +2159,15 @@ fn apply_phase_tool_gate(state: &mut AgentState, action: &Action) -> Result<(), 
     }
 
     Ok(())
+}
+
+fn log_phase_transition(state: &AgentState, message: &str) {
+    write_event(&state.run_id, "phase_transition", message, 0);
+    crate::agent_println!(
+        "[agent] phase → {} — {}",
+        state.run_control.tool_mode_label(),
+        message.lines().next().unwrap_or(message)
+    );
 }
 
 fn apply_evidence_checkpoint_gate(

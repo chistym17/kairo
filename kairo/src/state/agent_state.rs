@@ -60,7 +60,7 @@ pub struct AgentState {
     /// Consecutive no-progress / stagnation tracking (soft guidance).
     pub progress: ProgressState,
 
-    /// Phase + seen-evidence tracking for runtime tool control (slice 1–4).
+    /// Phase + seen-evidence tracking for runtime tool control (slice 1–5).
     pub run_control: RunState,
 
     /// Targeted reread grant after failed apply_patch; write_file source policy.
