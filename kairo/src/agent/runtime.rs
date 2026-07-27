@@ -670,8 +670,11 @@ mod tests {
         let result = runtime.run("goal", &workspace, None, None, None).await.unwrap();
         let log = std::fs::read_to_string(&result.log_path).unwrap();
         assert!(
-            log.contains("governance_rejected") || log.contains("governance_terminate"),
-            "expected governance to stop grep spiral"
+            log.contains("governance_rejected")
+                || log.contains("governance_terminate")
+                || log.contains("phase_tool_denied")
+                || log.contains("phase → act"),
+            "expected governance or Act-phase tool restriction to stop grep spiral"
         );
         assert!(
             !log.contains("MaxStepsExceeded"),

@@ -9,25 +9,32 @@ pub fn build_tools() -> Value {
     sort_tools_by_name(build_tools_schema())
 }
 
-/// Tool schemas for the current runtime phase (slice 2).
+/// Tool schemas for an explicit allow-list (phase or patch-recovery).
 ///
 /// Unlike semantic `ToolPolicy` (execution gate only), this **removes** tools
-/// from the model request so Explore → Act actually changes capabilities.
-pub fn tools_for_phase(phase: Phase) -> Value {
-    sort_tools_by_name(filter_tools_by_names(
-        build_tools_schema(),
-        phase.allowed_tools(),
-    ))
+/// from the model request so Explore → Act / recovery actually changes capabilities.
+pub fn tools_for_allowed(allowed: &[&str]) -> Value {
+    sort_tools_by_name(filter_tools_by_names(build_tools_schema(), allowed))
 }
 
-/// Intersect phase tools with an optional semantic policy allow-list.
-pub fn build_tools_for_phase(phase: Phase, policy: Option<&ToolPolicy>) -> Value {
-    let mut tools = tools_for_phase(phase);
+/// Tool schemas for the current runtime phase (slice 2).
+pub fn tools_for_phase(phase: Phase) -> Value {
+    tools_for_allowed(phase.allowed_tools())
+}
+
+/// Intersect allowed tools with an optional semantic policy allow-list.
+pub fn build_tools_for_allowed(allowed: &[&str], policy: Option<&ToolPolicy>) -> Value {
+    let mut tools = tools_for_allowed(allowed);
     if let Some(policy) = policy {
         let names: Vec<&str> = policy.allowed_tools.iter().copied().collect();
         tools = sort_tools_by_name(filter_tools_by_names(tools, &names));
     }
     tools
+}
+
+/// Intersect phase tools with an optional semantic policy allow-list.
+pub fn build_tools_for_phase(phase: Phase, policy: Option<&ToolPolicy>) -> Value {
+    build_tools_for_allowed(phase.allowed_tools(), policy)
 }
 
 /// Kept for callers that only have a policy; defaults to Explore (full set).
@@ -56,7 +63,8 @@ fn filter_tools_by_names(tools: Value, allowed: &[&str]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::phase::Phase;
+    use crate::state::phase::{Phase, RunState, PATCH_RECOVERY_TOOLS};
+    use std::path::Path;
 
     fn tool_names(tools: &Value) -> Vec<String> {
         tools
@@ -109,5 +117,24 @@ mod tests {
         assert!(names.iter().any(|n| n == "search_code"));
         assert!(names.iter().any(|n| n == "run_shell"));
         assert!(names.iter().any(|n| n == "read_file"));
+    }
+
+    #[test]
+    fn patch_recovery_request_excludes_plan_search_and_shell() {
+        let mut run = RunState::new();
+        let _ = run.enter_patch_recovery(Path::new("x.rs"));
+        let names = tool_names(&tools_for_allowed(run.effective_tools()));
+        assert_eq!(
+            names,
+            vec![
+                "apply_patch".to_string(),
+                "finish".to_string(),
+                "read_file".to_string(),
+            ]
+        );
+        assert_eq!(run.effective_tools(), PATCH_RECOVERY_TOOLS);
+        assert!(!names.iter().any(|n| n == "update_plan"));
+        assert!(!names.iter().any(|n| n == "search_code"));
+        assert!(!names.iter().any(|n| n == "run_shell"));
     }
 }

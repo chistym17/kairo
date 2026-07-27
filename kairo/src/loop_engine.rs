@@ -196,7 +196,7 @@ pub async fn run(
                     &session_messages_snapshot,
                     &state.history,
                     tool_policy.as_ref(),
-                    state.run_control.phase,
+                    state.run_control.effective_tools(),
                 );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
@@ -443,7 +443,7 @@ pub async fn run(
                                 &session_messages_snapshot,
                                 &state.history,
                                 tool_policy.as_ref(),
-                                state.run_control.phase,
+                                state.run_control.effective_tools(),
                             );
 
                         write_event(
@@ -797,6 +797,7 @@ async fn execute_one_tool(
     if let Action::ApplyPatch { path, .. } = &action {
         if result.success {
             state.patch_recovery.note_successful_mutation();
+            state.run_control.clear_patch_recovery();
         } else {
             result = state.patch_recovery.after_patch_failure(path, result);
             write_event(
@@ -805,9 +806,18 @@ async fn execute_one_tool(
                 &format!("{} (1 reread)", path.display()),
                 0,
             );
+            if let Some(message) = state.run_control.enter_patch_recovery(path) {
+                write_event(&state.run_id, "phase_transition", message, 0);
+                crate::agent_println!(
+                    "[agent] phase → {} — {}",
+                    state.run_control.tool_mode_label(),
+                    message.lines().next().unwrap_or(message)
+                );
+            }
         }
     } else if result.success && matches!(action, Action::WriteFile { .. }) {
         state.patch_recovery.note_successful_mutation();
+        state.run_control.clear_patch_recovery();
     }
 
     if result.success
@@ -1780,7 +1790,7 @@ fn commit_tool_outcome(
         write_event(&state.run_id, "phase_transition", message, 0);
         crate::agent_println!(
             "[agent] phase → {} — {}",
-            state.run_control.phase.as_str(),
+            state.run_control.tool_mode_label(),
             message.lines().next().unwrap_or(message)
         );
     }
@@ -2089,19 +2099,19 @@ fn apply_shell_mutation_gate(
 }
 
 fn apply_phase_tool_gate(state: &mut AgentState, action: &Action) -> Result<(), ToolResult> {
-    let phase = state.run_control.phase;
+    let allowed = state.run_control.effective_tools();
+    let mode = state.run_control.tool_mode_label();
     let name = tool_name(action);
-    if !phase.allows_tool(name) {
+    if !allowed.contains(&name) {
         let message = format!(
-            "Tool `{name}` is not available in {} phase. Allowed: {}.",
-            phase.as_str(),
-            phase.allowed_tools().join(", ")
+            "Tool `{name}` is not available in {mode} phase. Allowed: {}.",
+            allowed.join(", ")
         );
         write_event(&state.run_id, "phase_tool_denied", &message, 0);
         return Err(ToolResult::error(message));
     }
 
-    if matches!(phase, Phase::Act) {
+    if state.run_control.patch_fail_recovery || matches!(state.run_control.phase, Phase::Act) {
         if let Action::ReadFile { path, .. } = action {
             if let Err(message) = state.run_control.allow_act_read(path) {
                 write_event(&state.run_id, "phase_read_denied", &message, 0);

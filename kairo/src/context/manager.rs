@@ -6,7 +6,7 @@ use crate::context::{ContextBuilder, ContextStats};
 use crate::context::run_context::build_run_context_view;
 use crate::governance::{ToolPolicy, KEEP_RECENT_STEPS};
 use crate::session::{CompactionState, Message, Session};
-use crate::state::phase::Phase;
+use crate::state::phase::EXPLORE_TOOLS;
 use crate::state::step::Step;
 
 /// What was reduced to fit the budget (Phase 6.2).
@@ -56,7 +56,7 @@ impl ContextManager {
         session_messages: &[Message],
         step_history: &[Step],
         tool_policy: Option<&ToolPolicy>,
-        phase: Phase,
+        allowed_tools: &[&str],
     ) -> (
         crate::context::LlmRequest,
         ContextStats,
@@ -94,7 +94,7 @@ impl ContextManager {
             run_summary,
             steps_for_context,
             tool_policy,
-            phase,
+            allowed_tools,
         );
 
         if full_stats.estimated_tokens <= budget {
@@ -133,7 +133,7 @@ impl ContextManager {
                 run_summary,
                 steps_for_context,
                 tool_policy,
-                phase,
+                allowed_tools,
             );
 
             let dropped = start;
@@ -260,7 +260,7 @@ mod tests {
         }
 
         let (_req, full, bounded, reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None, Phase::Explore);
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None, EXPLORE_TOOLS);
 
         assert!(full.estimated_tokens > mgr.budget_tokens());
         assert!(bounded.estimated_tokens <= full.estimated_tokens);
@@ -280,7 +280,7 @@ mod tests {
         }
 
         let (req, _full, _bounded, reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None, Phase::Explore);
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None, EXPLORE_TOOLS);
         assert!(reduction.trimmed);
 
         let arr = req.messages.as_array().unwrap();
@@ -319,7 +319,7 @@ mod tests {
         let mgr = ContextManager::new(recent_only.estimated_tokens + 500, 0, 5);
 
         let (req, _full, _bounded, reduction) =
-            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None, Phase::Explore);
+            mgr.build_bounded_request(&builder, dir.path(), "goal", None, &msgs, &[], None, EXPLORE_TOOLS);
         assert!(reduction.trimmed);
 
         let arr = req.messages.as_array().unwrap();
@@ -356,7 +356,7 @@ mod tests {
             &messages_snapshot,
             &[],
             None,
-            Phase::Explore,
+            EXPLORE_TOOLS,
         );
 
         assert!(reduction.trimmed);

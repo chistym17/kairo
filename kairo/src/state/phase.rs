@@ -1,8 +1,9 @@
-//! Runtime phase control for the agent loop (slice 1–3).
+//! Runtime phase control for the agent loop (slice 1–4).
 //!
 //! The model still chooses actions, but the runtime owns which phase the run is
-//! in. Tool schemas are filtered from [`Phase`] (slice 2). Explore → Act is
-//! driven by progress / evidence-checkpoint signals (slice 3).
+//! in. Tool schemas are filtered from [`Phase`] / recovery mode (slice 2–4).
+//! Explore → Act is driven by progress / evidence-checkpoint signals (slice 3).
+//! Failed `apply_patch` enters a sticky recovery tool set (slice 4).
 //!
 //! `Verify` and `Finish` exist so the enum is complete; their full behavior
 //! (verify selection, auto-finish) lands in a later slice.
@@ -20,6 +21,12 @@ pub const NO_PROGRESS_ACT_THRESHOLD: usize = 2;
 pub const ACT_TRANSITION_MESSAGE: &str = "\
 Exploration is complete. Use the evidence already collected.
 You must now update the plan, make a focused edit, or finish with a blocker.";
+
+/// Message when a failed patch locks tools to reread → patch / finish.
+pub const PATCH_RECOVERY_MESSAGE: &str = "\
+Patch failed. Do not reopen exploration.
+Reread the failed file once if needed, then submit a smaller apply_patch \
+or finish with a blocker.";
 
 /// High-level loop phase. Tool availability is derived from this (slice 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,6 +61,9 @@ pub const EXPLORE_TOOLS: &[&str] = &[
 
 /// Act phase: plan / patch / finish (+ limited reads). No search or shell.
 pub const ACT_TOOLS: &[&str] = &["read_file", "update_plan", "apply_patch", "finish"];
+
+/// After a failed patch: reread target → patch / finish only (slice 4).
+pub const PATCH_RECOVERY_TOOLS: &[&str] = &["read_file", "apply_patch", "finish"];
 
 /// Verify stub (next slice) — inspect + re-edit + finish.
 pub const VERIFY_TOOLS: &[&str] = &[
@@ -104,6 +114,10 @@ pub struct RunState {
     pub no_progress: usize,
     /// Act-mode: one justified read of an unseen file still allowed.
     pub justified_unseen_reads_left: u32,
+    /// Sticky after failed `apply_patch` until a successful mutation (slice 4).
+    pub patch_fail_recovery: bool,
+    /// Path that must be reread / re-patched while recovery is active.
+    pub patch_fail_path: Option<PathBuf>,
 }
 
 impl RunState {
@@ -114,6 +128,8 @@ impl RunState {
             seen_searches: HashSet::new(),
             no_progress: 0,
             justified_unseen_reads_left: 1,
+            patch_fail_recovery: false,
+            patch_fail_path: None,
         }
     }
 
@@ -125,13 +141,31 @@ impl RunState {
         matches!(self.phase, Phase::Act)
     }
 
+    /// Tool names exposed for the current phase / recovery mode.
+    pub fn effective_tools(&self) -> &'static [&'static str] {
+        if self.patch_fail_recovery {
+            PATCH_RECOVERY_TOOLS
+        } else {
+            self.phase.allowed_tools()
+        }
+    }
+
+    /// Label for logs / deny messages (`explore` / `act` / `patch_recovery` / …).
+    pub fn tool_mode_label(&self) -> &'static str {
+        if self.patch_fail_recovery {
+            "patch_recovery"
+        } else {
+            self.phase.as_str()
+        }
+    }
+
     /// Record that a file was successfully read into context.
     pub fn note_file_seen(&mut self, path: PathBuf) {
         self.seen_files.insert(path);
     }
 
     pub fn has_seen_file(&self, path: &Path) -> bool {
-        self.seen_files.contains(path)
+        self.seen_files.iter().any(|p| paths_equal(p, path))
     }
 
     /// Record a search signature. Returns `true` if this signature is new.
@@ -139,11 +173,30 @@ impl RunState {
         self.seen_searches.insert(signature.into())
     }
 
-    /// Whether Act-mode may read this path (seen, or one justified unseen left).
+    /// Whether Act / recovery may read this path.
     ///
-    /// On allowing an unseen path, consumes the justified-unseen slot and records
-    /// the path as seen so later Act reads of it are allowed.
+    /// Recovery: only the failed patch path.
+    /// Act: seen paths, or one justified unseen.
     pub fn allow_act_read(&mut self, path: &Path) -> Result<(), String> {
+        if self.patch_fail_recovery {
+            if self
+                .patch_fail_path
+                .as_ref()
+                .is_some_and(|p| paths_equal(p, path))
+            {
+                return Ok(());
+            }
+            let target = self
+                .patch_fail_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            return Err(format!(
+                "Patch recovery: read_file is limited to `{target}`. \
+                 Then apply_patch or finish with a blocker."
+            ));
+        }
+
         if self.has_seen_file(path) {
             return Ok(());
         }
@@ -161,6 +214,7 @@ impl RunState {
     }
 
     /// Enter Act if still exploring. Returns `true` when the phase changed.
+    /// Never reopens Explore once left (recovery / Act stay closed).
     pub fn enter_act(&mut self) -> bool {
         if matches!(self.phase, Phase::Explore) {
             self.phase = Phase::Act;
@@ -169,6 +223,32 @@ impl RunState {
         } else {
             false
         }
+    }
+
+    /// Lock tools to reread → patch / finish after a failed `apply_patch`.
+    ///
+    /// Returns `Some(PATCH_RECOVERY_MESSAGE)` the first time recovery engages
+    /// (or when the failed path changes).
+    pub fn enter_patch_recovery(&mut self, path: &Path) -> Option<&'static str> {
+        let _ = self.enter_act();
+        let same_path = self
+            .patch_fail_path
+            .as_ref()
+            .is_some_and(|p| paths_equal(p, path));
+        let already = self.patch_fail_recovery && same_path;
+        self.patch_fail_recovery = true;
+        self.patch_fail_path = Some(path.to_path_buf());
+        if already {
+            None
+        } else {
+            Some(PATCH_RECOVERY_MESSAGE)
+        }
+    }
+
+    /// Clear recovery after a successful mutation.
+    pub fn clear_patch_recovery(&mut self) {
+        self.patch_fail_recovery = false;
+        self.patch_fail_path = None;
     }
 
     /// Observe one tool outcome. May transition Explore → Act.
@@ -186,16 +266,18 @@ impl RunState {
         }
 
         if !matches!(self.phase, Phase::Explore) {
-            // Still track seen files while in Act for read gating.
+            // Still track seen files while in Act / recovery for read gating.
             self.record_side_effects(action, result, duplicate_read);
             return None;
         }
 
         let progressed = self.classify_progress(action, result, duplicate_read);
-        if progressed {
-            self.no_progress = 0;
-        } else {
-            self.no_progress = self.no_progress.saturating_add(1);
+        match progressed {
+            ProgressSignal::Progress => self.no_progress = 0,
+            ProgressSignal::NoProgress => {
+                self.no_progress = self.no_progress.saturating_add(1);
+            }
+            ProgressSignal::Neutral => {}
         }
 
         if self.no_progress >= NO_PROGRESS_ACT_THRESHOLD && self.enter_act() {
@@ -229,63 +311,97 @@ impl RunState {
         }
     }
 
-    /// Returns `true` when this outcome counts as progress.
+    /// Classify whether this outcome advances Explore evidence.
     fn classify_progress(
         &mut self,
         action: &Action,
         result: &ToolResult,
         duplicate_read: bool,
-    ) -> bool {
+    ) -> ProgressSignal {
         if is_denied_result(result) || duplicate_read {
             self.record_side_effects(action, result, duplicate_read);
-            return false;
+            return ProgressSignal::NoProgress;
         }
 
         match action {
             Action::ReadFile { path, .. } => {
                 if !result.success {
-                    return false;
+                    return ProgressSignal::Neutral;
                 }
                 let path = path.clone();
                 let is_new = !self.has_seen_file(&path);
                 self.note_file_seen(path);
-                is_new
+                if is_new {
+                    ProgressSignal::Progress
+                } else {
+                    ProgressSignal::NoProgress
+                }
             }
             Action::SearchCode { query, path } | Action::Locate { query, path } => {
                 if !result.success {
-                    return false;
+                    return ProgressSignal::Neutral;
                 }
                 let sig = search_signature(action, query, path);
-                self.note_search(sig)
+                if self.note_search(sig) {
+                    ProgressSignal::Progress
+                } else {
+                    ProgressSignal::NoProgress
+                }
             }
             Action::FindFiles { pattern, path } => {
                 if !result.success {
-                    return false;
+                    return ProgressSignal::Neutral;
                 }
                 let sig = format!("find_files:{pattern}:@{}", path.display());
-                self.note_search(sig)
+                if self.note_search(sig) {
+                    ProgressSignal::Progress
+                } else {
+                    ProgressSignal::NoProgress
+                }
             }
-            Action::UpdatePlan { .. } if result.success => true,
-            Action::ApplyPatch { .. } | Action::WriteFile { .. } if result.success => true,
+            Action::UpdatePlan { .. } if result.success => ProgressSignal::Progress,
+            Action::ApplyPatch { .. } | Action::WriteFile { .. } if result.success => {
+                ProgressSignal::Progress
+            }
             Action::RunCommand { cmd, .. } | Action::RunShell { command: cmd, .. } => {
                 // Shell that only dumps an already-seen file = no progress.
                 if let Some(intent) = crate::tools::shell_read::detect_shell_file_read(cmd) {
                     if self.has_seen_file(&intent.path) {
-                        return false;
+                        return ProgressSignal::NoProgress;
                     }
                     // First dump of a new path counts as seeing that file.
                     if result.success {
                         self.note_file_seen(intent.path);
-                        return true;
+                        return ProgressSignal::Progress;
                     }
-                    return false;
+                    return ProgressSignal::Neutral;
                 }
-                result.success
+                // Other shell (verify / git / build): success = progress;
+                // failure is not Explore thrash — leave the streak alone.
+                if result.success {
+                    ProgressSignal::Progress
+                } else {
+                    ProgressSignal::Neutral
+                }
             }
-            Action::Finish { .. } => true,
-            _ => result.success,
+            Action::Finish { .. } => ProgressSignal::Progress,
+            _ => {
+                if result.success {
+                    ProgressSignal::Progress
+                } else {
+                    ProgressSignal::Neutral
+                }
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgressSignal {
+    Progress,
+    NoProgress,
+    /// Failed non-thrash actions (e.g. broken verify) — do not force Act.
+    Neutral,
 }
 
 fn search_signature(action: &Action, query: &str, path: &Path) -> String {
@@ -311,7 +427,19 @@ fn is_denied_result(result: &ToolResult) -> bool {
         || l.contains("is not available in")
         || l.contains("phase_tool_denied")
         || l.contains("act phase: read_file")
+        || l.contains("patch recovery:")
         || l.contains("blocked:")
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    normalize_path(a) == normalize_path(b)
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -440,5 +568,44 @@ mod tests {
         let msg = state.observe_tool_outcome(&read("fresh.rs"), &ok_result(), false, true);
         assert_eq!(msg, Some(ACT_TRANSITION_MESSAGE));
         assert_eq!(state.phase, Phase::Act);
+    }
+
+    #[test]
+    fn failed_patch_enters_recovery_and_forces_act() {
+        let mut state = RunState::new();
+        assert_eq!(state.phase, Phase::Explore);
+        let msg = state.enter_patch_recovery(Path::new("src/Board.tsx"));
+        assert_eq!(msg, Some(PATCH_RECOVERY_MESSAGE));
+        assert_eq!(state.phase, Phase::Act);
+        assert!(state.patch_fail_recovery);
+        assert_eq!(
+            state.effective_tools(),
+            PATCH_RECOVERY_TOOLS
+        );
+        assert!(!state.effective_tools().contains(&"update_plan"));
+        assert!(!state.effective_tools().contains(&"search_code"));
+        // Same path again: no duplicate message.
+        assert!(state
+            .enter_patch_recovery(Path::new("src/Board.tsx"))
+            .is_none());
+    }
+
+    #[test]
+    fn recovery_read_allows_only_failed_path() {
+        let mut state = RunState::new();
+        let _ = state.enter_patch_recovery(Path::new("a.rs"));
+        assert!(state.allow_act_read(Path::new("a.rs")).is_ok());
+        assert!(state.allow_act_read(Path::new("b.rs")).is_err());
+    }
+
+    #[test]
+    fn successful_clear_leaves_act_without_recovery() {
+        let mut state = RunState::new();
+        let _ = state.enter_patch_recovery(Path::new("a.rs"));
+        state.clear_patch_recovery();
+        assert!(!state.patch_fail_recovery);
+        assert!(state.patch_fail_path.is_none());
+        assert_eq!(state.phase, Phase::Act);
+        assert_eq!(state.effective_tools(), ACT_TOOLS);
     }
 }

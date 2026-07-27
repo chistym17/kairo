@@ -7,10 +7,10 @@ use super::instructions::load_instructions;
 use super::prompt_layout::build_prompt_layout;
 use super::stats::ContextStats;
 use super::system::{compose_system_prompt, default_system_prompt};
-use super::tools::build_tools_for_phase;
+use super::tools::build_tools_for_allowed;
 use super::types::{AgentContext, LlmRequest, WorkspaceContext};
 use crate::governance::ToolPolicy;
-use crate::state::phase::Phase;
+use crate::state::phase::EXPLORE_TOOLS;
 
 /// Assembles the full context sent to the LLM for each decision.
 #[derive(Debug, Clone)]
@@ -48,7 +48,7 @@ impl ContextBuilder {
             None,
             step_history,
             None,
-            Phase::Explore,
+            EXPLORE_TOOLS,
         )
     }
 
@@ -60,12 +60,12 @@ impl ContextBuilder {
         run_summary: Option<&str>,
         step_history: &[Step],
         tool_policy: Option<&ToolPolicy>,
-        phase: Phase,
+        allowed_tools: &[&str],
     ) -> AgentContext {
         let instructions = load_instructions(workspace_root);
         let system_prompt =
             compose_system_prompt(&self.system_prompt, instructions.as_deref());
-        let tools = build_tools_for_phase(phase, tool_policy);
+        let tools = build_tools_for_allowed(allowed_tools, tool_policy);
 
         AgentContext {
             system_prompt,
@@ -106,7 +106,7 @@ impl ContextBuilder {
             None,
             step_history,
             None,
-            Phase::Explore,
+            EXPLORE_TOOLS,
         )
     }
 
@@ -118,7 +118,7 @@ impl ContextBuilder {
         run_summary: Option<&str>,
         step_history: &[Step],
         tool_policy: Option<&ToolPolicy>,
-        phase: Phase,
+        allowed_tools: &[&str],
     ) -> (LlmRequest, ContextStats) {
         let context = self.build_context_with_policy(
             workspace_root,
@@ -127,7 +127,7 @@ impl ContextBuilder {
             run_summary,
             step_history,
             tool_policy,
-            phase,
+            allowed_tools,
         );
 
         let layout = build_prompt_layout(
