@@ -130,6 +130,74 @@ pub fn discover_checks(snapshot: &ProjectSnapshot) -> Vec<Check> {
     checks
 }
 
+/// Longest snapshot unit path that prefixes `edited_path` (workspace-relative).
+pub fn unit_path_for_edit(snapshot: &ProjectSnapshot, edited_path: &Path) -> Option<PathBuf> {
+    let edited = normalize_path(edited_path);
+    if edited.as_os_str().is_empty() || edited == Path::new(".") {
+        return None;
+    }
+
+    let mut best: Option<PathBuf> = None;
+    let mut best_len = 0usize;
+    for unit in &snapshot.units {
+        let unit_path = normalize_path(&unit.path);
+        if unit_path == Path::new(".") {
+            continue; // root is a weak match; only use when nothing else fits
+        }
+        if path_is_within(&edited, &unit_path) {
+            let len = unit_path.components().count();
+            if len > best_len {
+                best_len = len;
+                best = Some(unit_path);
+            }
+        }
+    }
+    best.or_else(|| {
+        // Fall back to root unit when the edit is at repo root.
+        snapshot
+            .units
+            .iter()
+            .find(|u| normalize_path(&u.path) == Path::new("."))
+            .map(|u| normalize_path(&u.path))
+    })
+}
+
+/// Checks scoped to the unit that owns `edited_path`, falling back to all checks.
+pub fn discover_checks_for_edit(snapshot: &ProjectSnapshot, edited_path: &Path) -> Vec<Check> {
+    let all = discover_checks(snapshot);
+    let Some(unit_path) = unit_path_for_edit(snapshot, edited_path) else {
+        return all;
+    };
+    let scoped: Vec<Check> = all
+        .iter()
+        .filter(|c| check_belongs_to_unit(c, &unit_path))
+        .cloned()
+        .collect();
+    if scoped.is_empty() {
+        all
+    } else {
+        scoped
+    }
+}
+
+fn check_belongs_to_unit(check: &Check, unit_path: &Path) -> bool {
+    let cwd = normalize_path(&check.cwd);
+    if unit_path == Path::new(".") {
+        return cwd == Path::new(".");
+    }
+    path_is_within(&cwd, unit_path)
+}
+
+fn path_is_within(path: &Path, parent: &Path) -> bool {
+    if parent == Path::new(".") {
+        return true;
+    }
+    if path == parent {
+        return true;
+    }
+    path.starts_with(parent)
+}
+
 /// First preferred non-browserish check, if any (for summaries / fallbacks).
 pub fn preferred_check(checks: &[Check]) -> Option<&Check> {
     checks.iter().find(|c| browserish_penalty(c) == 0)
@@ -155,31 +223,61 @@ pub struct AutoVerifyReport {
     pub result: ToolResult,
     pub outcome: VerificationOutcome,
     pub output_suffix: String,
+    /// True when the selected check could not run and no usable fallback passed/failed.
+    pub skipped_unusable: bool,
 }
 
-/// Run the preferred discovered check after a successful file mutation.
+/// Run a unit-scoped preferred check after a successful file mutation.
 ///
-/// Does not change whether the edit itself succeeded — it only produces evidence
-/// for the model (and completion tracking). Returns `None` when disabled, no
-/// suitable check exists, or the snapshot has nothing to run.
+/// Prefers checks from the project unit that owns `edited_path` so a backend
+/// edit does not run frontend lint (and vice versa). If the preferred check is
+/// environment-blocked / unusable, tries the next non-browserish check in that
+/// unit. Returns `None` when disabled or no suitable check exists.
 pub fn try_auto_post_edit_verify(
     snapshot: &ProjectSnapshot,
     workspace_root: &Path,
+    edited_path: &Path,
 ) -> Option<AutoVerifyReport> {
     if !auto_post_edit_verify_enabled() {
         return None;
     }
-    let checks = discover_checks(snapshot);
-    let check = preferred_check(&checks)?.clone();
-    let result = execute_discovered_check(&check, workspace_root, AUTO_VERIFY_TIMEOUT_SECS);
-    let outcome = outcome_for(&check, &result);
-    let output_suffix = format_auto_verify_suffix(&check, &result, &outcome);
-    Some(AutoVerifyReport {
-        check,
-        result,
-        outcome,
-        output_suffix,
-    })
+    let checks = discover_checks_for_edit(snapshot, edited_path);
+    let candidates: Vec<&Check> = checks
+        .iter()
+        .filter(|c| browserish_penalty(c) == 0)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut last_blocked: Option<AutoVerifyReport> = None;
+    for check in candidates {
+        let result = execute_discovered_check(check, workspace_root, AUTO_VERIFY_TIMEOUT_SECS);
+        let mut outcome = outcome_for(check, &result);
+        // Unusable runners (missing venv, bare exit 133) are not patch failures.
+        if !outcome.is_environment_blocked() && is_unusable_check_result(&result) {
+            outcome.status = VerificationStatus::EnvironmentBlocked;
+            let detail = summarize_result(&result);
+            outcome.summary = format!(
+                "EnvironmentBlocked: check could not run meaningfully ({detail}). \
+                 This does not mean the patch failed."
+            );
+        }
+        let output_suffix = format_auto_verify_suffix(check, &result, &outcome);
+        let report = AutoVerifyReport {
+            check: check.clone(),
+            result,
+            outcome: outcome.clone(),
+            output_suffix,
+            skipped_unusable: outcome.is_environment_blocked(),
+        };
+        if outcome.is_environment_blocked() {
+            last_blocked = Some(report);
+            continue;
+        }
+        return Some(report);
+    }
+    last_blocked
 }
 
 fn execute_discovered_check(
@@ -228,11 +326,23 @@ fn format_auto_verify_suffix(
     };
     // Cap so a huge test log does not blow the next model turn.
     let body = truncate_chars(&body, 6_000);
+    let guidance = match outcome.status {
+        VerificationStatus::EnvironmentBlocked => {
+            "This check could not run in this environment. Do not re-run it identically. \
+             Finish unverified, or pick a different unit-local check if one exists."
+        }
+        VerificationStatus::Failed => {
+            "If this check failed, fix the code (or a coherent failure group) before finishing. \
+             Do not re-run this same command identically without another edit."
+        }
+        VerificationStatus::Passed => {
+            "Check passed. Call finish with a short summary unless you still need a focused re-edit."
+        }
+    };
     format!(
         "\n\n[auto-verify — ran `{cmd}` in `{cwd}` after edit — {status}]\n\
          {body}\n\
-         If this check failed, fix the code (or a coherent failure group) before finishing. \
-         Do not re-run this same command identically without another edit."
+         {guidance}"
     )
 }
 
@@ -353,16 +463,54 @@ pub fn is_environment_blocked(result: &ToolResult) -> bool {
         return true;
     }
 
-    // SIGTRAP (133) / SIGABRT (134) paired with sandbox wording is almost always env.
-    if matches!(parse_exit_code(&result.output), Some(133) | Some(134))
-        && (lower.contains("sandbox")
-            || lower.contains("namespace")
-            || lower.contains("trace/breakpoint trap")
-            || lower.contains("core dumped"))
-    {
+    // SIGTRAP (133) / SIGABRT (134) from sandboxed runners is almost always env,
+    // even without explicit sandbox wording in the log.
+    if matches!(parse_exit_code(&result.output), Some(133) | Some(134)) {
         return true;
     }
 
+    false
+}
+
+/// Check runner is missing / broken — not evidence the patch is wrong.
+pub fn is_unusable_check_result(result: &ToolResult) -> bool {
+    if is_environment_blocked(result) {
+        return true;
+    }
+    let mut blob = String::new();
+    if let Some(err) = &result.error {
+        blob.push_str(err);
+        blob.push('\n');
+    }
+    blob.push_str(&result.output);
+    let lower = blob.to_ascii_lowercase();
+
+    const MARKERS: &[&str] = &[
+        "no such file or directory",
+        "not found",
+        "cannot execute",
+        "permission denied",
+        "module not found",
+        "unable to locate",
+        "did you forget to activate",
+        "no module named",
+        ".venv/bin",
+        "virtualenv",
+        "command not found",
+    ];
+    if MARKERS.iter().any(|m| lower.contains(m)) && !result.success {
+        // Avoid treating ordinary assertion "not found" test output as unusable
+        // unless the exit looks like a runner failure (127) or path errors dominate.
+        if matches!(parse_exit_code(&result.output), Some(127) | Some(126) | Some(2)) {
+            return true;
+        }
+        if lower.contains("no such file or directory")
+            || lower.contains("command not found")
+            || lower.contains("cannot execute")
+        {
+            return true;
+        }
+    }
     false
 }
 
@@ -559,7 +707,7 @@ mod tests {
     #[test]
     fn auto_verify_can_be_disabled() {
         std::env::set_var("AUTO_POST_EDIT_VERIFY", "0");
-        let none = try_auto_post_edit_verify(&snapshot(), Path::new("."));
+        let none = try_auto_post_edit_verify(&snapshot(), Path::new("."), Path::new("frontend/a.ts"));
         std::env::remove_var("AUTO_POST_EDIT_VERIFY");
         assert!(none.is_none());
     }
@@ -697,5 +845,49 @@ mod tests {
         let outcome = outcome_for(&check, &result);
         assert_eq!(outcome.status, VerificationStatus::Failed);
         assert!(!outcome.summary.contains("EnvironmentBlocked"));
+    }
+
+    #[test]
+    fn backend_edit_prefers_backend_checks() {
+        let checks = discover_checks_for_edit(&snapshot(), Path::new("backend/app/serializers.py"));
+        assert!(checks.iter().all(|c| c.id.starts_with("backend:")));
+        assert_eq!(preferred_check(&checks).map(|c| c.id.as_str()), Some("backend:test"));
+    }
+
+    #[test]
+    fn frontend_edit_prefers_frontend_checks() {
+        let checks = discover_checks_for_edit(&snapshot(), Path::new("frontend/src/Board.tsx"));
+        assert!(checks.iter().all(|c| c.id.starts_with("frontend:")));
+        assert_eq!(
+            preferred_check(&checks).map(|c| c.id.as_str()),
+            Some("frontend:typecheck")
+        );
+        assert!(!checks.iter().any(|c| c.id.starts_with("backend:")));
+    }
+
+    #[test]
+    fn bare_exit_133_is_environment_blocked() {
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 133\ncwd: backend\n".into(),
+            diff: None,
+            error: Some("exited with code 133".into()),
+            stop_reason: None,
+        };
+        assert!(is_environment_blocked(&result));
+        assert!(is_unusable_check_result(&result));
+    }
+
+    #[test]
+    fn missing_command_is_unusable() {
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 127\ncwd: backend\n.venv/bin/python: No such file or directory\n"
+                .into(),
+            diff: None,
+            error: Some("exited with code 127".into()),
+            stop_reason: None,
+        };
+        assert!(is_unusable_check_result(&result));
     }
 }

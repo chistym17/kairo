@@ -58,6 +58,8 @@ pub struct CliArgs {
     pub session: SessionArg,
     /// HTTP port for `serve` (default 8787).
     pub port: u16,
+    /// Show harness debug lines (`[agent]`, `[prompt]`, …).
+    pub verbose: bool,
 }
 
 /// Parse `argv` (without the program name). Returns `None` when help was printed.
@@ -72,6 +74,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
             task: None,
             session: SessionArg::New,
             port: 8787,
+            verbose: false,
         }));
     }
 
@@ -119,6 +122,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
             task: None,
             session: SessionArg::Ephemeral,
             port: 8787,
+            verbose: false,
         }));
     }
 
@@ -129,6 +133,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
     let mut session = SessionArg::Ephemeral;
     let mut session_explicit = false;
     let mut port: u16 = 8787;
+    let mut verbose = false;
     let mut positional: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -194,6 +199,10 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
                 }
                 i += 2;
             }
+            "--verbose" | "-v" => {
+                verbose = true;
+                i += 1;
+            }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown flag {flag}"));
             }
@@ -232,6 +241,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         task,
         session,
         port,
+        verbose,
     }))
 }
 
@@ -390,5 +400,18 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(cli.session, SessionArg::Resume("abc".into()));
+    }
+
+    #[test]
+    fn verbose_flag() {
+        let cli = parse_args(&args(&["ask", "--verbose", "hello"]))
+            .unwrap()
+            .unwrap();
+        assert!(cli.verbose);
+        let cli = parse_args(&args(&["agent", "-v", "--task", "x"]))
+            .unwrap()
+            .unwrap();
+        assert!(cli.verbose);
+        assert!(!parse_args(&args(&["ask", "hi"])).unwrap().unwrap().verbose);
     }
 }

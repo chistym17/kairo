@@ -44,12 +44,19 @@ Options:
   --session <id>         Resume a persisted session
   --new-session          Persist a new session (default for interactive)
   --port <n>             serve only — listen on 127.0.0.1:<n> (default 8787)
+  -v, --verbose          Show harness debug lines ([agent], [prompt], …)
+                         Also: KAIRO_VERBOSE=1
   -h, --help             Show this help
+
+Logs:
+  JSONL run logs go under $XDG_DATA_HOME/kairo/logs
+  (default ~/.local/share/kairo/logs). Override with KAIRO_LOG_DIR.
 
 Examples:
   cd ~/projects/shop && kairo
   kairo ask \"Where is auth handled?\"
   kairo agent --edit-policy auto --task \"Fix the failing tests\"
+  kairo agent --verbose --task \"debug this\"
   kairo serve --port 8787
   kairo config
   kairo health

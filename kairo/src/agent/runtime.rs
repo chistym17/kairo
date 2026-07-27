@@ -162,7 +162,7 @@ impl AgentRuntime {
         }
 
         let changed_files = collect_changed_files(&state);
-        let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", state.run_id));
+        let log_path = crate::logging::run_log_path(&state.run_id);
         let summary = finish_summary(&state);
         let efficiency = state.efficiency_snapshot();
 

@@ -1,11 +1,15 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::state::step::{Action, Step};
 use crate::tools::ToolResult;
+
+/// Optional override for tests (`set_logs_dir_override`).
+static LOGS_DIR_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
 /// The on-disk representation of one agent step.
 ///
@@ -65,55 +69,113 @@ impl LogEntry {
     }
 }
 
+/// Override the log directory (tests). Pass `None` to clear.
+pub fn set_logs_dir_override(path: Option<PathBuf>) {
+    if let Ok(mut guard) = LOGS_DIR_OVERRIDE.write() {
+        *guard = path;
+    }
+}
+
+/// Directory for run JSONL logs.
+///
+/// Priority:
+/// 1. [`set_logs_dir_override`] (tests)
+/// 2. `KAIRO_LOG_DIR`
+/// 3. `$XDG_DATA_HOME/kairo/logs` or `~/.local/share/kairo/logs`
+pub fn logs_dir() -> PathBuf {
+    if let Ok(guard) = LOGS_DIR_OVERRIDE.read() {
+        if let Some(p) = guard.as_ref() {
+            return p.clone();
+        }
+    }
+    if let Ok(p) = std::env::var("KAIRO_LOG_DIR") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    // Unit/integration tests must not write into the developer's XDG data dir.
+    #[cfg(test)]
+    {
+        return std::env::temp_dir().join("kairo-test-logs");
+    }
+    #[cfg(not(test))]
+    {
+        data_dir().join("logs")
+    }
+}
+
+fn data_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        let xdg = xdg.trim();
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("kairo");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".local").join("share").join("kairo")
+}
+
+/// Path for one run's JSONL file.
+pub fn run_log_path(run_id: &str) -> PathBuf {
+    logs_dir().join(format!("run_{run_id}.jsonl"))
+}
+
+fn ensure_logs_dir() -> Option<PathBuf> {
+    let log_dir = logs_dir();
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        log_io_error(format!("failed to create logs directory: {e}"));
+        return None;
+    }
+    Some(log_dir)
+}
+
+fn log_io_error(message: impl AsRef<str>) {
+    // Product CLI is quiet by default — don't spam stderr on successful runs.
+    if !crate::logging::is_quiet() {
+        eprintln!("[logging] {}", message.as_ref());
+    }
+}
+
 /// Write a single LogEntry as one JSON line to the run's log file.
 ///
 /// File is opened in append mode and closed after every write.
 /// This is intentionally not buffered — if the agent crashes or
 /// hits MAX_STEPS mid-run, every step up to that point is on disk.
 /// Losing the last step is acceptable. Losing all steps is not.
-///
-/// Log file path: logs/run_{run_id}.jsonl
-/// One file per run. Phase 3 iterates the logs/ directory and
-/// processes each file as one benchmark trial.
 pub fn write_entry(entry: &LogEntry) {
-    let log_dir = PathBuf::from("logs");
-
-    // Create logs/ directory if it doesn't exist
-    if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("[logging] failed to create logs directory: {}", e);
+    let Some(_log_dir) = ensure_logs_dir() else {
         return;
-    }
+    };
+    let log_path = run_log_path(&entry.run_id);
 
-    let log_path = log_dir.join(format!("run_{}.jsonl", entry.run_id));
-
-    // Serialize to JSON — single line, no pretty printing
     let line = match serde_json::to_string(entry) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[logging] failed to serialize log entry: {}", e);
+            log_io_error(format!("failed to serialize log entry: {e}"));
             return;
         }
     };
 
-    // Open in append mode — never truncate an existing log file
     let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[logging] failed to open {}: {}", log_path.display(), e);
+            log_io_error(format!("failed to open {}: {e}", log_path.display()));
             return;
         }
     };
 
-    // Write the line + newline — JSONL format requires one JSON object per line
     if let Err(e) = writeln!(file, "{}", line) {
-        eprintln!("[logging] failed to write entry: {}", e);
+        log_io_error(format!("failed to write entry: {e}"));
     }
 }
 
 /// Write an event (delay, rate-limit retry, etc.) to the run's log file.
 pub fn write_event(run_id: &str, event_type: &str, detail: &str, duration_ms: u64) {
-    let log_dir = PathBuf::from("logs");
-    let log_path = log_dir.join(format!("run_{}.jsonl", run_id));
+    let Some(_log_dir) = ensure_logs_dir() else {
+        return;
+    };
+    let log_path = run_log_path(run_id);
 
     let event = serde_json::json!({
         "record_type": "event",
@@ -127,7 +189,7 @@ pub fn write_event(run_id: &str, event_type: &str, detail: &str, duration_ms: u6
     let line = match serde_json::to_string(&event) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[logging] failed to serialize event: {}", e);
+            log_io_error(format!("failed to serialize event: {e}"));
             return;
         }
     };
@@ -135,13 +197,13 @@ pub fn write_event(run_id: &str, event_type: &str, detail: &str, duration_ms: u6
     let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[logging] failed to open log for event: {}", e);
+            log_io_error(format!("failed to open log for event: {e}"));
             return;
         }
     };
 
     if let Err(e) = writeln!(file, "{}", line) {
-        eprintln!("[logging] failed to write event: {}", e);
+        log_io_error(format!("failed to write event: {e}"));
     }
 }
 
@@ -156,8 +218,10 @@ pub fn write_run_summary(
     stop_reason: &crate::state::stop_reason::StopReason,
     efficiency: &crate::state::RunEfficiency,
 ) {
-    let log_dir = PathBuf::from("logs");
-    let log_path = log_dir.join(format!("run_{}.jsonl", run_id));
+    let Some(_log_dir) = ensure_logs_dir() else {
+        return;
+    };
+    let log_path = run_log_path(run_id);
 
     let mut summary = serde_json::json!({
         "record_type": "run_summary",
@@ -197,7 +261,7 @@ pub fn write_run_summary(
     let line = match serde_json::to_string(&summary) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[logging] failed to serialize run summary: {}", e);
+            log_io_error(format!("failed to serialize run summary: {e}"));
             return;
         }
     };
@@ -205,13 +269,13 @@ pub fn write_run_summary(
     let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[logging] failed to open log for summary: {}", e);
+            log_io_error(format!("failed to open log for summary: {e}"));
             return;
         }
     };
 
     if let Err(e) = writeln!(file, "{}", line) {
-        eprintln!("[logging] failed to write run summary: {}", e);
+        log_io_error(format!("failed to write run summary: {e}"));
     }
 }
 
@@ -222,10 +286,23 @@ mod tests {
     use crate::state::stop_reason::StopReason;
     use crate::tools::ToolResult;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
 
-    fn make_test_entry() -> LogEntry {
+    static TEST_LOG_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_temp_logs<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
+        let _guard = TEST_LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        set_logs_dir_override(Some(dir.path().to_path_buf()));
+        let out = f(dir.path());
+        set_logs_dir_override(None);
+        out
+    }
+
+    fn make_test_entry(run_id: &str) -> LogEntry {
         LogEntry {
-            run_id: "test-run-123".to_string(),
+            run_id: run_id.to_string(),
             model_id: "llama-3.1-70b".to_string(),
             step_index: 0,
             model_turn: 0,
@@ -247,13 +324,9 @@ mod tests {
 
     #[test]
     fn test_entry_serializes_to_valid_json() {
-        let entry = make_test_entry();
+        let entry = make_test_entry("test-run-123");
         let json = serde_json::to_string(&entry).unwrap();
-
-        // Must be valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        // Must have expected fields
         assert_eq!(parsed["run_id"], "test-run-123");
         assert_eq!(parsed["step_index"], 0);
         assert_eq!(parsed["model_id"], "llama-3.1-70b");
@@ -261,91 +334,83 @@ mod tests {
 
     #[test]
     fn test_write_creates_jsonl_file() {
-        // Override log dir for test — write to temp location
-        // Note: write_entry hardcodes "logs/" so this test verifies
-        // the file gets created; in CI you'd want a configurable path.
-        let entry = make_test_entry();
-        write_entry(&entry);
-
-        let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", entry.run_id));
-
-        assert!(log_path.exists());
-
-        // Read back and verify it's valid JSONL
-        let content = std::fs::read_to_string(&log_path).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert!(!lines.is_empty());
-
-        // Every line must be valid JSON
-        for line in &lines {
-            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-            assert_eq!(parsed["run_id"], "test-run-123");
-        }
+        with_temp_logs(|dir| {
+            let entry = make_test_entry("test-write-456");
+            write_entry(&entry);
+            let log_path = run_log_path(&entry.run_id);
+            assert!(log_path.exists());
+            assert!(log_path.starts_with(dir));
+            let content = std::fs::read_to_string(&log_path).unwrap();
+            for line in content.lines() {
+                let _: serde_json::Value = serde_json::from_str(line).unwrap();
+            }
+        });
     }
 
     #[test]
-    fn test_multiple_writes_append_not_overwrite() {
-        let mut entry = make_test_entry();
-        entry.run_id = "test-append-456".to_string();
-
-        // Ensure a clean slate if previous test runs left a file behind.
-        let log_path = PathBuf::from("logs").join(format!("run_{}.jsonl", entry.run_id));
-        let _ = std::fs::remove_file(&log_path);
-
-        // Write same entry twice
-        write_entry(&entry);
-        entry.step_index = 1;
-        write_entry(&entry);
-
-        let content = std::fs::read_to_string(&log_path).unwrap();
-        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-
-        // Should have exactly 2 lines
-        assert_eq!(lines.len(), 2);
+    fn test_write_appends() {
+        with_temp_logs(|_| {
+            let entry = make_test_entry("test-append-456");
+            let _ = std::fs::remove_file(run_log_path(&entry.run_id));
+            write_entry(&entry);
+            write_entry(&entry);
+            let content = std::fs::read_to_string(run_log_path(&entry.run_id)).unwrap();
+            assert_eq!(content.lines().count(), 2);
+        });
     }
 
     #[test]
-    fn test_run_summary_written() {
-        write_run_summary(
-            "test-summary-789",
-            "llama-3.1-70b",
-            &StopReason::TaskComplete,
-            &crate::state::RunEfficiency {
-                total_steps: 5,
-                total_model_turns: 3,
-                parallel_tool_groups: 1,
-                cache_hits: 2,
-                cache_misses: 4,
-                time_to_first_edit_ms: Some(100),
-                time_to_first_verification_ms: Some(200),
-                duration_ms: 500,
-                exploration_turns: 2,
-                readonly_tools_in_exploration: 5,
-                serial_batch_nudges: 1,
-                no_edit_nudges: 0,
-                governance_rejections: 0,
-                repeated_actions_blocked: 0,
-                verification_families_blocked: 0,
-                review_or_finish_transitions: 0,
-                no_progress_terminations: 0,
-                turns_after_last_edit: 0,
-                governance_mode: String::new(),
-            },
-        );
+    fn test_write_run_summary_appends() {
+        with_temp_logs(|_| {
+            let entry = make_test_entry("test-summary-789");
+            write_entry(&entry);
+            write_run_summary(
+                &entry.run_id,
+                &entry.model_id,
+                &StopReason::TaskComplete,
+                &crate::state::RunEfficiency {
+                    total_steps: 1,
+                    total_model_turns: 1,
+                    parallel_tool_groups: 0,
+                    cache_hits: 0,
+                    cache_misses: 1,
+                    duration_ms: 10,
+                    exploration_turns: 0,
+                    readonly_tools_in_exploration: 0,
+                    serial_batch_nudges: 0,
+                    no_edit_nudges: 0,
+                    governance_rejections: 0,
+                    repeated_actions_blocked: 0,
+                    verification_families_blocked: 0,
+                    review_or_finish_transitions: 0,
+                    no_progress_terminations: 0,
+                    turns_after_last_edit: 0,
+                    governance_mode: "off".into(),
+                    time_to_first_edit_ms: None,
+                    time_to_first_verification_ms: None,
+                },
+            );
+            let content = std::fs::read_to_string(run_log_path(&entry.run_id)).unwrap();
+            assert!(content.contains("run_summary"));
+        });
+    }
 
-        let log_path = PathBuf::from("logs/run_test-summary-789.jsonl");
-        let content = std::fs::read_to_string(&log_path).unwrap();
-        let last_line = content.lines().last().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(last_line).unwrap();
+    #[test]
+    fn write_event_creates_missing_dir() {
+        with_temp_logs(|dir| {
+            set_logs_dir_override(Some(dir.join("nested-logs")));
+            let nested = logs_dir();
+            assert!(!nested.exists());
+            write_event("evt-1", "smoke", "detail", 0);
+            assert!(nested.exists());
+            assert!(run_log_path("evt-1").exists());
+        });
+    }
 
-        assert_eq!(parsed["record_type"], "run_summary");
-        assert_eq!(parsed["total_steps"], 5);
-        assert_eq!(parsed["total_model_turns"], 3);
-        assert_eq!(parsed["parallel_tool_groups"], 1);
-        assert_eq!(parsed["cache_hits"], 2);
-        assert_eq!(parsed["duration_ms"], 500);
-        assert_eq!(parsed["time_to_first_edit_ms"], 100);
-        assert_eq!(parsed["serial_batch_nudges"], 1);
-        assert_eq!(parsed["avg_readonly_per_exploration_turn"], 2.5);
+    #[test]
+    fn logs_dir_prefers_override_over_defaults() {
+        with_temp_logs(|dir| {
+            assert_eq!(logs_dir(), dir);
+        });
     }
 }

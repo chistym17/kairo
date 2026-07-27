@@ -1,20 +1,27 @@
-//! Runtime phase control for the agent loop (slice 1–5).
+//! Runtime phase control for the agent loop (slice 1–6).
 //!
 //! The model still chooses actions, but the runtime owns which phase the run is
 //! in. Tool schemas are filtered from [`Phase`] / recovery mode (slice 2–4).
 //! Explore → Act is driven by progress / evidence-checkpoint signals (slice 3).
 //! Failed `apply_patch` enters a sticky recovery tool set (slice 4).
 //! Successful edits enter Verify; pass / unusable verify enter Finish (slice 5).
+//! Consecutive harness denials terminate with [`StopReason::NoProgress`] (slice 6).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::state::step::Action;
+use crate::state::stop_reason::StopReason;
 use crate::tools::ToolResult;
 use crate::verification::{VerificationOutcome, VerificationStatus};
 
 /// Consecutive no-progress observations that force Explore → Act.
 pub const NO_PROGRESS_ACT_THRESHOLD: usize = 2;
+
+/// Consecutive harness denials that stop the run as [`StopReason::NoProgress`].
+///
+/// Kept well below typical `MAX_STEPS` so denial spirals cannot burn the budget.
+pub const NO_PROGRESS_STOP_THRESHOLD: usize = 6;
 
 /// Extra model turns allowed in Finish before harness auto-completes.
 pub const FINISH_PHASE_IDLE_TURNS: u32 = 1;
@@ -137,6 +144,8 @@ pub struct RunState {
     pub patch_fail_path: Option<PathBuf>,
     /// Model turn when Finish phase began (slice 5 auto-complete).
     pub entered_finish_turn: Option<u32>,
+    /// Consecutive harness denials (phase / checkpoint / duplicate / blocked).
+    pub consecutive_denials: usize,
 }
 
 impl RunState {
@@ -150,6 +159,7 @@ impl RunState {
             patch_fail_recovery: false,
             patch_fail_path: None,
             entered_finish_turn: None,
+            consecutive_denials: 0,
         }
     }
 
@@ -346,6 +356,33 @@ impl RunState {
         }
     }
 
+    /// Update the denial streak from a tool outcome (slice 6).
+    ///
+    /// Returns [`StopReason::NoProgress`] when consecutive harness denials hit
+    /// [`NO_PROGRESS_STOP_THRESHOLD`]. Any non-denial outcome clears the streak.
+    pub fn observe_denial_streak(&mut self, result: &ToolResult) -> Option<StopReason> {
+        if is_denied_result(result) {
+            self.consecutive_denials = self.consecutive_denials.saturating_add(1);
+            if self.consecutive_denials >= NO_PROGRESS_STOP_THRESHOLD {
+                return Some(StopReason::NoProgress);
+            }
+            None
+        } else {
+            self.consecutive_denials = 0;
+            None
+        }
+    }
+
+    /// Message appended when denial-streak stop fires.
+    pub fn no_progress_stop_message(&self) -> String {
+        format!(
+            "Stopped: {NO_PROGRESS_STOP_THRESHOLD} consecutive harness denials \
+             (phase/checkpoint/duplicate/blocked) with no productive action. \
+             Last mode: {}.",
+            self.tool_mode_label()
+        )
+    }
+
     /// Observe one tool outcome. May transition Explore → Act.
     ///
     /// Returns `Some(ACT_TRANSITION_MESSAGE)` when the phase just changed.
@@ -513,7 +550,7 @@ fn is_denied_result(result: &ToolResult) -> bool {
         return false;
     }
     let Some(err) = result.error.as_deref() else {
-        return true; // failed without detail — treat as no progress
+        return false; // failed attempt without denial text — not a harness denial
     };
     let l = err.to_ascii_lowercase();
     l.contains("duplicate read denied")
@@ -522,8 +559,10 @@ fn is_denied_result(result: &ToolResult) -> bool {
         || l.contains("is not available in")
         || l.contains("phase_tool_denied")
         || l.contains("act phase: read_file")
+        || l.contains("read_file is limited")
         || l.contains("patch recovery:")
         || l.contains("blocked:")
+        || l.contains("explore-shell budget")
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -759,5 +798,65 @@ mod tests {
         assert_eq!(state.phase, Phase::Verify);
         assert!(state.effective_tools().contains(&"apply_patch"));
         assert!(state.effective_tools().contains(&"run_shell"));
+    }
+
+    fn denied_result(msg: &str) -> ToolResult {
+        ToolResult {
+            success: false,
+            output: String::new(),
+            diff: None,
+            error: Some(msg.into()),
+            stop_reason: None,
+        }
+    }
+
+    #[test]
+    fn six_consecutive_denials_stop_with_no_progress() {
+        let mut state = RunState::new();
+        let denied = denied_result(
+            "Tool `search_code` is not available in act phase. Allowed: read_file, update_plan, apply_patch, finish.",
+        );
+        for i in 1..NO_PROGRESS_STOP_THRESHOLD {
+            assert!(
+                state.observe_denial_streak(&denied).is_none(),
+                "should not stop at denial {i}"
+            );
+            assert_eq!(state.consecutive_denials, i);
+        }
+        assert_eq!(
+            state.observe_denial_streak(&denied),
+            Some(StopReason::NoProgress)
+        );
+        assert_eq!(state.consecutive_denials, NO_PROGRESS_STOP_THRESHOLD);
+    }
+
+    #[test]
+    fn productive_outcome_clears_denial_streak() {
+        let mut state = RunState::new();
+        let denied = denied_result("Duplicate read denied: Exact content already available");
+        for _ in 0..3 {
+            let _ = state.observe_denial_streak(&denied);
+        }
+        assert_eq!(state.consecutive_denials, 3);
+        assert!(state.observe_denial_streak(&ok_result()).is_none());
+        assert_eq!(state.consecutive_denials, 0);
+    }
+
+    #[test]
+    fn patch_failure_is_not_a_harness_denial() {
+        let mut state = RunState::new();
+        let denied = denied_result("Exploration checkpoint active (no-progress streak=5)");
+        let _ = state.observe_denial_streak(&denied);
+        assert_eq!(state.consecutive_denials, 1);
+
+        let patch_fail = ToolResult {
+            success: false,
+            output: String::new(),
+            diff: None,
+            error: Some("hunk mismatch: context did not match".into()),
+            stop_reason: None,
+        };
+        assert!(state.observe_denial_streak(&patch_fail).is_none());
+        assert_eq!(state.consecutive_denials, 0);
     }
 }

@@ -304,7 +304,7 @@ pub fn aggregate(trials: Vec<TrialResult>) -> BenchmarkReport {
 }
 
 pub fn log_path_for_run(run_id: &str) -> PathBuf {
-    PathBuf::from("logs").join(format!("run_{run_id}.jsonl"))
+    crate::logging::run_log_path(run_id)
 }
 
 fn classify_failure(

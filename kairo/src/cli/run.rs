@@ -26,9 +26,8 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
         return run_serve(cli).await;
     }
 
-    if matches!(cli.output, OutputFormat::Jsonl) {
-        logging::set_quiet(true);
-    }
+    // Product CLI: quiet harness debug by default; --verbose / KAIRO_VERBOSE restores it.
+    logging::configure_cli_quiet(cli.verbose);
 
     let interactive_setup = io::stdin().is_terminal()
         && !matches!(cli.output, OutputFormat::Jsonl);

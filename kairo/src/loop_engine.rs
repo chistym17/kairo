@@ -1724,9 +1724,11 @@ fn commit_tool_outcome(
             // Harness-owned verify: preferred discovered check after a successful edit.
             // Keeps the edit marked successful; appends evidence for the model.
             if let Some(snapshot) = state.project_snapshot.clone() {
-                if let Some(report) =
-                    crate::verification::try_auto_post_edit_verify(&snapshot, &state.workspace_root)
-                {
+                if let Some(report) = crate::verification::try_auto_post_edit_verify(
+                    &snapshot,
+                    &state.workspace_root,
+                    std::path::Path::new(&path),
+                ) {
                     result.output.push_str(&report.output_suffix);
                     state.shell_cache.store_live(
                         "run_shell",
@@ -1821,6 +1823,20 @@ fn commit_tool_outcome(
         state.progress.checkpoint_active,
     ) {
         log_phase_transition(state, message);
+    }
+
+    if let Some(reason) = state.run_control.observe_denial_streak(&result) {
+        let stop_msg = state.run_control.no_progress_stop_message();
+        write_event(&state.run_id, "no_progress_stop", &stop_msg, 0);
+        crate::agent_println!("\n[agent] {}", stop_msg);
+        match &mut result.error {
+            Some(e) => {
+                e.push_str("\n\n");
+                e.push_str(&stop_msg);
+            }
+            None => result.error = Some(stop_msg),
+        }
+        result.stop_reason = Some(reason);
     }
 
     if !read_cache_hit
