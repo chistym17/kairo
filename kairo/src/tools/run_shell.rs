@@ -144,6 +144,7 @@ fn format_shell_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::run_command::DEFAULT_TIMEOUT_SECS;
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 

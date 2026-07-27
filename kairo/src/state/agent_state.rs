@@ -12,6 +12,7 @@ use crate::state::completion::CompletionTracker;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
 use crate::state::patch_recovery::PatchRecoveryState;
+use crate::state::phase::RunState;
 use crate::state::progress::ProgressState;
 use crate::state::step::Step;
 use crate::llm::{ModelPricing, UsageAccumulator};
@@ -58,6 +59,9 @@ pub struct AgentState {
 
     /// Consecutive no-progress / stagnation tracking (soft guidance).
     pub progress: ProgressState,
+
+    /// Phase + seen-evidence tracking for runtime tool control (slice 1–3).
+    pub run_control: RunState,
 
     /// Targeted reread grant after failed apply_patch; write_file source policy.
     pub patch_recovery: PatchRecoveryState,
@@ -111,6 +115,7 @@ impl AgentState {
             shell_cache: ShellCommandCache::new(),
             exploration: ExplorationTracker::new(),
             progress: ProgressState::new(),
+            run_control: RunState::new(),
             patch_recovery: PatchRecoveryState::new(),
             completion: CompletionTracker::new(),
             governance: GovernanceState::new(),

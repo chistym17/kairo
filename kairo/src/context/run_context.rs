@@ -129,6 +129,7 @@ fn summarize_run_steps(steps: &[Step]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolResult;
     use std::path::PathBuf;
 
     #[test]
