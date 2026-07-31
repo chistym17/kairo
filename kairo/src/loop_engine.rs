@@ -721,9 +721,9 @@ async fn execute_one_tool(
 
     let verified_for_finish = finish_allowed(&state.history) || *verified_in_batch;
 
-    match apply_governance_preflight(state, &action, model_turn) {
-        GovernancePreflightOutcome::Proceed => {}
-        GovernancePreflightOutcome::Rejected(result) => {
+    match evaluate_action(state, &action, model_turn) {
+        EvaluationOutcome::Proceed => {}
+        EvaluationOutcome::Reject(result) => {
             return commit_tool_outcome(
                 state,
                 observer,
@@ -734,69 +734,23 @@ async fn execute_one_tool(
                 result,
             );
         }
-        GovernancePreflightOutcome::Terminate(reason) => {
+        EvaluationOutcome::RejectAndStop(result, reason) => {
+            let _ = commit_tool_outcome(
+                state,
+                observer,
+                step_index,
+                model_turn,
+                action,
+                tool_call_id,
+                result,
+            );
             write_summary(state, &reason);
             return Some(reason);
         }
-    }
-
-    if let Err(outcome) = apply_action_policy_gate(state, &action) {
-        match outcome {
-            ActionPolicyGateError::Denied(denied) => {
-                return commit_tool_outcome(
-                    state,
-                    observer,
-                    step_index,
-                    model_turn,
-                    action,
-                    tool_call_id,
-                    denied,
-                );
-            }
-            ActionPolicyGateError::Stop { reason, message } => {
-                write_event(
-                    &state.run_id,
-                    "invalid_action_stop",
-                    &message[..message.len().min(400)],
-                    0,
-                );
-                let _ = commit_tool_outcome(
-                    state,
-                    observer,
-                    step_index,
-                    model_turn,
-                    action,
-                    tool_call_id,
-                    ToolResult::error(message),
-                );
-                write_summary(state, &reason);
-                return Some(reason);
-            }
+        EvaluationOutcome::StopWithoutResult(reason) => {
+            write_summary(state, &reason);
+            return Some(reason);
         }
-    }
-
-    if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
-        return commit_tool_outcome(
-            state,
-            observer,
-            step_index,
-            model_turn,
-            action,
-            tool_call_id,
-            denied,
-        );
-    }
-
-    if let Err(denied) = apply_shell_mutation_gate(state, &action) {
-        return commit_tool_outcome(
-            state,
-            observer,
-            step_index,
-            model_turn,
-            action,
-            tool_call_id,
-            denied,
-        );
     }
 
     if let Err(denied) = resolve_tool_authorization(state, &action, approval_gate, session) {
@@ -1032,50 +986,21 @@ async fn execute_readonly_group(
             },
         );
 
-        match apply_governance_preflight(state, &action, model_turn) {
-            GovernancePreflightOutcome::Proceed => {}
-            GovernancePreflightOutcome::Rejected(result) => {
+        match evaluate_action(state, &action, model_turn) {
+            EvaluationOutcome::Proceed => {}
+            EvaluationOutcome::Reject(result) => {
                 prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(result)));
                 continue;
             }
-            GovernancePreflightOutcome::Terminate(reason) => {
-                write_summary(state, &reason);
-                return Some(reason);
-            }
-        }
-
-        match apply_action_policy_gate(state, &action) {
-            Ok(()) => {}
-            Err(ActionPolicyGateError::Denied(denied)) => {
-                prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
-                continue;
-            }
-            Err(ActionPolicyGateError::Stop { reason, message }) => {
-                write_event(
-                    &state.run_id,
-                    "invalid_action_stop",
-                    &message[..message.len().min(400)],
-                    0,
-                );
-                prepared.push((
-                    step_index,
-                    action,
-                    tool_call_id,
-                    PreparedOutcome::Early(ToolResult::error(message)),
-                ));
+            EvaluationOutcome::RejectAndStop(result, reason) => {
+                prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(result)));
                 pending_invalid_stop = Some(reason);
                 continue;
             }
-        }
-
-        if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
-            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
-            continue;
-        }
-
-        if let Err(denied) = apply_shell_mutation_gate(state, &action) {
-            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
-            continue;
+            EvaluationOutcome::StopWithoutResult(reason) => {
+                write_summary(state, &reason);
+                return Some(reason);
+            }
         }
 
         let validation = validate_action_shape(&action, false, false);
@@ -2317,6 +2242,71 @@ fn apply_evidence_checkpoint_gate(
             Err(ToolResult::error(message))
         }
     }
+}
+
+/// Consolidated result of [`evaluate_action`]'s shared pre-dispatch gate
+/// sequence (final-design-plan.md §6, Slice 2 Part 2).
+enum EvaluationOutcome {
+    /// Passed every gate in this sequence; caller may continue toward
+    /// authorization / dispatch.
+    Proceed,
+    /// Rejected; commit this `ToolResult` and the run continues.
+    Reject(ToolResult),
+    /// Rejected; commit this `ToolResult`, then stop the run with `StopReason`
+    /// (`action_policy`'s invalid-action-limit fallback).
+    RejectAndStop(ToolResult, StopReason),
+    /// Stop the run immediately with no `ToolResult` to commit for this
+    /// action (governance's hard `Terminate` — no outcome is recorded for
+    /// the action that triggered it, matching prior behavior exactly).
+    StopWithoutResult(StopReason),
+}
+
+/// The shared pre-dispatch gate sequence: governance preflight → phase/scope
+/// policy → exploration-evidence checkpoint → shell-mutation safety, in that
+/// fixed order. Both the sequential (`execute_one_tool`) and parallel
+/// read-only (`execute_readonly_group`) execution paths call this single
+/// function now instead of duplicating the sequence — Slice 2's "one
+/// `evaluate_action` entry point" hypothesis (final-design-plan.md §8).
+///
+/// Not yet folded in here: `resolve_tool_authorization` (kept as an explicit
+/// separate stage per §6 — "Authorization stays a distinct stage" — and the
+/// read-only parallel path never needs it, since none of its actions have
+/// authorizable effects), the write-existing-source check (mutating actions
+/// only, sequential-path-only), and `validate_action_shape` (argument-shape
+/// validation, called at actual dispatch time in `produce_tool_result`).
+/// Consolidating those is later Slice 2 work, not this part.
+fn evaluate_action(state: &mut AgentState, action: &Action, model_turn: u32) -> EvaluationOutcome {
+    match apply_governance_preflight(state, action, model_turn) {
+        GovernancePreflightOutcome::Proceed => {}
+        GovernancePreflightOutcome::Rejected(result) => return EvaluationOutcome::Reject(result),
+        GovernancePreflightOutcome::Terminate(reason) => {
+            return EvaluationOutcome::StopWithoutResult(reason);
+        }
+    }
+
+    match apply_action_policy_gate(state, action) {
+        Ok(()) => {}
+        Err(ActionPolicyGateError::Denied(denied)) => return EvaluationOutcome::Reject(denied),
+        Err(ActionPolicyGateError::Stop { reason, message }) => {
+            write_event(
+                &state.run_id,
+                "invalid_action_stop",
+                &message[..message.len().min(400)],
+                0,
+            );
+            return EvaluationOutcome::RejectAndStop(ToolResult::error(message), reason);
+        }
+    }
+
+    if let Err(denied) = apply_evidence_checkpoint_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = apply_shell_mutation_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    EvaluationOutcome::Proceed
 }
 
 enum GovernancePreflightOutcome {
