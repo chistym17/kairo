@@ -81,19 +81,22 @@ mod tests {
     }
 
     #[test]
-    fn act_mode_request_excludes_search_shell_and_read() {
+    fn act_mode_request_excludes_search_and_shell_but_includes_scoped_read() {
         let tools = tools_for_phase(Phase::Act);
         let names = tool_names(&tools);
+        // read_file stays in the schema (Slice 1, final-design-plan.md §5.1):
+        // the runtime scopes which paths it may target rather than removing
+        // the tool itself. See action_policy::classify_invalid for that gate.
         assert_eq!(
             names,
             vec![
                 "apply_patch".to_string(),
                 "finish".to_string(),
+                "read_file".to_string(),
                 "update_plan".to_string(),
             ]
         );
         for banned in [
-            "read_file",
             "search_code",
             "find_files",
             "locate",

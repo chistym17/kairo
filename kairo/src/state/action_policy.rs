@@ -8,6 +8,7 @@ use std::path::Path;
 use crate::state::phase::{Phase, RunState, ACT_TOOLS, FINISH_TOOLS, PATCH_RECOVERY_TOOLS, VERIFY_TOOLS};
 use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
+use crate::state::tool_scope::{ScopeBudget, ToolScope};
 use crate::tools::ToolResult;
 
 /// Why a requested action is invalid for the current runtime state.
@@ -94,7 +95,8 @@ pub fn contract_for(run: &RunState) -> PhaseContract {
             phase_label: "explore",
         },
         Phase::Act => PhaseContract {
-            // Intentionally no read_file — evidence must come from Explore.
+            // read_file is present (Slice 1) but bounded to seen_files — see
+            // classify_invalid's act_read_scope, not this list, for that gate.
             allowed_tools: ACT_TOOLS,
             max_invalid_actions: DEFAULT_MAX_INVALID_ACTIONS,
             fallback: InvalidFallback::FinishWithBlocker,
@@ -168,9 +170,18 @@ fn classify_invalid(
             {
                 return Some(InvalidActionReason::RecoveryTargetMismatch);
             }
-        } else if matches!(run.phase, Phase::Act | Phase::Verify) {
-            // Act normally has no read_file; if a future contract re-adds it,
-            // unseen paths are still argument violations.
+        } else if matches!(run.phase, Phase::Act) {
+            // Slice 1 (final-design-plan.md §5.1, §8): read_file stays visible
+            // in Act's schema, but a read outside the seen-files scope is
+            // still rejected — as a uniform ArgumentPolicyViolation, not by
+            // the tool vanishing from the schema.
+            if !act_read_scope(run).permits_path(path) {
+                return Some(InvalidActionReason::ArgumentPolicyViolation);
+            }
+        } else if matches!(run.phase, Phase::Verify) {
+            // Verify's read gate predates ToolScope and is left as-is for
+            // this slice — Slice 1's hypothesis is scoped to Act only
+            // (final-design-plan.md §8, Slice 1 "Scope").
             if !run.has_seen_file(path) && run.justified_unseen_reads_left == 0 {
                 return Some(InvalidActionReason::ArgumentPolicyViolation);
             }
@@ -178,6 +189,22 @@ fn classify_invalid(
     }
 
     None
+}
+
+/// The `ToolScope` governing `read_file` in Act: bounded to files already
+/// seen this run, unlimited re-reads of those. Recomputed fresh from
+/// `RunState` on every check (final-design-plan.md §5.2) rather than stored.
+///
+/// An empty `seen_files` set cannot go through `ToolScope::bounded_paths`
+/// (its non-empty-set invariant would panic — see `tool_scope.rs`), so it is
+/// treated as `disabled()`: with no evidence yet, no read is in scope, same
+/// outcome as before this scope existed.
+fn act_read_scope(run: &RunState) -> ToolScope {
+    if run.seen_files.is_empty() {
+        ToolScope::disabled()
+    } else {
+        ToolScope::bounded_paths(run.seen_files.clone(), ScopeBudget::Unlimited)
+    }
 }
 
 /// Finish summaries that try to reopen exploration / ask for tool access.
@@ -258,7 +285,8 @@ fn escape_finish_correction(run: &RunState, attempt: usize, require_tool_choice:
          finish requesting more tools or permissions is not allowed in Act.\n\
          Exploration is closed. You already have enough context to edit or to \
          name a concrete code-level blocker (file + suspected bug).\n\n\
-         Allowed actions: update_plan, apply_patch, finish.\n\
+         Allowed actions: read_file (already-seen files only), update_plan, \
+         apply_patch, finish.\n\
          Prefer apply_patch now.",
     );
     if !run.seen_files.is_empty() {
@@ -450,6 +478,37 @@ mod tests {
                 ..
             } => {}
             other => panic!("expected stop on 3rd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn act_allows_read_of_previously_seen_file() {
+        let mut run = RunState::new();
+        run.note_file_seen(PathBuf::from("Board.tsx"));
+        assert!(run.enter_act());
+        let _ = run.phase_guidance_for_injection(); // clear one-shot
+
+        let decision = validate_action(&mut run, &read("Board.tsx"));
+        assert!(matches!(decision, ActionDecision::Allow));
+        assert_eq!(run.consecutive_invalid_actions, 0);
+    }
+
+    #[test]
+    fn act_rejects_read_outside_seen_files_scope() {
+        let mut run = RunState::new();
+        // A different file is in scope, but the requested one is not — this
+        // must not be treated as "Act allows any read" once one file is seen.
+        run.note_file_seen(PathBuf::from("Board.tsx"));
+        assert!(run.enter_act());
+        let _ = run.phase_guidance_for_injection();
+
+        let decision = validate_action(&mut run, &read("store.ts"));
+        match decision {
+            ActionDecision::RejectAndRetry {
+                reason: InvalidActionReason::ArgumentPolicyViolation,
+                ..
+            } => {}
+            other => panic!("expected argument policy violation, got {other:?}"),
         }
     }
 

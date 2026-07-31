@@ -34,8 +34,9 @@ Do not read or search further. Do not finish by asking for more tools or permiss
 
 /// Sticky reminder while Act remains open without an edit attempt.
 pub const ACT_STICKY_MESSAGE: &str = "\
-Act phase: tools are limited to update_plan, apply_patch, and finish. \
-Use the files already in context. Do not request reads or searches. \
+Act phase: tools are update_plan, apply_patch, finish, and read_file \
+(already-seen files only — re-reading them wastes a turn). \
+Do not search or request unseen files. \
 finish must name a concrete code-level blocker — never ask for tool permissions.";
 
 /// Message when a failed patch locks tools to reread → patch / finish.
@@ -89,11 +90,18 @@ pub const EXPLORE_TOOLS: &[&str] = &[
     "finish",
 ];
 
-/// Act phase: plan / patch / finish only. No reads, search, or shell.
+/// Act phase: plan / patch / finish, plus `read_file` scoped to already-seen
+/// files. No search or shell.
 ///
-/// Reads were removed after eval runs showed models thrashing on duplicate
-/// `read_file` instead of editing. Patch-recovery still grants one targeted read.
-pub const ACT_TOOLS: &[&str] = &["update_plan", "apply_patch", "finish"];
+/// `read_file` was previously removed from this list entirely after eval runs
+/// showed models thrashing on duplicate reads instead of editing. It is back
+/// in the schema (`final-design-plan.md` §5.1, §8 Slice 1): the tool no longer
+/// disappears out from under the model, but `action_policy::classify_invalid`
+/// still rejects reads of files outside `RunState.seen_files` via a bounded
+/// `ToolScope`, exactly as before minus the schema cliff. Patch-recovery
+/// separately grants one targeted read of the failed path regardless of
+/// whether it was previously seen.
+pub const ACT_TOOLS: &[&str] = &["read_file", "update_plan", "apply_patch", "finish"];
 
 /// After a failed patch: reread target → patch / finish only (slice 4).
 pub const PATCH_RECOVERY_TOOLS: &[&str] = &["read_file", "apply_patch", "finish"];
@@ -748,12 +756,15 @@ mod tests {
     }
 
     #[test]
-    fn act_tools_exclude_search_shell_and_read() {
+    fn act_tools_exclude_search_and_shell_but_allow_scoped_read() {
         assert!(!Phase::Act.allows_tool("search_code"));
         assert!(!Phase::Act.allows_tool("run_shell"));
         assert!(!Phase::Act.allows_tool("run_command"));
-        assert!(!Phase::Act.allows_tool("read_file"));
         assert!(!Phase::Act.allows_tool("locate"));
+        // read_file is visible in the schema (Slice 1) — see
+        // action_policy::classify_invalid for the seen-files scope that
+        // still rejects unseen-path reads.
+        assert!(Phase::Act.allows_tool("read_file"));
         assert!(Phase::Act.allows_tool("apply_patch"));
         assert!(Phase::Act.allows_tool("update_plan"));
         assert!(Phase::Act.allows_tool("finish"));
