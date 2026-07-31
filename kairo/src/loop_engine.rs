@@ -721,7 +721,15 @@ async fn execute_one_tool(
 
     let verified_for_finish = finish_allowed(&state.history) || *verified_in_batch;
 
-    match evaluate_action(state, &action, model_turn) {
+    match evaluate_action(
+        state,
+        &action,
+        model_turn,
+        require_verified_finish,
+        verified_for_finish,
+        approval_gate,
+        session,
+    ) {
         EvaluationOutcome::Proceed => {}
         EvaluationOutcome::Reject(result) => {
             return commit_tool_outcome(
@@ -753,48 +761,7 @@ async fn execute_one_tool(
         }
     }
 
-    if let Err(denied) = resolve_tool_authorization(state, &action, approval_gate, session) {
-        return commit_tool_outcome(
-            state,
-            observer,
-            step_index,
-            model_turn,
-            action,
-            tool_call_id,
-            denied,
-        );
-    }
-
-    // Existing source files must use apply_patch — write_file rewrites break APIs.
-    if let Action::WriteFile { path, .. } = &action {
-        if let Some(denied) = state
-            .patch_recovery
-            .deny_write_existing_source(&state.workspace_root, path)
-        {
-            write_event(
-                &state.run_id,
-                "write_file_denied_existing_source",
-                &format!("{}", path.display()),
-                0,
-            );
-            return commit_tool_outcome(
-                state,
-                observer,
-                step_index,
-                model_turn,
-                action,
-                tool_call_id,
-                denied,
-            );
-        }
-    }
-
-    let mut result = produce_tool_result(
-        state,
-        &action,
-        require_verified_finish,
-        verified_for_finish,
-    );
+    let mut result = produce_tool_result(state, &action, verified_for_finish);
 
     if result.success {
         if let Some(path) = mutating_path(&action) {
@@ -945,7 +912,6 @@ async fn execute_readonly_group(
     // Emit start events + validate; collect spawn jobs for valid tools.
     enum PreparedOutcome {
         Early(ToolResult),
-        Invalid(ValidationError),
         Execute,
     }
 
@@ -986,7 +952,9 @@ async fn execute_readonly_group(
             },
         );
 
-        match evaluate_action(state, &action, model_turn) {
+        // Finish never appears in a read-only batch (`is_parallel_readonly`),
+        // so the finish-verification args are always irrelevant here.
+        match evaluate_action(state, &action, model_turn, false, false, approval_gate, session) {
             EvaluationOutcome::Proceed => {}
             EvaluationOutcome::Reject(result) => {
                 prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(result)));
@@ -1003,19 +971,7 @@ async fn execute_readonly_group(
             }
         }
 
-        let validation = validate_action_shape(&action, false, false);
-        if let Some(err) = &validation {
-            write_event(&state.run_id, &err.event, &err.message, 0);
-        }
-        prepared.push((
-            step_index,
-            action,
-            tool_call_id,
-            match validation {
-                Some(e) => PreparedOutcome::Invalid(e),
-                None => PreparedOutcome::Execute,
-            },
-        ));
+        prepared.push((step_index, action, tool_call_id, PreparedOutcome::Execute));
     }
 
     // Spawn blocking work for tools that passed validation.
@@ -1025,23 +981,6 @@ async fn execute_readonly_group(
         match outcome {
             PreparedOutcome::Early(result) => {
                 handles.push((i, step_index, action, tool_call_id, Some(result), None, false));
-            }
-            PreparedOutcome::Invalid(e) => {
-                handles.push((
-                    i,
-                    step_index,
-                    action,
-                    tool_call_id,
-                    Some(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        diff: None,
-                        error: Some(e.message),
-                        stop_reason: None,
-                    }),
-                    None,
-                    false,
-                ));
             }
             PreparedOutcome::Execute => {
                 if let Action::ReadFile {
@@ -1217,120 +1156,111 @@ async fn execute_readonly_group(
     None
 }
 
+/// Dispatches an already-validated action. Callers must have already run
+/// `evaluate_action` and only invoke this on `EvaluationOutcome::Proceed` —
+/// shape, scope, authorization, and existing-source checks all happen there,
+/// not here.
 fn produce_tool_result(
     state: &mut AgentState,
     action: &Action,
-    require_verified_finish: bool,
     verified_for_finish: bool,
 ) -> ToolResult {
-    match validate_action_shape(action, require_verified_finish, verified_for_finish) {
-        Some(ValidationError { event, message }) => {
-            write_event(&state.run_id, &event, &message, 0);
-            ToolResult {
-                success: false,
-                output: String::new(),
-                diff: None,
-                error: Some(message),
-                stop_reason: None,
+    match action {
+        Action::UpdatePlan { objective, steps } => {
+            let updated = if let Some(existing) = state.task.plan.as_mut() {
+                existing.amend_from_update(objective, steps).map(|_| ())
+            } else {
+                crate::state::AgentPlan::from_update(objective, steps).map(|plan| {
+                    state.task.plan = Some(plan);
+                })
+            };
+            match updated {
+                Ok(()) => {
+                    let output = format!(
+                        "Plan updated:\n{}",
+                        state
+                            .task
+                            .plan
+                            .as_ref()
+                            .expect("plan present after update")
+                            .render()
+                    );
+                    state.task.set_objective_if_empty(objective);
+                    state.governance.pre_edit.observe_plan(steps);
+                    ToolResult {
+                        success: true,
+                        output,
+                        diff: None,
+                        error: None,
+                        stop_reason: None,
+                    }
+                }
+                Err(message) => {
+                    write_event(&state.run_id, "invalid_tool_args", &message, 0);
+                    ToolResult {
+                        success: false,
+                        output: String::new(),
+                        diff: None,
+                        error: Some(message),
+                        stop_reason: None,
+                    }
+                }
             }
         }
-        None => match action {
-            Action::UpdatePlan { objective, steps } => {
-                let updated = if let Some(existing) = state.task.plan.as_mut() {
-                    existing.amend_from_update(objective, steps).map(|_| ())
-                } else {
-                    crate::state::AgentPlan::from_update(objective, steps).map(|plan| {
-                        state.task.plan = Some(plan);
-                    })
-                };
-                match updated {
-                    Ok(()) => {
-                        let output = format!(
-                            "Plan updated:\n{}",
-                            state
-                                .task
-                                .plan
-                                .as_ref()
-                                .expect("plan present after update")
-                                .render()
-                        );
-                        state.task.set_objective_if_empty(objective);
-                        state.governance.pre_edit.observe_plan(steps);
-                        ToolResult {
-                            success: true,
-                            output,
-                            diff: None,
-                            error: None,
-                            stop_reason: None,
-                        }
-                    }
-                    Err(message) => {
-                        write_event(&state.run_id, "invalid_tool_args", &message, 0);
-                        ToolResult {
-                            success: false,
-                            output: String::new(),
-                            diff: None,
-                            error: Some(message),
-                            stop_reason: None,
-                        }
-                    }
-                }
+        Action::DetectProjectSnapshot { path } => {
+            let result = tools::project_snapshot::execute(path, &state.workspace_root);
+            if result.success {
+                state.project_snapshot =
+                    Some(tools::project_snapshot::detect(&state.workspace_root));
             }
-            Action::DetectProjectSnapshot { path } => {
-                let result = tools::project_snapshot::execute(path, &state.workspace_root);
-                if result.success {
-                    state.project_snapshot =
-                        Some(tools::project_snapshot::detect(&state.workspace_root));
-                }
-                result
+            result
+        }
+        Action::Locate { query, path } => locate_with_state(state, query, path),
+        Action::SummarizeRepo { depth, path, focus } => {
+            summarize_repo_with_state(state, depth, path, focus.as_deref())
+        }
+        Action::Finish { summary } => {
+            let grounded = crate::state::ground_finish_summary(state, summary);
+            let stop_reason = if verified_for_finish {
+                StopReason::TaskComplete
+            } else {
+                StopReason::CompletedUnverified
+            };
+            ToolResult {
+                success: true,
+                output: grounded,
+                diff: None,
+                error: None,
+                stop_reason: Some(stop_reason),
             }
-            Action::Locate { query, path } => locate_with_state(state, query, path),
-            Action::SummarizeRepo { depth, path, focus } => {
-                summarize_repo_with_state(state, depth, path, focus.as_deref())
-            }
-            Action::Finish { summary } => {
-                let grounded = crate::state::ground_finish_summary(state, summary);
-                let stop_reason = if verified_for_finish {
-                    StopReason::TaskComplete
-                } else {
-                    StopReason::CompletedUnverified
-                };
-                ToolResult {
-                    success: true,
-                    output: grounded,
-                    diff: None,
-                    error: None,
-                    stop_reason: Some(stop_reason),
-                }
-            }
-            Action::ReadFile {
-                path,
-                offset,
-                limit,
-            } => read_file_cached(state, path, *offset, *limit),
-            Action::GitDiff { path } => {
-                let ctx = tools::git_diff::GitDiffContext {
-                    files_ever_modified: state
-                        .governance
-                        .files_ever_modified
-                        .iter()
-                        .cloned()
-                        .collect(),
-                };
-                tools::git_diff::execute(path, &state.workspace_root, Some(&ctx))
-            }
-            Action::RunShell {
-                command,
-                cwd,
-                timeout_secs,
-            } => run_shell_deduped(state, command, cwd, *timeout_secs),
-            Action::RunCommand {
-                cmd,
-                cwd,
-                timeout_secs,
-            } => run_command_deduped(state, cmd, cwd, *timeout_secs),
-            _ => tools::dispatch(action, &state.workspace_root),
-        },
+        }
+        Action::ReadFile {
+            path,
+            offset,
+            limit,
+        } => read_file_cached(state, path, *offset, *limit),
+        Action::GitDiff { path } => {
+            let ctx = tools::git_diff::GitDiffContext {
+                files_ever_modified: state
+                    .governance
+                    .files_ever_modified
+                    .iter()
+                    .cloned()
+                    .collect(),
+            };
+            tools::git_diff::execute(path, &state.workspace_root, Some(&ctx))
+        }
+        Action::RunShell {
+            command,
+            cwd,
+            timeout_secs,
+        } => run_shell_deduped(state, command, cwd, *timeout_secs),
+        Action::RunCommand {
+            cmd,
+            cwd,
+            timeout_secs,
+        } => run_command_deduped(state, cmd, cwd, *timeout_secs),
+        _ => tools::dispatch(action, &state.workspace_root),
     }
 }
 
@@ -2164,6 +2094,25 @@ fn apply_shell_mutation_gate(
     Err(ToolResult::error(message))
 }
 
+/// Argument-shape validation as a gate: rejects malformed actions (bad
+/// paths, empty required fields, an unverified `finish`) before they reach
+/// authorization. Wraps `validate_action_shape`, writing the same event and
+/// building the same error `ToolResult` it always has.
+fn apply_action_shape_gate(
+    state: &mut AgentState,
+    action: &Action,
+    require_verified_finish: bool,
+    verified_for_finish: bool,
+) -> Result<(), ToolResult> {
+    match validate_action_shape(action, require_verified_finish, verified_for_finish) {
+        Some(ValidationError { event, message }) => {
+            write_event(&state.run_id, &event, &message, 0);
+            Err(ToolResult::error(message))
+        }
+        None => Ok(()),
+    }
+}
+
 enum ActionPolicyGateError {
     Denied(ToolResult),
     Stop { reason: StopReason, message: String },
@@ -2268,14 +2217,36 @@ enum EvaluationOutcome {
 /// function now instead of duplicating the sequence — Slice 2's "one
 /// `evaluate_action` entry point" hypothesis (final-design-plan.md §8).
 ///
-/// Not yet folded in here: `resolve_tool_authorization` (kept as an explicit
-/// separate stage per §6 — "Authorization stays a distinct stage" — and the
-/// read-only parallel path never needs it, since none of its actions have
-/// authorizable effects), the write-existing-source check (mutating actions
-/// only, sequential-path-only), and `validate_action_shape` (argument-shape
-/// validation, called at actual dispatch time in `produce_tool_result`).
-/// Consolidating those is later Slice 2 work, not this part.
-fn evaluate_action(state: &mut AgentState, action: &Action, model_turn: u32) -> EvaluationOutcome {
+/// Argument-shape validation (`validate_action_shape`) runs next, before
+/// authorization, so malformed actions are rejected before they can ever
+/// prompt for approval — `Validate → Authorize → Execute → Classify`
+/// (final-design-plan.md §6).
+///
+/// Authorization is included as its own explicit, ordered stage (§6 —
+/// "Authorization stays a distinct stage") rather than merged with the
+/// others: it is the only stage that can pause for a human approval
+/// decision, and it is checked after shape validation, right before the
+/// write-existing-source check, matching the sequential path's original
+/// order exactly. Both authorization and the write-existing-source check
+/// are harmless no-ops on the read-only parallel path: every read-only
+/// action classifies as `ToolEffect::ReadOnly`, which `authorize()` always
+/// allows without touching `approval_gate` or `session`, and
+/// `Action::WriteFile` never appears in a read-only batch
+/// (`is_parallel_readonly`).
+///
+/// This is now the single pre-dispatch contract: callers must invoke only
+/// `evaluate_action` and, on `Proceed`, dispatch the action directly — no
+/// separate shape, authorization, or existing-source checks remain at any
+/// call site.
+fn evaluate_action(
+    state: &mut AgentState,
+    action: &Action,
+    model_turn: u32,
+    require_verified_finish: bool,
+    verified_for_finish: bool,
+    approval_gate: Option<&dyn ApprovalGate>,
+    session: &mut Option<&mut Session>,
+) -> EvaluationOutcome {
     match apply_governance_preflight(state, action, model_turn) {
         GovernancePreflightOutcome::Proceed => {}
         GovernancePreflightOutcome::Rejected(result) => return EvaluationOutcome::Reject(result),
@@ -2304,6 +2275,32 @@ fn evaluate_action(state: &mut AgentState, action: &Action, model_turn: u32) -> 
 
     if let Err(denied) = apply_shell_mutation_gate(state, action) {
         return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) =
+        apply_action_shape_gate(state, action, require_verified_finish, verified_for_finish)
+    {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = resolve_tool_authorization(state, action, approval_gate, session) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    // Existing source files must use apply_patch — write_file rewrites break APIs.
+    if let Action::WriteFile { path, .. } = action {
+        if let Some(denied) = state
+            .patch_recovery
+            .deny_write_existing_source(&state.workspace_root, path)
+        {
+            write_event(
+                &state.run_id,
+                "write_file_denied_existing_source",
+                &format!("{}", path.display()),
+                0,
+            );
+            return EvaluationOutcome::Reject(denied);
+        }
     }
 
     EvaluationOutcome::Proceed
