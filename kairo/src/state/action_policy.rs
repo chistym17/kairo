@@ -3,7 +3,7 @@
 //! Schema filtering is the first defense; this validator is the second when the
 //! model (or provider) still emits tools/args that violate the current phase.
 
-use std::path::Path;
+use std::collections::HashSet;
 
 use crate::state::phase::{Phase, RunState, ACT_TOOLS, FINISH_TOOLS, PATCH_RECOVERY_TOOLS, VERIFY_TOOLS};
 use crate::state::step::Action;
@@ -163,11 +163,7 @@ fn classify_invalid(
 
     if let Action::ReadFile { path, .. } = action {
         if run.patch_fail_recovery {
-            if !run
-                .patch_fail_path
-                .as_ref()
-                .is_some_and(|p| paths_equal(p, path))
-            {
+            if !patch_recovery_scope(run).permits_path(path) {
                 return Some(InvalidActionReason::RecoveryTargetMismatch);
             }
         } else if matches!(run.phase, Phase::Act) {
@@ -204,6 +200,34 @@ fn act_read_scope(run: &RunState) -> ToolScope {
         ToolScope::disabled()
     } else {
         ToolScope::bounded_paths(run.seen_files.clone(), ScopeBudget::Unlimited)
+    }
+}
+
+/// The `ToolScope` governing `read_file` during patch recovery: bounded to
+/// the single failed-patch target (final-design-plan.md §5.2's recovery
+/// example). `run.patch_fail_path` is always `Some` whenever
+/// `patch_fail_recovery` is true (set together in `enter_patch_recovery`) —
+/// the `disabled()` fallback exists only so this function cannot panic if
+/// that invariant is ever violated, not because it is expected to trigger.
+///
+/// Budget is deliberately left `Unlimited` here rather than `Uses(1)`: the
+/// real one-shot consumption for this grant already happens correctly at
+/// dispatch time via `PatchRecoveryState::try_consume_read` (`loop_engine.rs`)
+/// — a sibling of `RunState` on `AgentState` that this function, taking only
+/// `&RunState`, cannot see. Reporting `Uses(1)` here regardless of whether
+/// the grant was already spent this turn would make the `ToolScope` lie
+/// about its own budget, which is worse than the scope simply not knowing.
+/// Giving this scope the real remaining count requires threading
+/// `PatchRecoveryState`'s counter in, which is deferred with the rest of the
+/// `PatchRecoveryState` + `RunState.patch_fail_recovery` state merge
+/// (final-design-plan.md §4, §9) rather than done piecemeal here.
+fn patch_recovery_scope(run: &RunState) -> ToolScope {
+    match run.patch_fail_path.as_ref() {
+        Some(path) => {
+            let paths: HashSet<_> = std::iter::once(path.clone()).collect();
+            ToolScope::bounded_paths(paths, ScopeBudget::Unlimited)
+        }
+        None => ToolScope::disabled(),
     }
 }
 
@@ -424,24 +448,10 @@ fn action_tool_name(action: &Action) -> &'static str {
     }
 }
 
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    let na = a
-        .to_string_lossy()
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .to_string();
-    let nb = b
-        .to_string_lossy()
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .to_string();
-    na == nb
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn read(path: &str) -> Action {
         Action::ReadFile {
@@ -629,5 +639,45 @@ mod tests {
             } => {}
             other => panic!("expected recovery mismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recovery_exact_path_is_allowed_via_tool_scope() {
+        let mut run = RunState::new();
+        let _ = run.enter_patch_recovery(Path::new("src/Board.tsx"));
+        let d = validate_action(&mut run, &read("src/Board.tsx"));
+        assert!(matches!(d, ActionDecision::Allow));
+    }
+
+    #[test]
+    fn recovery_scope_ignores_act_seen_files_evidence() {
+        // Recovery is bounded to the failed target only — a file that is
+        // separately in seen_files (e.g. from before the patch attempt) must
+        // not leak into the recovery scope's allow-list.
+        let mut run = RunState::new();
+        run.note_file_seen(PathBuf::from("other.rs"));
+        let _ = run.enter_patch_recovery(Path::new("target.rs"));
+        assert!(matches!(
+            validate_action(&mut run, &read("target.rs")),
+            ActionDecision::Allow
+        ));
+        match validate_action(&mut run, &read("other.rs")) {
+            ActionDecision::RejectAndRetry {
+                reason: InvalidActionReason::RecoveryTargetMismatch,
+                ..
+            } => {}
+            other => panic!("expected recovery mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn patch_recovery_scope_is_disabled_without_a_target() {
+        // Defensive only: enter_patch_recovery always sets patch_fail_path
+        // together with patch_fail_recovery, so this combination should not
+        // occur in practice — this just proves the fallback can't panic.
+        let mut run = RunState::new();
+        run.patch_fail_recovery = true;
+        run.patch_fail_path = None;
+        assert!(!patch_recovery_scope(&run).permits_path(Path::new("anything.rs")));
     }
 }
