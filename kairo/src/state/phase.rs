@@ -29,7 +29,14 @@ pub const FINISH_PHASE_IDLE_TURNS: u32 = 1;
 /// Message injected when Explore → Act (capability change is the real control).
 pub const ACT_TRANSITION_MESSAGE: &str = "\
 Exploration is complete. Use the evidence already collected.
-You must now update the plan, make a focused edit, or finish with a blocker.";
+You must now update_plan, apply_patch, or finish with a concrete code blocker. \
+Do not read or search further. Do not finish by asking for more tools or permissions.";
+
+/// Sticky reminder while Act remains open without an edit attempt.
+pub const ACT_STICKY_MESSAGE: &str = "\
+Act phase: tools are limited to update_plan, apply_patch, and finish. \
+Use the files already in context. Do not request reads or searches. \
+finish must name a concrete code-level blocker — never ask for tool permissions.";
 
 /// Message when a failed patch locks tools to reread → patch / finish.
 pub const PATCH_RECOVERY_MESSAGE: &str = "\
@@ -82,8 +89,11 @@ pub const EXPLORE_TOOLS: &[&str] = &[
     "finish",
 ];
 
-/// Act phase: plan / patch / finish (+ limited reads). No search or shell.
-pub const ACT_TOOLS: &[&str] = &["read_file", "update_plan", "apply_patch", "finish"];
+/// Act phase: plan / patch / finish only. No reads, search, or shell.
+///
+/// Reads were removed after eval runs showed models thrashing on duplicate
+/// `read_file` instead of editing. Patch-recovery still grants one targeted read.
+pub const ACT_TOOLS: &[&str] = &["update_plan", "apply_patch", "finish"];
 
 /// After a failed patch: reread target → patch / finish only (slice 4).
 pub const PATCH_RECOVERY_TOOLS: &[&str] = &["read_file", "apply_patch", "finish"];
@@ -146,6 +156,14 @@ pub struct RunState {
     pub entered_finish_turn: Option<u32>,
     /// Consecutive harness denials (phase / checkpoint / duplicate / blocked).
     pub consecutive_denials: usize,
+    /// Consecutive invalid actions under the phase contract (separate from denials).
+    pub consecutive_invalid_actions: usize,
+    /// Next LLM request should prefer `tool_choice=required` when the provider allows it.
+    pub require_tool_choice: bool,
+    /// One-shot guidance queued for the next model turn (injected into goal).
+    pub pending_phase_guidance: Option<String>,
+    /// While true in Act, re-inject a sticky edit reminder each turn.
+    pub act_force_edit: bool,
 }
 
 impl RunState {
@@ -160,7 +178,17 @@ impl RunState {
             patch_fail_path: None,
             entered_finish_turn: None,
             consecutive_denials: 0,
+            consecutive_invalid_actions: 0,
+            require_tool_choice: false,
+            pending_phase_guidance: None,
+            act_force_edit: false,
         }
+    }
+
+    /// Reset the invalid-action ladder after a valid phase action.
+    pub fn note_valid_action(&mut self) {
+        self.consecutive_invalid_actions = 0;
+        self.require_tool_choice = false;
     }
 
     pub fn is_explore(&self) -> bool {
@@ -255,11 +283,61 @@ impl RunState {
     pub fn enter_act(&mut self) -> bool {
         if matches!(self.phase, Phase::Explore) {
             self.phase = Phase::Act;
-            self.justified_unseen_reads_left = self.justified_unseen_reads_left.max(1);
+            self.justified_unseen_reads_left = 0;
+            self.act_force_edit = true;
+            let msg = self.act_guidance_with_evidence(ACT_TRANSITION_MESSAGE);
+            self.queue_phase_guidance(&msg);
             true
         } else {
             false
         }
+    }
+
+    pub fn queue_phase_guidance(&mut self, message: &str) {
+        self.pending_phase_guidance = Some(message.to_string());
+    }
+
+    /// Guidance to inject into the next LLM goal (one-shot + sticky Act reminder).
+    pub fn phase_guidance_for_injection(&mut self) -> Option<String> {
+        if let Some(msg) = self.pending_phase_guidance.take() {
+            return Some(msg);
+        }
+        if self.act_force_edit
+            && matches!(self.phase, Phase::Act)
+            && !self.patch_fail_recovery
+        {
+            return Some(self.act_guidance_with_evidence(ACT_STICKY_MESSAGE));
+        }
+        None
+    }
+
+    /// Append seen-file evidence so Act pressure names concrete patch targets.
+    pub fn act_guidance_with_evidence(&self, base: &str) -> String {
+        let mut out = base.to_string();
+        if self.seen_files.is_empty() {
+            return out;
+        }
+        let mut paths: Vec<_> = self.seen_files.iter().collect();
+        paths.sort_by_key(|p| p.to_string_lossy().to_string());
+        out.push_str("\n\nFiles already in context (patch from these — do not re-read):\n");
+        for path in paths.iter().take(12) {
+            out.push_str(&format!("- {}\n", path.display()));
+        }
+        out.push_str(
+            "Call apply_patch on the likely fix now. \
+             finish may only report a concrete code blocker (file + bug), \
+             never request more tools or permissions.",
+        );
+        out
+    }
+
+    /// Clear Act "must edit" pressure after a successful workspace mutation.
+    ///
+    /// `update_plan` alone must not clear this — otherwise the model plans,
+    /// drops sticky pressure, then finishes asking for more tools.
+    pub fn note_act_progress(&mut self) {
+        self.act_force_edit = false;
+        self.pending_phase_guidance = None;
     }
 
     /// Lock tools to reread → patch / finish after a failed `apply_patch`.
@@ -280,9 +358,11 @@ impl RunState {
         self.patch_fail_recovery = true;
         self.patch_fail_path = Some(path.to_path_buf());
         self.entered_finish_turn = None;
+        self.act_force_edit = false;
         if already {
             None
         } else {
+            self.queue_phase_guidance(PATCH_RECOVERY_MESSAGE);
             Some(PATCH_RECOVERY_MESSAGE)
         }
     }
@@ -303,6 +383,8 @@ impl RunState {
         }
         self.phase = Phase::Verify;
         self.entered_finish_turn = None;
+        self.act_force_edit = false;
+        self.queue_phase_guidance(VERIFY_TRANSITION_MESSAGE);
         Some(VERIFY_TRANSITION_MESSAGE)
     }
 
@@ -323,6 +405,8 @@ impl RunState {
         }
         self.phase = Phase::Finish;
         self.entered_finish_turn = Some(model_turn);
+        self.act_force_edit = false;
+        self.queue_phase_guidance(msg);
         Some(msg)
     }
 
@@ -552,6 +636,14 @@ fn is_denied_result(result: &ToolResult) -> bool {
     let Some(err) = result.error.as_deref() else {
         return false; // failed attempt without denial text — not a harness denial
     };
+    // Invalid-action ladder owns ACTION_NOT_AVAILABLE; do not double-count toward
+    // the general denial-streak stop.
+    if err.starts_with("ACTION_NOT_AVAILABLE")
+        || err.starts_with("PHASE TRANSITION: ACT")
+        || err.starts_with("Stopped after ")
+    {
+        return false;
+    }
     let l = err.to_ascii_lowercase();
     l.contains("duplicate read denied")
         || l.contains("exact content already available")
@@ -656,12 +748,14 @@ mod tests {
     }
 
     #[test]
-    fn act_tools_exclude_search_and_shell() {
+    fn act_tools_exclude_search_shell_and_read() {
         assert!(!Phase::Act.allows_tool("search_code"));
         assert!(!Phase::Act.allows_tool("run_shell"));
         assert!(!Phase::Act.allows_tool("run_command"));
-        assert!(Phase::Act.allows_tool("read_file"));
+        assert!(!Phase::Act.allows_tool("read_file"));
+        assert!(!Phase::Act.allows_tool("locate"));
         assert!(Phase::Act.allows_tool("apply_patch"));
+        assert!(Phase::Act.allows_tool("update_plan"));
         assert!(Phase::Act.allows_tool("finish"));
     }
 
@@ -698,10 +792,31 @@ mod tests {
     #[test]
     fn evidence_checkpoint_fires_phase_becomes_act() {
         let mut state = RunState::new();
-        // Even with progress (new file), an active checkpoint forces Act.
         let msg = state.observe_tool_outcome(&read("fresh.rs"), &ok_result(), false, true);
         assert_eq!(msg, Some(ACT_TRANSITION_MESSAGE));
         assert_eq!(state.phase, Phase::Act);
+        assert!(state.act_force_edit);
+        assert!(state
+            .phase_guidance_for_injection()
+            .unwrap()
+            .contains("Exploration is complete"));
+    }
+
+    #[test]
+    fn enter_act_queues_guidance_and_forces_edit() {
+        let mut state = RunState::new();
+        state.note_file_seen(PathBuf::from("Board.tsx"));
+        assert!(state.enter_act());
+        assert!(state.act_force_edit);
+        let g = state.phase_guidance_for_injection().unwrap();
+        assert!(g.contains("Exploration is complete"));
+        assert!(g.contains("Board.tsx"));
+        // Sticky reminder on subsequent turns still lists evidence.
+        let sticky = state.phase_guidance_for_injection().unwrap();
+        assert!(sticky.contains("Act phase"));
+        assert!(sticky.contains("Board.tsx"));
+        state.note_act_progress();
+        assert!(state.phase_guidance_for_injection().is_none());
     }
 
     #[test]

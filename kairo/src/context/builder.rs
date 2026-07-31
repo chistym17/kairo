@@ -145,6 +145,7 @@ impl ContextBuilder {
         let request = LlmRequest {
             messages: layout.assemble_messages(),
             tools: layout.tools,
+            prefer_required_tool_choice: false,
             diagnostics,
         };
 

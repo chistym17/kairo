@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn act_mode_request_excludes_search_and_shell_tools() {
+    fn act_mode_request_excludes_search_shell_and_read() {
         let tools = tools_for_phase(Phase::Act);
         let names = tool_names(&tools);
         assert_eq!(
@@ -89,11 +89,11 @@ mod tests {
             vec![
                 "apply_patch".to_string(),
                 "finish".to_string(),
-                "read_file".to_string(),
                 "update_plan".to_string(),
             ]
         );
         for banned in [
+            "read_file",
             "search_code",
             "find_files",
             "locate",

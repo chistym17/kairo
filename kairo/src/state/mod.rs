@@ -1,4 +1,5 @@
 pub mod agent_state;
+pub mod action_policy;
 pub mod completion;
 pub mod efficiency;
 pub mod exploration;
@@ -12,14 +13,17 @@ pub mod stop_reason;
 pub mod workspace_summary;
 
 pub use agent_state::AgentState;
+pub use action_policy::{
+    validate_action, ActionDecision, InvalidActionReason, InvalidFallback, PhaseContract,
+};
 pub use completion::CompletionTracker;
 pub use efficiency::RunEfficiency;
 pub use exploration::ExplorationTracker;
 pub use finish_summary::ground_finish_summary;
 pub use patch_recovery::PatchRecoveryState;
 pub use phase::{
-    Phase, RunState, ACT_TRANSITION_MESSAGE, FINISH_PHASE_IDLE_TURNS, FINISH_TOOLS,
-    FINISH_UNVERIFIED_MESSAGE, FINISH_VERIFIED_MESSAGE, NO_PROGRESS_ACT_THRESHOLD,
+    Phase, RunState, ACT_STICKY_MESSAGE, ACT_TRANSITION_MESSAGE, FINISH_PHASE_IDLE_TURNS,
+    FINISH_TOOLS, FINISH_UNVERIFIED_MESSAGE, FINISH_VERIFIED_MESSAGE, NO_PROGRESS_ACT_THRESHOLD,
     NO_PROGRESS_STOP_THRESHOLD, PATCH_RECOVERY_MESSAGE, PATCH_RECOVERY_TOOLS, VERIFY_TOOLS,
     VERIFY_TRANSITION_MESSAGE,
 };

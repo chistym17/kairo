@@ -93,13 +93,18 @@ impl DeepSeekClient {
 #[async_trait]
 impl LlmClient for DeepSeekClient {
     async fn respond(&self, request: &LlmRequest) -> Result<LlmTurn, LlmError> {
-        // V4 thinking mode rejects tool_choice=required; auto + thinking disabled
-        // keeps agent tool loops reliable.
+        // V4 thinking mode rejects tool_choice=required; we disable thinking.
+        // Default is auto; after repeated invalid actions we escalate to required.
+        let tool_choice = if request.prefer_required_tool_choice {
+            "required"
+        } else {
+            "auto"
+        };
         let body = json!({
             "model": self.model,
             "messages": request.messages.clone(),
             "tools": request.tools.clone(),
-            "tool_choice": "auto",
+            "tool_choice": tool_choice,
             "max_tokens": 2048,
             "temperature": 0.0,
             "thinking": {"type": "disabled"}

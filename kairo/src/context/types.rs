@@ -30,6 +30,9 @@ pub struct AgentContext {
 pub struct LlmRequest {
     pub messages: Value,
     pub tools: Value,
+    /// Prefer `tool_choice=required` when the provider supports it (invalid-action retry).
+    /// Providers that always require tools may ignore this; DeepSeek uses it on escalate.
+    pub prefer_required_tool_choice: bool,
     /// Prefix fingerprints for logs — never sent to the model.
     pub diagnostics: PromptDiagnostics,
 }

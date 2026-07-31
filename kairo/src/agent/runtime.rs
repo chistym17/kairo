@@ -673,6 +673,8 @@ mod tests {
             log.contains("governance_rejected")
                 || log.contains("governance_terminate")
                 || log.contains("phase_tool_denied")
+                || log.contains("invalid_action")
+                || log.contains("invalid_action_stop")
                 || log.contains("phase → act"),
             "expected governance or Act-phase tool restriction to stop grep spiral"
         );

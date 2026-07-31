@@ -34,3 +34,8 @@ portfolio-v1-gaps.md
 AGENT_ISSUES.md
 AGENT_ISSUES.oracle.md
 kairo/TODO-UX.md
+problems.txt
+
+cargo publish -p kairo
+cargo install kairo --force
+design-report.md

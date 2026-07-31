@@ -8,7 +8,6 @@ use crate::llm::{render_call_line, LlmClient, LlmError, LlmToolCall, ModelUsage}
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
-use crate::state::phase::Phase;
 use crate::state::step::{Action, Step};
 use crate::state::stop_reason::StopReason;
 use crate::tools;
@@ -187,7 +186,7 @@ pub async fn run(
             } else {
                 None
             };
-            let (request, full_stats, bounded_stats, reduction) =
+            let (mut request, full_stats, bounded_stats, reduction) =
                 context_manager.build_bounded_request(
                     context_builder,
                     &state.workspace_root,
@@ -198,6 +197,12 @@ pub async fn run(
                     tool_policy.as_ref(),
                     state.run_control.effective_tools(),
                 );
+            request.prefer_required_tool_choice = state.run_control.require_tool_choice;
+            crate::agent_println!(
+                "[phase={}] exposed_tools=[{}]",
+                state.run_control.tool_mode_label(),
+                state.run_control.effective_tools().join(", ")
+            );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
             log_prompt_diagnostics(state, &request.diagnostics);
@@ -434,7 +439,7 @@ pub async fn run(
                         } else {
                             None
                         };
-                        let (request, full_stats, bounded_stats, reduction) =
+                        let (mut request, full_stats, bounded_stats, reduction) =
                             context_manager.build_bounded_request(
                                 context_builder,
                                 &state.workspace_root,
@@ -445,6 +450,12 @@ pub async fn run(
                                 tool_policy.as_ref(),
                                 state.run_control.effective_tools(),
                             );
+                        request.prefer_required_tool_choice = state.run_control.require_tool_choice;
+                        crate::agent_println!(
+                            "[phase={}] exposed_tools=[{}]",
+                            state.run_control.tool_mode_label(),
+                            state.run_control.effective_tools().join(", ")
+                        );
 
                         write_event(
                             &state.run_id,
@@ -729,16 +740,39 @@ async fn execute_one_tool(
         }
     }
 
-    if let Err(denied) = apply_phase_tool_gate(state, &action) {
-        return commit_tool_outcome(
-            state,
-            observer,
-            step_index,
-            model_turn,
-            action,
-            tool_call_id,
-            denied,
-        );
+    if let Err(outcome) = apply_action_policy_gate(state, &action) {
+        match outcome {
+            ActionPolicyGateError::Denied(denied) => {
+                return commit_tool_outcome(
+                    state,
+                    observer,
+                    step_index,
+                    model_turn,
+                    action,
+                    tool_call_id,
+                    denied,
+                );
+            }
+            ActionPolicyGateError::Stop { reason, message } => {
+                write_event(
+                    &state.run_id,
+                    "invalid_action_stop",
+                    &message[..message.len().min(400)],
+                    0,
+                );
+                let _ = commit_tool_outcome(
+                    state,
+                    observer,
+                    step_index,
+                    model_turn,
+                    action,
+                    tool_call_id,
+                    ToolResult::error(message),
+                );
+                write_summary(state, &reason);
+                return Some(reason);
+            }
+        }
     }
 
     if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
@@ -822,6 +856,7 @@ async fn execute_one_tool(
         if result.success {
             state.patch_recovery.note_successful_mutation();
             state.run_control.clear_patch_recovery();
+            state.run_control.note_act_progress();
             if let Some(message) = state.run_control.enter_verify() {
                 log_phase_transition(state, message);
             }
@@ -840,9 +875,14 @@ async fn execute_one_tool(
     } else if result.success && matches!(action, Action::WriteFile { .. }) {
         state.patch_recovery.note_successful_mutation();
         state.run_control.clear_patch_recovery();
+        state.run_control.note_act_progress();
         if let Some(message) = state.run_control.enter_verify() {
             log_phase_transition(state, message);
         }
+    } else if result.success && matches!(action, Action::UpdatePlan { .. }) {
+        // Keep act_force_edit sticky — planning is not progress toward an edit.
+    } else if result.success && matches!(action, Action::Finish { .. }) {
+        state.run_control.note_act_progress();
     }
 
     if result.success
@@ -957,11 +997,24 @@ async fn execute_readonly_group(
 
     let mut prepared: Vec<(u32, Action, String, PreparedOutcome)> =
         Vec::with_capacity(group.len());
+    let mut pending_invalid_stop: Option<StopReason> = None;
 
     for (offset, tool_call) in group.iter().enumerate() {
         let step_index = base_step + offset as u32;
         let action = tool_call.action.clone();
         let tool_call_id = tool_call.tool_call_id.clone();
+
+        if pending_invalid_stop.is_some() {
+            prepared.push((
+                step_index,
+                action,
+                tool_call_id,
+                PreparedOutcome::Early(ToolResult::error(
+                    "Skipped: run stopping after invalid-action limit.",
+                )),
+            ));
+            continue;
+        }
 
         emit(
             observer,
@@ -991,9 +1044,28 @@ async fn execute_readonly_group(
             }
         }
 
-        if let Err(denied) = apply_phase_tool_gate(state, &action) {
-            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
-            continue;
+        match apply_action_policy_gate(state, &action) {
+            Ok(()) => {}
+            Err(ActionPolicyGateError::Denied(denied)) => {
+                prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
+                continue;
+            }
+            Err(ActionPolicyGateError::Stop { reason, message }) => {
+                write_event(
+                    &state.run_id,
+                    "invalid_action_stop",
+                    &message[..message.len().min(400)],
+                    0,
+                );
+                prepared.push((
+                    step_index,
+                    action,
+                    tool_call_id,
+                    PreparedOutcome::Early(ToolResult::error(message)),
+                ));
+                pending_invalid_stop = Some(reason);
+                continue;
+            }
         }
 
         if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
@@ -1210,6 +1282,11 @@ async fn execute_readonly_group(
         ) {
             return Some(reason);
         }
+    }
+
+    if let Some(reason) = pending_invalid_stop {
+        write_summary(state, &reason);
+        return Some(reason);
     }
 
     None
@@ -2066,22 +2143,37 @@ fn goal_with_plan(state: &mut AgentState) -> String {
         out.push_str(&summary);
     }
     // Soft stagnation / evidence-checkpoint / after-decision guidance.
+    // Phase guidance (Act / Verify / Finish) is always injected — it is the
+    // primary control signal and must reach the model even when quiet CLI hides logs.
     let mut injected_guidance = false;
-    if let Some(nudge) = state.progress.nudge_for_injection() {
-        let event = if state.progress.checkpoint_active {
-            "evidence_checkpoint"
-        } else {
-            "progress_stagnation_nudge"
-        };
+    if let Some(guidance) = state.run_control.phase_guidance_for_injection() {
         write_event(
             &state.run_id,
-            event,
-            &nudge[..nudge.len().min(400)],
+            "phase_guidance",
+            &guidance[..guidance.len().min(400)],
             0,
         );
         out.push_str("\n\n## Runtime guidance\n");
-        out.push_str(&nudge);
+        out.push_str(&guidance);
         injected_guidance = true;
+    }
+    if !injected_guidance {
+        if let Some(nudge) = state.progress.nudge_for_injection() {
+            let event = if state.progress.checkpoint_active {
+                "evidence_checkpoint"
+            } else {
+                "progress_stagnation_nudge"
+            };
+            write_event(
+                &state.run_id,
+                event,
+                &nudge[..nudge.len().min(400)],
+                0,
+            );
+            out.push_str("\n\n## Runtime guidance\n");
+            out.push_str(&nudge);
+            injected_guidance = true;
+        }
     }
     if !injected_guidance {
         if let Some(nudge) = state.progress.after_decision_guidance() {
@@ -2147,34 +2239,51 @@ fn apply_shell_mutation_gate(
     Err(ToolResult::error(message))
 }
 
-fn apply_phase_tool_gate(state: &mut AgentState, action: &Action) -> Result<(), ToolResult> {
-    let allowed = state.run_control.effective_tools();
-    let mode = state.run_control.tool_mode_label();
-    let name = tool_name(action);
-    if !allowed.contains(&name) {
-        let message = format!(
-            "Tool `{name}` is not available in {mode} phase. Allowed: {}.",
-            allowed.join(", ")
-        );
-        write_event(&state.run_id, "phase_tool_denied", &message, 0);
-        return Err(ToolResult::error(message));
-    }
+enum ActionPolicyGateError {
+    Denied(ToolResult),
+    Stop { reason: StopReason, message: String },
+}
 
-    let gate_reads = state.run_control.patch_fail_recovery
-        || matches!(
-            state.run_control.phase,
-            Phase::Act | Phase::Verify
-        );
-    if gate_reads {
-        if let Action::ReadFile { path, .. } = action {
-            if let Err(message) = state.run_control.allow_act_read(path) {
-                write_event(&state.run_id, "phase_read_denied", &message, 0);
-                return Err(ToolResult::error(message));
-            }
+fn apply_action_policy_gate(
+    state: &mut AgentState,
+    action: &Action,
+) -> Result<(), ActionPolicyGateError> {
+    use crate::state::action_policy::{denial_tool_result, validate_action, ActionDecision};
+
+    match validate_action(&mut state.run_control, action) {
+        ActionDecision::Allow => Ok(()),
+        ActionDecision::RejectAndRetry {
+            reason,
+            correction,
+            require_tool_choice,
+        } => {
+            write_event(
+                &state.run_id,
+                "invalid_action",
+                &format!(
+                    "{} require_tool_choice={} {}",
+                    reason.as_str(),
+                    require_tool_choice,
+                    &correction[..correction.len().min(300)]
+                ),
+                0,
+            );
+            Err(ActionPolicyGateError::Denied(denial_tool_result(&correction)))
+        }
+        ActionDecision::TransitionToAct { correction } => {
+            log_phase_transition(state, "invalid-action fallback → Act");
+            write_event(
+                &state.run_id,
+                "invalid_action_transition_act",
+                &correction[..correction.len().min(300)],
+                0,
+            );
+            Err(ActionPolicyGateError::Denied(denial_tool_result(&correction)))
+        }
+        ActionDecision::Stop { reason, message } => {
+            Err(ActionPolicyGateError::Stop { reason, message })
         }
     }
-
-    Ok(())
 }
 
 fn log_phase_transition(state: &AgentState, message: &str) {

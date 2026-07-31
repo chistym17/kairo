@@ -1,6 +1,6 @@
 [package]
 name = "kairo"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 default-run = "kairo"
 description = "Kairo — local coding agent that asks, plans, edits, and verifies in your repo"
