@@ -1078,7 +1078,7 @@ async fn execute_readonly_group(
             continue;
         }
 
-        let validation = validate_action(&action, false, false);
+        let validation = validate_action_shape(&action, false, false);
         if let Some(err) = &validation {
             write_event(&state.run_id, &err.event, &err.message, 0);
         }
@@ -1298,7 +1298,7 @@ fn produce_tool_result(
     require_verified_finish: bool,
     verified_for_finish: bool,
 ) -> ToolResult {
-    match validate_action(action, require_verified_finish, verified_for_finish) {
+    match validate_action_shape(action, require_verified_finish, verified_for_finish) {
         Some(ValidationError { event, message }) => {
             write_event(&state.run_id, &event, &message, 0);
             ToolResult {
@@ -2502,7 +2502,12 @@ struct ValidationError {
     message: String,
 }
 
-fn validate_action(
+/// Argument-shape validation (path traversal, verified-finish precondition) —
+/// distinct from `action_policy::validate_action`, which checks phase/scope
+/// policy. These were both named `validate_action` (in different files);
+/// renamed here to remove that collision ahead of Slice 2's consolidation
+/// into one `evaluate_action` entry point (final-design-plan.md §6, §8).
+fn validate_action_shape(
     action: &crate::state::step::Action,
     require_verified_finish: bool,
     verified_for_finish: bool,
