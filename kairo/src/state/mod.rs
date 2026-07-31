@@ -10,6 +10,7 @@ pub mod plan;
 pub mod progress;
 pub mod step;
 pub mod stop_reason;
+pub mod tool_scope;
 pub mod workspace_summary;
 
 pub use agent_state::AgentState;
