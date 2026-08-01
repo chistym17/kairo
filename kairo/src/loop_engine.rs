@@ -2219,12 +2219,11 @@ fn classify_stall(
 /// `legacy_stop_source` covers the two stop paths observable from a
 /// `ToolResult` at this call site (`patch_recovery_failure_limit`,
 /// `denied_source_writes_limit`) plus the one this function computes
-/// itself (`consecutive_denials_limit`). It does **not** cover the
-/// `consecutive_invalid_actions` fallback stop, which terminates via
-/// `EvaluationOutcome::RejectAndStop` before a `ToolResult.stop_reason` is
-/// ever set — that path already logs its own `invalid_action_stop` event
-/// at the moment it fires, which corpus aggregation should treat as a
-/// fourth, equivalent stop-source signal until it's folded into this one.
+/// itself (`consecutive_denials_limit`). Act / patch-recovery
+/// `consecutive_invalid_actions` no longer hard-stops via
+/// `EvaluationOutcome::RejectAndStop` (Part 5C Part 3); those thrash
+/// paths defer to Layer 4 recovery terminate. Verify / Finish completion
+/// fallbacks may still emit `invalid_action_stop`.
 fn log_stall_shadow(
     state: &AgentState,
     stall_kind: Option<StallKind>,

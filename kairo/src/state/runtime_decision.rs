@@ -1272,4 +1272,36 @@ mod tests {
         assert!(g2.contains("allowed_next_actions:"));
         assert!(g2.contains("Still requesting an unavailable action"));
     }
+
+    #[test]
+    fn part3_same_key_policy_denied_with_fingerprint_terminates_via_layer4() {
+        let mut state = empty_state();
+        assert!(state.run_control.enter_act());
+        let action = Action::Locate {
+            query: "board".into(),
+            path: PathBuf::from("frontend-v2"),
+        };
+        let recipe = RecoveryAction::UnsupportedCapability {
+            cause: UnsupportedCause::PolicyDenied,
+            tool: "locate".into(),
+            target: None,
+        };
+        for i in 1..=3 {
+            state
+                .stall
+                .observe(&action, Some(StallKind::ScopeViolation));
+            let mut result = ToolResult::error("locate unavailable");
+            let applied = apply_recovery(&mut state, &mut result, &recipe);
+            if i < 3 {
+                assert!(applied.stop_reason.is_none(), "i={i}");
+            } else {
+                assert_eq!(applied.stop_reason, Some(StopReason::NoProgress));
+                assert!(result
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("recovery recipe exhausted"));
+            }
+        }
+    }
 }

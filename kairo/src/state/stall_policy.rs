@@ -24,7 +24,7 @@
 //! |---|---|---|
 //! | `run_control.no_progress` | Explore → Act | `transition_policy` from stall / derived action policy |
 //! | `run_control.consecutive_denials` | general stop @ 6 | unified stall terminate (kind + history) |
-//! | `run_control.consecutive_invalid_actions` | correction / stop | recovery recipes (`InvalidArguments`, …) |
+//! | `run_control.consecutive_invalid_actions` | correction; Verify/Finish stop | Act/patch_recovery defer stop to Layer 4 recipes |
 //! | `progress.consecutive_no_progress` | nudges / checkpoint | context snapshot + unified stall policy |
 //!
 //! Subsystem budgets that must **never** fold into the general counter:

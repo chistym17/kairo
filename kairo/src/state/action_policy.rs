@@ -227,6 +227,12 @@ pub fn contract_for(run: &RunState, recovery: &RecoveryState) -> PhaseContract {
 ///
 /// Updates `consecutive_invalid_actions` on `run`. Callers apply the decision
 /// (commit deny, queue guidance, stop, transition).
+///
+/// Part 5C Part 3: Act / patch-recovery thrash no longer hard-stops via
+/// [`ActionDecision::Stop`]. Those phases keep returning
+/// [`ActionDecision::RejectAndRetry`] so Layer 4 recovery (`Recover` +
+/// fingerprint / guidance attempts) owns terminate. Verify / Finish
+/// completion fallbacks still use [`ActionDecision::Stop`].
 pub fn validate_action(
     run: &mut RunState,
     recovery: &RecoveryState,
@@ -242,7 +248,7 @@ pub fn validate_action(
             run.note_valid_action();
             ActionDecision::Allow
         }
-        Some(reason) => escalate_invalid(run, name, reason, &contract),
+        Some(reason) => escalate_invalid(run, recovery, name, reason, &contract),
     }
 }
 
@@ -380,6 +386,7 @@ pub fn is_escape_finish(summary: &str) -> bool {
 
 fn escalate_invalid(
     run: &mut RunState,
+    recovery: &RecoveryState,
     name: &str,
     reason: InvalidActionReason,
     contract: &PhaseContract,
@@ -388,7 +395,16 @@ fn escalate_invalid(
     let n = run.consecutive_invalid_actions;
     let max = contract.max_invalid_actions.max(1);
 
-    if n >= max {
+    // Completion-oriented fallbacks still stop / transition. Thrash fallbacks
+    // (Act `FinishWithBlocker`, patch_recovery `StopNoProgress`) defer stop to
+    // Layer 4 so rejected-action recovery can apply allowed_next_actions +
+    // change-or-terminate instead of `invalid_action_stop` at N.
+    let defer_stop_to_layer4 = matches!(
+        contract.fallback,
+        InvalidFallback::FinishWithBlocker | InvalidFallback::StopNoProgress
+    );
+
+    if n >= max && !defer_stop_to_layer4 {
         return fallback_decision(run, contract.fallback, name, reason, contract);
     }
 
@@ -404,6 +420,15 @@ fn escalate_invalid(
         let base = correction_message(contract, name, reason, n, require_tool_choice);
         run.act_guidance_with_evidence(&base)
     };
+    let snap = allowed_next_actions(run, recovery).render_for_guidance();
+    let mut correction = format!("{correction}\n\n{snap}");
+    if defer_stop_to_layer4 && n >= max {
+        correction.push_str(
+            "\n\nRepeated incompatible actions under the current policy. \
+             Termination is owned by recovery (same-key / fingerprint), not the \
+             phase invalid-action counter. Choose from allowed_next_actions.",
+        );
+    }
     run.queue_phase_guidance(&correction);
 
     ActionDecision::RejectAndRetry {
@@ -722,11 +747,78 @@ mod tests {
 
         let d3 = validate_action(&mut run, &recovery, &read("Board.tsx"));
         match d3 {
+            ActionDecision::RejectAndRetry {
+                reason: InvalidActionReason::ArgumentPolicyViolation,
+                require_tool_choice: true,
+                correction,
+            } => {
+                assert!(correction.contains("allowed_next_actions:"));
+                assert!(
+                    correction.contains("Termination is owned by recovery")
+                        || correction.contains("Repeated incompatible actions")
+                );
+            }
+            other => panic!("expected deferred RejectAndRetry on 3rd Act invalid, got {other:?}"),
+        }
+        assert_eq!(run.consecutive_invalid_actions, 3);
+        assert!(run.require_tool_choice);
+    }
+
+    #[test]
+    fn act_invalid_thrash_never_emits_stop_decision() {
+        let mut run = RunState::new();
+        let recovery = idle_recovery();
+        assert!(run.enter_act());
+        let _ = run.phase_guidance_for_injection(&recovery);
+        for i in 1..=6 {
+            let d = validate_action(&mut run, &recovery, &read("unseen.rs"));
+            assert!(
+                matches!(d, ActionDecision::RejectAndRetry { .. }),
+                "i={i}: expected RejectAndRetry, got {d:?}"
+            );
+            assert!(
+                !matches!(d, ActionDecision::Stop { .. }),
+                "i={i}: Act must not ActionDecision::Stop"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_invalid_limit_still_stops_unverified() {
+        let mut run = RunState::new();
+        let recovery = idle_recovery();
+        run.phase = Phase::Verify;
+        // Verify max_invalid_actions = 2
+        let _ = validate_action(&mut run, &recovery, &Action::SearchCode {
+            query: "x".into(),
+            path: PathBuf::from("."),
+        });
+        let d2 = validate_action(&mut run, &recovery, &Action::SearchCode {
+            query: "y".into(),
+            path: PathBuf::from("."),
+        });
+        match d2 {
             ActionDecision::Stop {
-                reason: StopReason::NoProgress,
+                reason: StopReason::CompletedUnverified,
                 ..
             } => {}
-            other => panic!("expected stop on 3rd, got {other:?}"),
+            other => panic!("expected Verify FinishUnverified stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finish_invalid_limit_still_auto_completes() {
+        let mut run = RunState::new();
+        let recovery = idle_recovery();
+        run.phase = Phase::Finish;
+        let d = validate_action(
+            &mut run,
+            &recovery,
+            &Action::GitDiff { path: None },
+        );
+        match d {
+            ActionDecision::Stop { .. } => {}
+            other => panic!("expected Finish AutoComplete stop, got {other:?}"),
         }
     }
 
@@ -791,6 +883,7 @@ mod tests {
         assert!(matches!(contract.fallback, InvalidFallback::TransitionToAct));
         let d = escalate_invalid(
             &mut run,
+            &recovery,
             "bogus_tool",
             InvalidActionReason::ToolUnavailable,
             &contract,
