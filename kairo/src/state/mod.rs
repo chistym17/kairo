@@ -8,6 +8,7 @@ pub mod phase;
 pub mod plan;
 pub mod progress;
 pub mod recovery;
+pub mod runtime_decision;
 pub mod stall;
 pub mod step;
 pub mod stop_reason;
@@ -33,6 +34,10 @@ pub use progress::ProgressState;
 pub use recovery::{
     RecoveryReason, RecoverySnapshot, RecoveryState, MAX_CONSECUTIVE_PATCH_FAILURES,
     MAX_DENIED_SOURCE_WRITES,
+};
+pub use runtime_decision::{
+    decide_next_state, stop_reason_from_transition, CompletionReason, RecoveryAction,
+    RuntimeTransition, TurnOutcome,
 };
 pub use stall::{ActionFingerprint, StallKind, StallState};
 pub use step::{Action, Step};

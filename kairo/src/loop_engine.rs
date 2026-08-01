@@ -9,6 +9,9 @@ use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
 use crate::state::progress::ProgressKind;
+use crate::state::runtime_decision::{
+    decide_next_state, stop_reason_from_transition, TurnOutcome,
+};
 use crate::state::stall::{ActionFingerprint, StallKind};
 use crate::state::step::{Action, Step};
 use crate::state::stop_reason::StopReason;
@@ -1952,7 +1955,16 @@ fn commit_tool_outcome(
         },
     );
 
-    if let Some(reason) = stop_reason {
+    // Slice 4 Part 2: Layer 4 decides Continue vs Terminate from the already-
+    // committed outcome. 1:1 with the prior `if let Some(reason) = stop_reason`
+    // branch — Recover/Complete are not produced yet (Parts 3 / Slice 5–6).
+    let transition = decide_next_state(
+        state,
+        &TurnOutcome::ToolCommitted {
+            stop_reason: stop_reason.clone(),
+        },
+    );
+    if let Some(reason) = stop_reason_from_transition(transition) {
         crate::agent_println!("\n[agent] stopping: {:?}", reason);
         write_summary(state, &reason);
         Some(reason)
