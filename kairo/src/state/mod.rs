@@ -32,12 +32,12 @@ pub use phase::{
 pub use plan::{AgentPlan, PlanConstraint, PlanStatus, PlanStep};
 pub use progress::ProgressState;
 pub use recovery::{
-    RecoveryReason, RecoverySnapshot, RecoveryState, MAX_CONSECUTIVE_PATCH_FAILURES,
+    RecoveryKey, RecoveryReason, RecoverySnapshot, RecoveryState, MAX_CONSECUTIVE_PATCH_FAILURES,
     MAX_DENIED_SOURCE_WRITES,
 };
 pub use runtime_decision::{
-    decide_next_state, stop_reason_from_transition, CompletionReason, RecoveryAction,
-    RuntimeTransition, TurnOutcome,
+    apply_recovery, decide_next_state, stop_reason_from_transition, CompletionReason,
+    RecoveryAction, RecoveryApplyResult, RuntimeTransition, TurnOutcome, UnsupportedCause,
 };
 pub use stall::{ActionFingerprint, StallKind, StallState};
 pub use step::{Action, Step};

@@ -10,7 +10,8 @@ use crate::session::Session;
 use crate::state::agent_state::AgentState;
 use crate::state::progress::ProgressKind;
 use crate::state::runtime_decision::{
-    decide_next_state, stop_reason_from_transition, TurnOutcome,
+    apply_recovery, decide_next_state, stop_reason_from_transition, RuntimeTransition,
+    TurnOutcome,
 };
 use crate::state::stall::{ActionFingerprint, StallKind};
 use crate::state::step::{Action, Step};
@@ -765,6 +766,7 @@ async fn execute_one_tool(
                 action,
                 tool_call_id,
                 result,
+                false, // never dispatched
             );
         }
         EvaluationOutcome::RejectAndStop(result, reason) => {
@@ -776,6 +778,7 @@ async fn execute_one_tool(
                 action,
                 tool_call_id,
                 result,
+                false, // never dispatched
             );
             write_summary(state, &reason);
             return Some(reason);
@@ -798,26 +801,15 @@ async fn execute_one_tool(
         }
     }
 
-    if let Action::ApplyPatch { path, .. } = &action {
+    // Failed apply_patch recovery (reread grant + failure budget) is applied in
+    // `commit_tool_outcome` via Layer 4 `Recover(FailedPatch)` — Finding 4:
+    // shape-invalid / pre-dispatch patch failures must not enter that recipe.
+    if let Action::ApplyPatch { .. } = &action {
         if result.success {
             state.recovery.note_successful_mutation();
             state.run_control.note_act_progress();
             if let Some(message) = state.run_control.enter_verify(&state.recovery) {
                 log_phase_transition(state, message);
-            }
-        } else {
-            let outcome = state.recovery.after_patch_failure(path, result);
-            result = outcome.result;
-            write_event(
-                &state.run_id,
-                "patch_recovery_granted",
-                &format!("{} (1 reread)", path.display()),
-                0,
-            );
-            if outcome.show_phase_guidance {
-                if let Some(message) = state.run_control.engage_patch_recovery_phase() {
-                    log_phase_transition(state, message);
-                }
             }
         }
     } else if result.success && matches!(action, Action::WriteFile { .. }) {
@@ -863,6 +855,7 @@ async fn execute_one_tool(
         action,
         tool_call_id,
         result,
+        true, // passed evaluate → dispatched (or cache-served after evaluate)
     );
     // Persist task memory (plan / files / verification / decisions) when a session is attached.
     sync_task_to_session(state, session);
@@ -1006,7 +999,17 @@ async fn execute_readonly_group(
     for (i, (step_index, action, tool_call_id, outcome)) in prepared.into_iter().enumerate() {
         match outcome {
             PreparedOutcome::Early(result) => {
-                handles.push((i, step_index, action, tool_call_id, Some(result), None, false));
+                // Evaluate reject — never dispatched.
+                handles.push((
+                    i,
+                    step_index,
+                    action,
+                    tool_call_id,
+                    Some(result),
+                    None,
+                    false,
+                    false,
+                ));
             }
             PreparedOutcome::Execute => {
                 if let Action::ReadFile {
@@ -1045,6 +1048,7 @@ async fn execute_readonly_group(
                                 Some(hit),
                                 None,
                                 true,
+                                true, // evaluate passed; cache is a post-dispatch outcome
                             ));
                             continue;
                         }
@@ -1090,6 +1094,7 @@ async fn execute_readonly_group(
                                 None,
                                 Some(handle),
                                 false,
+                                true,
                             ));
                             continue;
                         }
@@ -1106,6 +1111,7 @@ async fn execute_readonly_group(
                         Some(result),
                         None,
                         false,
+                        true,
                     ));
                     continue;
                 }
@@ -1114,14 +1120,23 @@ async fn execute_readonly_group(
                 let action_for_job = action.clone();
                 let handle =
                     tokio::task::spawn_blocking(move || tools::dispatch(&action_for_job, &root));
-                handles.push((i, step_index, action, tool_call_id, None, Some(handle), false));
+                handles.push((
+                    i,
+                    step_index,
+                    action,
+                    tool_call_id,
+                    None,
+                    Some(handle),
+                    false,
+                    true,
+                ));
             }
         }
     }
 
     // Await in original order.
     let mut outcomes = Vec::with_capacity(handles.len());
-    for (_i, step_index, action, tool_call_id, early, handle, from_cache) in handles {
+    for (_i, step_index, action, tool_call_id, early, handle, from_cache, dispatched) in handles {
         let result = if let Some(r) = early {
             r
         } else if let Some(h) = handle {
@@ -1132,10 +1147,10 @@ async fn execute_readonly_group(
         } else {
             ToolResult::error("internal error: missing parallel tool result")
         };
-        outcomes.push((step_index, action, tool_call_id, result, from_cache));
+        outcomes.push((step_index, action, tool_call_id, result, from_cache, dispatched));
     }
 
-    for (step_index, action, tool_call_id, result, from_cache) in outcomes {
+    for (step_index, action, tool_call_id, result, from_cache, dispatched) in outcomes {
         if result.success
             && matches!(action, Action::DetectProjectSnapshot { .. })
         {
@@ -1169,6 +1184,7 @@ async fn execute_readonly_group(
             action,
             tool_call_id,
             result,
+            dispatched,
         ) {
             return Some(reason);
         }
@@ -1620,6 +1636,11 @@ fn is_duplicate_read_outcome(action: &Action, result: &ToolResult) -> bool {
 }
 
 /// Log, observe, and record a completed tool. Returns Some(stop) if the run should end.
+///
+/// `dispatched` is true when the tool passed pre-dispatch gates and was invoked
+/// (or served from cache after a successful evaluate). False for evaluate rejects.
+/// Layer 4 uses this bit so shape-invalid patches (Finding 4) select
+/// `InvalidArguments` rather than `FailedPatch`.
 fn commit_tool_outcome(
     state: &mut AgentState,
     observer: Option<&dyn AgentObserver>,
@@ -1628,6 +1649,7 @@ fn commit_tool_outcome(
     action: Action,
     tool_call_id: String,
     mut result: ToolResult,
+    dispatched: bool,
 ) -> Option<StopReason> {
     emit(
         observer,
@@ -1787,33 +1809,20 @@ fn commit_tool_outcome(
         log_phase_transition(state, message);
     }
 
-    // Logged only after *both* `RunState` updates above (`observe_tool_outcome`
-    // for `no_progress`, `observe_denial_streak` below for
-    // `consecutive_denials`) so every legacy counter in the payload reflects
-    // this same turn's update — logging any earlier would snapshot some of
-    // them one turn stale relative to the new counter and `progress`,
-    // making the shadow-mode comparison misleading rather than just noisy.
+    // Logged after stall/denial *and* Layer 4 recovery apply so
+    // `legacy_stop_source` can still see patch-recovery failure-limit text
+    // written by `apply_recovery(FailedPatch)` on this same turn.
     // Captured *before* `observe_denial_streak` (which can set its own
     // `Terminate` message on `result.error` below) so `legacy_stop_source`
-    // can tell apart the two independent pre-existing stop paths that may
-    // have already written into `result` earlier this turn — patch-recovery
-    // (`PatchRecoveryState::after_patch_failure` / `deny_write_existing_source`,
-    // both applied before dispatch or right after, well before this
-    // function runs) — from the one this function is about to compute
-    // itself (`consecutive_denials`).
+    // can tell apart pre-existing stops that may have already written into
+    // `result` earlier this turn — e.g. `deny_write_existing_source` —
+    // from the one this function is about to compute itself
+    // (`consecutive_denials`). Patch-recovery stops now land via
+    // `apply_recovery` *after* denial streak, and are folded into the
+    // legacy label from the post-recovery error text.
     let pre_existing_stop_error = result.error.clone();
     let denial_streak_stop = state.run_control.observe_denial_streak(&result);
-    let legacy_stop_source = legacy_stop_source_for(
-        pre_existing_stop_error.as_deref(),
-        denial_streak_stop.is_some(),
-    );
-    log_stall_shadow(
-        state,
-        stall_kind,
-        Some(progress_kind),
-        stalls_before,
-        legacy_stop_source,
-    );
+    let denial_streak_stopped = denial_streak_stop.is_some();
 
     if let Some(reason) = denial_streak_stop {
         let stop_msg = state.run_control.no_progress_stop_message(&state.recovery);
@@ -1828,6 +1837,54 @@ fn commit_tool_outcome(
         }
         result.stop_reason = Some(reason);
     }
+
+    // Slice 4 Part 3: Layer 4 may Recover before the step is recorded so
+    // guidance lands on the logged ToolResult. FailedPatch (dispatched
+    // hunk-mismatch only) is applied here — not in execute_one_tool.
+    let mut transition = decide_next_state(
+        state,
+        &TurnOutcome {
+            stop_reason: result.stop_reason.clone(),
+            stall_kind,
+            dispatched,
+            tool_name: tool_name(&action).to_string(),
+            target_path: action_target_path(&action),
+        },
+    );
+    if let RuntimeTransition::Recover(recipe) = transition {
+        let applied = apply_recovery(state, &mut result, &recipe);
+        if let Some(message) = applied.phase_guidance {
+            log_phase_transition(state, message);
+        }
+        transition = match applied
+            .stop_reason
+            .or_else(|| result.stop_reason.clone())
+        {
+            Some(reason) => {
+                result.stop_reason = Some(reason.clone());
+                RuntimeTransition::Terminate(reason)
+            }
+            None => RuntimeTransition::Continue,
+        };
+    }
+
+    let legacy_stop_source = legacy_stop_source_for(
+        // Prefer post-recovery error (may include patch failure limit);
+        // fall back to pre-denial text for denied-source-writes labelling
+        // when denial did not fire.
+        result
+            .error
+            .as_deref()
+            .or(pre_existing_stop_error.as_deref()),
+        denial_streak_stopped,
+    );
+    log_stall_shadow(
+        state,
+        stall_kind,
+        Some(progress_kind),
+        stalls_before,
+        legacy_stop_source,
+    );
 
     if !read_cache_hit
         && !result_is_blocked
@@ -1955,16 +2012,10 @@ fn commit_tool_outcome(
         },
     );
 
-    // Slice 4 Part 2: Layer 4 decides Continue vs Terminate from the already-
-    // committed outcome. 1:1 with the prior `if let Some(reason) = stop_reason`
-    // branch — Recover/Complete are not produced yet (Parts 3 / Slice 5–6).
-    let transition = decide_next_state(
-        state,
-        &TurnOutcome::ToolCommitted {
-            stop_reason: stop_reason.clone(),
-        },
-    );
-    if let Some(reason) = stop_reason_from_transition(transition) {
+    // Prefer a stop stamped on the result after mid-function recovery /
+    // denial handling; fall back to the Layer 4 transition we already
+    // collapsed (Recover → Continue | Terminate).
+    if let Some(reason) = stop_reason.or_else(|| stop_reason_from_transition(transition)) {
         crate::agent_println!("\n[agent] stopping: {:?}", reason);
         write_summary(state, &reason);
         Some(reason)
@@ -2968,6 +3019,21 @@ fn mutating_path(action: &crate::state::step::Action) -> Option<String> {
         Action::ApplyPatch { path, .. } | Action::WriteFile { path, .. } => {
             Some(path.to_string_lossy().to_string())
         }
+        _ => None,
+    }
+}
+
+fn action_target_path(action: &Action) -> Option<std::path::PathBuf> {
+    match action {
+        Action::ReadFile { path, .. }
+        | Action::WriteFile { path, .. }
+        | Action::ApplyPatch { path, .. }
+        | Action::ListFiles { path }
+        | Action::SearchCode { path, .. }
+        | Action::Locate { path, .. }
+        | Action::FindFiles { path, .. }
+        | Action::DetectProjectSnapshot { path } => Some(path.clone()),
+        Action::GitDiff { path } => path.clone(),
         _ => None,
     }
 }

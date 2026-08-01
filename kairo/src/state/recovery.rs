@@ -67,6 +67,37 @@ pub struct RecoveryState {
     remaining_reads: u32,
     consecutive_failures: u32,
     denied_source_writes: u32,
+    /// Last general-recipe key that produced recovery guidance (not the
+    /// FailedPatch budget — that is `consecutive_failures` + `target`).
+    guidance_key: Option<RecoveryKey>,
+    /// Attempts for `guidance_key` only. Reset when the key changes.
+    guidance_attempts: u32,
+}
+
+/// Identity for a bounded recovery-guidance sequence.
+///
+/// Same reason+tool+target → escalate attempt 1, 2, 3.
+/// Different reason or target → start a new sequence at attempt 1.
+/// Broader oscillation across keys is Part 4's job via stall fingerprints.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecoveryKey {
+    pub reason: String,
+    pub tool: String,
+    pub target: Option<PathBuf>,
+}
+
+impl RecoveryKey {
+    pub fn new(
+        reason: impl Into<String>,
+        tool: impl Into<String>,
+        target: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            reason: reason.into(),
+            tool: tool.into(),
+            target,
+        }
+    }
 }
 
 impl RecoveryState {
@@ -143,8 +174,32 @@ impl RecoveryState {
         self.target = None;
         self.remaining_reads = 0;
         self.consecutive_failures = 0;
+        self.guidance_key = None;
+        self.guidance_attempts = 0;
         // denied_source_writes is a run-lifetime budget, not tied to one
         // recovery episode — leave it alone (matches prior PatchRecoveryState).
+    }
+
+    /// Record one application of a general recovery recipe keyed by
+    /// reason/tool/target. Returns the attempt number for this key (1-based).
+    ///
+    /// Does **not** affect `consecutive_failures` (FailedPatch budget).
+    pub fn note_guidance_attempt(&mut self, key: RecoveryKey) -> u32 {
+        if self.guidance_key.as_ref() == Some(&key) {
+            self.guidance_attempts = self.guidance_attempts.saturating_add(1);
+        } else {
+            self.guidance_key = Some(key);
+            self.guidance_attempts = 1;
+        }
+        self.guidance_attempts
+    }
+
+    pub fn guidance_attempts(&self) -> u32 {
+        self.guidance_attempts
+    }
+
+    pub fn guidance_key(&self) -> Option<&RecoveryKey> {
+        self.guidance_key.as_ref()
     }
 
     /// After a failed `apply_patch`: activate recovery, grant one reread, and
@@ -421,5 +476,24 @@ mod tests {
         let third = recovery.after_patch_failure(&path, ToolResult::error("fail 3"));
         assert_eq!(recovery.consecutive_failures(), 3);
         assert_eq!(third.result.stop_reason, Some(StopReason::NoProgress));
+    }
+
+    #[test]
+    fn guidance_attempts_are_keyed_by_reason_tool_target() {
+        let mut s = RecoveryState::new();
+        let a = RecoveryKey::new("invalid_arguments", "apply_patch", Some(PathBuf::from("a.rs")));
+        let a2 = RecoveryKey::new("invalid_arguments", "apply_patch", Some(PathBuf::from("a.rs")));
+        let b = RecoveryKey::new("missing_evidence", "read_file", Some(PathBuf::from("b.rs")));
+        let a_other =
+            RecoveryKey::new("invalid_arguments", "apply_patch", Some(PathBuf::from("c.rs")));
+
+        assert_eq!(s.note_guidance_attempt(a.clone()), 1);
+        assert_eq!(s.note_guidance_attempt(a2), 2);
+        // Different reason → new sequence.
+        assert_eq!(s.note_guidance_attempt(b), 1);
+        // Different target under same reason → new sequence.
+        assert_eq!(s.note_guidance_attempt(a_other), 1);
+        // Back to original key → new sequence (not resume).
+        assert_eq!(s.note_guidance_attempt(a), 1);
     }
 }
