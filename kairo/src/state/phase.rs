@@ -440,10 +440,11 @@ impl RunState {
     ) -> Option<&'static str> {
         match outcome.status {
             VerificationStatus::Passed => self.enter_finish(recovery, model_turn, true),
-            VerificationStatus::EnvironmentBlocked => {
+            VerificationStatus::EnvironmentBlocked | VerificationStatus::FailedUnrelated => {
+                // Non-patch failures: nudge finish unverified, do not chase baseline noise.
                 self.enter_finish(recovery, model_turn, false)
             }
-            VerificationStatus::Failed => {
+            VerificationStatus::FailedRelevant | VerificationStatus::FailedUnknown => {
                 // Stay able to re-edit; ensure Verify tools (not Finish).
                 if matches!(self.phase, Phase::Finish | Phase::Explore) {
                     self.enter_verify(recovery)
@@ -451,6 +452,7 @@ impl RunState {
                     None
                 }
             }
+            VerificationStatus::NotAttempted => None,
         }
     }
 
@@ -928,6 +930,9 @@ mod tests {
             status,
             exit_code: Some(0),
             summary: "x".into(),
+            command: "npm test".into(),
+            scope: crate::verification::VerificationScope::ProjectUnit,
+            affected_paths: vec![],
         }
     }
 
@@ -979,7 +984,7 @@ mod tests {
         let mut recovery = RecoveryState::new();
         let _ = state.enter_verify(&recovery);
         let msg =
-            state.observe_verification(&mut recovery, &outcome(VerificationStatus::Failed), 2);
+            state.observe_verification(&mut recovery, &outcome(VerificationStatus::FailedUnknown), 2);
         assert!(msg.is_none());
         assert_eq!(state.phase, Phase::Verify);
         assert!(state.effective_tools(&recovery).contains(&"apply_patch"));

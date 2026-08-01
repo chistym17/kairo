@@ -162,6 +162,9 @@ mod tests {
             status: VerificationStatus::Passed,
             exit_code: Some(0),
             summary: "ok".into(),
+            command: "npm test".into(),
+            scope: crate::verification::VerificationScope::ProjectUnit,
+            affected_paths: vec![],
         };
         task.note_verification(&outcome);
         assert_eq!(task.verification.len(), 1);

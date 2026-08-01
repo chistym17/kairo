@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use crate::verification::VerificationOutcome;
+use crate::verification::{CompletionAssessment, VerificationOutcome};
 
 /// Idle model turns after edit+review+verify-attempt before auto-stop.
 pub const POST_EDIT_IDLE_TURNS: u32 = 4;
@@ -27,6 +27,8 @@ pub struct CompletionTracker {
     pub last_verify_success: Option<bool>,
     pub last_verify_detail: Option<String>,
     pub last_verification: Option<VerificationOutcome>,
+    /// Slice 5F derived label — does not change StopReason by itself.
+    pub completion_assessment: CompletionAssessment,
 }
 
 impl CompletionTracker {
@@ -44,6 +46,7 @@ impl CompletionTracker {
         self.last_verify_success = None;
         self.last_verify_detail = None;
         self.last_verification = None;
+        self.completion_assessment = CompletionAssessment::Unverified;
     }
 
     /// Record a novel tool result. Before milestones, this can move the progress
@@ -87,8 +90,16 @@ impl CompletionTracker {
         if outcome.passed() {
             self.last_progress_turn = Some(turn);
         }
+        self.completion_assessment = CompletionAssessment::from_outcome(Some(&outcome));
         self.last_verification = Some(outcome);
         self.maybe_mark_milestones(turn);
+    }
+
+    pub fn assessment(&self) -> CompletionAssessment {
+        if self.last_edit_turn.is_some() && !self.verify_attempted_since_edit {
+            return CompletionAssessment::Unverified;
+        }
+        self.completion_assessment
     }
 
     fn maybe_mark_milestones(&mut self, turn: u32) {
@@ -130,10 +141,13 @@ mod tests {
             status: if passed {
                 VerificationStatus::Passed
             } else {
-                VerificationStatus::Failed
+                VerificationStatus::FailedUnknown
             },
             exit_code: Some(if passed { 0 } else { 1 }),
             summary: summary.into(),
+            command: "npm test".into(),
+            scope: crate::verification::VerificationScope::ProjectUnit,
+            affected_paths: vec![],
         }
     }
 
@@ -144,6 +158,9 @@ mod tests {
             status: VerificationStatus::EnvironmentBlocked,
             exit_code: Some(133),
             summary: summary.into(),
+            command: "npm test".into(),
+            scope: crate::verification::VerificationScope::ProjectUnit,
+            affected_paths: vec![],
         }
     }
 
@@ -224,6 +241,19 @@ mod tests {
         assert!(t.verify_attempted_since_edit);
         assert_eq!(t.milestones_met_turn, Some(3));
         assert!(!t.last_verify_success.unwrap_or(true));
+        assert_eq!(t.assessment(), CompletionAssessment::VerificationBlocked);
         assert!(t.should_complete_unverified(7));
+    }
+
+    #[test]
+    fn part5f_failed_unrelated_is_locally_verified_assessment() {
+        let mut t = CompletionTracker::new();
+        t.note_edit(1);
+        t.note_review(2);
+        let mut o = outcome(false, "lint noise");
+        o.status = VerificationStatus::FailedUnrelated;
+        t.note_verification_outcome(3, o);
+        assert_eq!(t.assessment(), CompletionAssessment::LocallyVerified);
+        assert_eq!(t.last_verify_success, Some(false));
     }
 }

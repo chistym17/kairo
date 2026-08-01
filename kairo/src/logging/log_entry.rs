@@ -371,6 +371,17 @@ pub fn write_run_summary(
     stop_reason: &crate::state::stop_reason::StopReason,
     efficiency: &crate::state::RunEfficiency,
 ) {
+    write_run_summary_with_assessment(run_id, model_id, stop_reason, efficiency, None);
+}
+
+/// Write a run summary, optionally including Slice 5F completion assessment.
+pub fn write_run_summary_with_assessment(
+    run_id: &str,
+    model_id: &str,
+    stop_reason: &crate::state::stop_reason::StopReason,
+    efficiency: &crate::state::RunEfficiency,
+    completion_assessment: Option<&str>,
+) {
     let Some(_log_dir) = ensure_logs_dir() else {
         return;
     };
@@ -409,6 +420,9 @@ pub fn write_run_summary(
     }
     if let Some(ms) = efficiency.time_to_first_verification_ms {
         summary["time_to_first_verification_ms"] = serde_json::json!(ms);
+    }
+    if let Some(assessment) = completion_assessment {
+        summary["completion_assessment"] = serde_json::json!(assessment);
     }
 
     append_json_line(&log_path, &summary);

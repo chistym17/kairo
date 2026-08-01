@@ -4,6 +4,10 @@
 //! identifies commands that match checks declared by the repository's project
 //! snapshot and classifies their results — including environment/sandbox blocks
 //! that are not evidence the patch itself failed.
+//!
+//! **Slice 5F:** richer [`VerificationStatus`] / [`VerificationScope`], prefer
+//! focused edited-file checks, classify broad failures by reported paths, and
+//! derive [`CompletionAssessment`] for telemetry without upgrading StopReason.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -52,13 +56,64 @@ impl Check {
     }
 }
 
+/// How narrowly a check was scoped relative to the edit (Slice 5F).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationScope {
+    /// Single edited file (e.g. `eslint path/to/file.ts`).
+    EditedFile,
+    /// Project unit that owns the edit (e.g. `frontend-v2` lint/test).
+    #[default]
+    ProjectUnit,
+    /// Whole-repo check.
+    Repository,
+}
+
+/// Classified verification result (Slice 5F).
+///
+/// Older persisted sessions may still carry `failed`; that deserializes as
+/// [`FailedUnknown`] so we never invent path relevance from legacy data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationStatus {
     Passed,
-    Failed,
+    /// Failure output implicates the edited file / coherent failure group.
+    FailedRelevant,
+    /// Failure output only implicates paths outside the edited target.
+    FailedUnrelated,
+    /// Failed, but paths could not be classified conservatively.
+    #[serde(alias = "failed")]
+    FailedUnknown,
     /// Check could not run meaningfully (browser/sandbox/namespace crash, etc.).
     EnvironmentBlocked,
+    /// No verification was run after the last edit.
+    NotAttempted,
+}
+
+impl VerificationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::FailedRelevant => "failed_relevant",
+            Self::FailedUnrelated => "failed_unrelated",
+            Self::FailedUnknown => "failed_unknown",
+            Self::EnvironmentBlocked => "environment_blocked",
+            Self::NotAttempted => "not_attempted",
+        }
+    }
+
+    /// Any failed check (relevant, unrelated, or unknown) — not env / not-attempted.
+    pub fn is_failed(self) -> bool {
+        matches!(
+            self,
+            Self::FailedRelevant | Self::FailedUnrelated | Self::FailedUnknown
+        )
+    }
+
+    /// Failure that should not be treated as evidence the patch is wrong.
+    pub fn is_non_patch_failure(self) -> bool {
+        matches!(self, Self::EnvironmentBlocked | Self::FailedUnrelated)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +123,14 @@ pub struct VerificationOutcome {
     pub status: VerificationStatus,
     pub exit_code: Option<i32>,
     pub summary: String,
+    /// Command that was classified (may be a narrowed focused check).
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub scope: VerificationScope,
+    /// Paths extracted from failure output (empty when passed / blocked / unknown).
+    #[serde(default)]
+    pub affected_paths: Vec<PathBuf>,
 }
 
 impl VerificationOutcome {
@@ -77,6 +140,53 @@ impl VerificationOutcome {
 
     pub fn is_environment_blocked(&self) -> bool {
         matches!(self.status, VerificationStatus::EnvironmentBlocked)
+    }
+
+    pub fn is_non_patch_failure(&self) -> bool {
+        self.status.is_non_patch_failure()
+    }
+}
+
+/// Derived scoreboard label (Slice 5F Part 4). Coexists with conservative
+/// [`crate::state::stop_reason::StopReason`]; does not upgrade to TaskComplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAssessment {
+    /// Focused or unit check passed.
+    Verified,
+    /// Broad check failed only on unrelated paths (edit not implicated).
+    LocallyVerified,
+    /// Runner unusable / environment blocked.
+    VerificationBlocked,
+    /// Failure implicated the edit (or coherent failure group).
+    VerificationFailedRelevant,
+    /// Ambiguous, not attempted, or no clearer label applies.
+    #[default]
+    Unverified,
+}
+
+impl CompletionAssessment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::LocallyVerified => "locally_verified",
+            Self::VerificationBlocked => "verification_blocked",
+            Self::VerificationFailedRelevant => "verification_failed_relevant",
+            Self::Unverified => "unverified",
+        }
+    }
+
+    pub fn from_outcome(outcome: Option<&VerificationOutcome>) -> Self {
+        let Some(outcome) = outcome else {
+            return Self::Unverified;
+        };
+        match outcome.status {
+            VerificationStatus::Passed => Self::Verified,
+            VerificationStatus::FailedUnrelated => Self::LocallyVerified,
+            VerificationStatus::EnvironmentBlocked => Self::VerificationBlocked,
+            VerificationStatus::FailedRelevant => Self::VerificationFailedRelevant,
+            VerificationStatus::FailedUnknown | VerificationStatus::NotAttempted => Self::Unverified,
+        }
     }
 }
 
@@ -180,6 +290,160 @@ pub fn discover_checks_for_edit(snapshot: &ProjectSnapshot, edited_path: &Path) 
     }
 }
 
+/// Ranked candidates for post-edit verify: focused first, then unit-wide.
+///
+/// Each entry carries the intended [`VerificationScope`] for classification /
+/// telemetry. Duplicates (same command+cwd) keep the narrowest scope.
+pub fn rank_checks_for_edit(
+    snapshot: &ProjectSnapshot,
+    edited_path: &Path,
+) -> Vec<(Check, VerificationScope)> {
+    let unit_checks = discover_checks_for_edit(snapshot, edited_path);
+    let mut ranked: Vec<(Check, VerificationScope)> = Vec::new();
+
+    for base in &unit_checks {
+        if let Some(focused) = narrow_check_to_edited_file(base, edited_path) {
+            push_ranked(&mut ranked, focused, VerificationScope::EditedFile);
+        }
+        if let Some(targeted) = narrow_check_to_module(base, edited_path) {
+            push_ranked(&mut ranked, targeted, VerificationScope::EditedFile);
+        }
+    }
+    for base in unit_checks {
+        let scope = if normalize_path(&base.cwd) == Path::new(".") {
+            VerificationScope::Repository
+        } else {
+            VerificationScope::ProjectUnit
+        };
+        push_ranked(&mut ranked, base, scope);
+    }
+    ranked
+}
+
+fn push_ranked(out: &mut Vec<(Check, VerificationScope)>, check: Check, scope: VerificationScope) {
+    if let Some((_, existing_scope)) = out
+        .iter_mut()
+        .find(|(c, _)| c.command() == check.command() && c.cwd == check.cwd)
+    {
+        // Keep the narrower scope if we see the same command twice.
+        if scope_rank(scope) < scope_rank(*existing_scope) {
+            *existing_scope = scope;
+        }
+        return;
+    }
+    out.push((check, scope));
+}
+
+fn scope_rank(scope: VerificationScope) -> u8 {
+    match scope {
+        VerificationScope::EditedFile => 0,
+        VerificationScope::ProjectUnit => 1,
+        VerificationScope::Repository => 2,
+    }
+}
+
+/// Narrow a lint check to the single edited file when the toolchain allows it.
+pub fn narrow_check_to_edited_file(check: &Check, edited_path: &Path) -> Option<Check> {
+    if check.kind != CheckKind::Lint {
+        return None;
+    }
+    let edited = normalize_path(edited_path);
+    let cwd = normalize_path(&check.cwd);
+    let rel = strip_prefix_path(&edited, &cwd)?;
+    if !is_js_ts_lint_path(&rel) {
+        return None;
+    }
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+    let cmd = check.command().to_ascii_lowercase();
+    let looks_eslint = cmd.contains("eslint")
+        || check.program == "eslint"
+        || (check.program == "npx" && check.args.first().is_some_and(|a| a == "eslint"))
+        || (check.program == "npm"
+            && check.args.len() >= 2
+            && check.args[0] == "run"
+            && check.args[1] == "lint");
+
+    if !looks_eslint {
+        return None;
+    }
+
+    Some(Check {
+        id: format!("{}:eslint-file", check.id),
+        kind: CheckKind::Lint,
+        program: "npx".into(),
+        args: vec!["eslint".into(), rel_str],
+        cwd: check.cwd.clone(),
+        confidence: check.confidence,
+    })
+}
+
+/// Narrow a Django `manage.py test` suite to the app package owning the edit.
+pub fn narrow_check_to_module(check: &Check, edited_path: &Path) -> Option<Check> {
+    if check.kind != CheckKind::Test {
+        return None;
+    }
+    let cmd = check.command().to_ascii_lowercase();
+    if !cmd.contains("manage.py") || !cmd.contains("test") {
+        return None;
+    }
+    // Already targeted (extra args after `test`).
+    if let Some(idx) = check.args.iter().position(|a| a == "test") {
+        if check.args.len() > idx + 1 {
+            return None;
+        }
+    }
+
+    let edited = normalize_path(edited_path);
+    let cwd = normalize_path(&check.cwd);
+    let rel = strip_prefix_path(&edited, &cwd)?;
+    let label = django_app_label(&rel)?;
+
+    let mut args = check.args.clone();
+    if !args.iter().any(|a| a == "test") {
+        return None;
+    }
+    args.push(label);
+
+    Some(Check {
+        id: format!("{}:app", check.id),
+        kind: CheckKind::Test,
+        program: check.program.clone(),
+        args,
+        cwd: check.cwd.clone(),
+        confidence: check.confidence,
+    })
+}
+
+fn django_app_label(rel_to_cwd: &Path) -> Option<String> {
+    let mut comps = rel_to_cwd.components();
+    let Component::Normal(first) = comps.next()? else {
+        return None;
+    };
+    let app = first.to_string_lossy();
+    if app.is_empty() || app == "manage.py" || app.starts_with('.') {
+        return None;
+    }
+    // backend/annotations/serializers.py → annotations
+    Some(app.to_string())
+}
+
+fn is_js_ts_lint_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
+    )
+}
+
+fn strip_prefix_path(path: &Path, prefix: &Path) -> Option<PathBuf> {
+    let path = normalize_path(path);
+    let prefix = normalize_path(prefix);
+    if prefix == Path::new(".") {
+        return Some(path);
+    }
+    path.strip_prefix(&prefix).ok().map(|p| p.to_path_buf())
+}
+
 fn check_belongs_to_unit(check: &Check, unit_path: &Path) -> bool {
     let cwd = normalize_path(&check.cwd);
     if unit_path == Path::new(".") {
@@ -229,10 +493,10 @@ pub struct AutoVerifyReport {
 
 /// Run a unit-scoped preferred check after a successful file mutation.
 ///
-/// Prefers checks from the project unit that owns `edited_path` so a backend
-/// edit does not run frontend lint (and vice versa). If the preferred check is
-/// environment-blocked / unusable, tries the next non-browserish check in that
-/// unit. Returns `None` when disabled or no suitable check exists.
+/// Prefers focused edited-file / module checks, then the project unit that owns
+/// `edited_path`. If the preferred check is environment-blocked / unusable,
+/// tries the next non-browserish check. Returns `None` when disabled or no
+/// suitable check exists.
 pub fn try_auto_post_edit_verify(
     snapshot: &ProjectSnapshot,
     workspace_root: &Path,
@@ -241,19 +505,19 @@ pub fn try_auto_post_edit_verify(
     if !auto_post_edit_verify_enabled() {
         return None;
     }
-    let checks = discover_checks_for_edit(snapshot, edited_path);
-    let candidates: Vec<&Check> = checks
+    let ranked = rank_checks_for_edit(snapshot, edited_path);
+    let candidates: Vec<&(Check, VerificationScope)> = ranked
         .iter()
-        .filter(|c| browserish_penalty(c) == 0)
+        .filter(|(c, _)| browserish_penalty(c) == 0)
         .collect();
     if candidates.is_empty() {
         return None;
     }
 
     let mut last_blocked: Option<AutoVerifyReport> = None;
-    for check in candidates {
+    for (check, scope) in candidates {
         let result = execute_discovered_check(check, workspace_root, AUTO_VERIFY_TIMEOUT_SECS);
-        let mut outcome = outcome_for(check, &result);
+        let mut outcome = outcome_for_edit(check, &result, edited_path, *scope);
         // Unusable runners (missing venv, bare exit 133) are not patch failures.
         if !outcome.is_environment_blocked() && is_unusable_check_result(&result) {
             outcome.status = VerificationStatus::EnvironmentBlocked;
@@ -262,6 +526,7 @@ pub fn try_auto_post_edit_verify(
                 "EnvironmentBlocked: check could not run meaningfully ({detail}). \
                  This does not mean the patch failed."
             );
+            outcome.affected_paths.clear();
         }
         let output_suffix = format_auto_verify_suffix(check, &result, &outcome);
         let report = AutoVerifyReport {
@@ -303,11 +568,7 @@ fn format_auto_verify_suffix(
 ) -> String {
     let cwd = check.cwd.display();
     let cmd = check.command();
-    let status = match outcome.status {
-        VerificationStatus::Passed => "passed",
-        VerificationStatus::Failed => "failed",
-        VerificationStatus::EnvironmentBlocked => "environment_blocked",
-    };
+    let status = outcome.status.as_str();
     let body = if result.output.trim().is_empty() {
         result
             .error
@@ -331,12 +592,19 @@ fn format_auto_verify_suffix(
             "This check could not run in this environment. Do not re-run it identically. \
              Finish unverified, or pick a different unit-local check if one exists."
         }
-        VerificationStatus::Failed => {
+        VerificationStatus::FailedUnrelated => {
+            "Focused/edit target was not implicated — failures are outside the edited file. \
+             You may finish; do not chase unrelated baseline errors without need."
+        }
+        VerificationStatus::FailedRelevant | VerificationStatus::FailedUnknown => {
             "If this check failed, fix the code (or a coherent failure group) before finishing. \
              Do not re-run this same command identically without another edit."
         }
         VerificationStatus::Passed => {
             "Check passed. Call finish with a short summary unless you still need a focused re-edit."
+        }
+        VerificationStatus::NotAttempted => {
+            "Verification was not attempted. Prefer a focused unit check before finishing."
         }
     };
     format!(
@@ -390,15 +658,28 @@ pub fn match_executed_check<'a>(
 }
 
 pub fn outcome_for(check: &Check, result: &ToolResult) -> VerificationOutcome {
+    outcome_for_edit(check, result, Path::new(""), VerificationScope::ProjectUnit)
+}
+
+/// Classify a check result, optionally attributing failures to `edited_path`.
+pub fn outcome_for_edit(
+    check: &Check,
+    result: &ToolResult,
+    edited_path: &Path,
+    scope: VerificationScope,
+) -> VerificationOutcome {
     let exit_code = parse_exit_code(&result.output);
     let env_blocked = is_environment_blocked(result);
+    let command = check.command();
 
-    let status = if result.success {
-        VerificationStatus::Passed
+    let (status, affected_paths) = if result.success {
+        (VerificationStatus::Passed, Vec::new())
     } else if env_blocked {
-        VerificationStatus::EnvironmentBlocked
+        (VerificationStatus::EnvironmentBlocked, Vec::new())
     } else {
-        VerificationStatus::Failed
+        let paths = extract_failure_paths(result);
+        let status = classify_failure_status(&paths, edited_path, scope);
+        (status, paths)
     };
 
     let summary = match status {
@@ -410,6 +691,18 @@ pub fn outcome_for(check: &Check, result: &ToolResult) -> VerificationOutcome {
                  This does not mean the patch failed.{fallback}"
             )
         }
+        VerificationStatus::FailedUnrelated => {
+            let detail = summarize_result(result);
+            format!(
+                "FailedUnrelated: check failed, but reported paths do not include the edited \
+                 file (`{}`). {detail}",
+                edited_path.display()
+            )
+        }
+        VerificationStatus::FailedRelevant => {
+            let detail = summarize_result(result);
+            format!("FailedRelevant: edited target implicated. {detail}")
+        }
         _ => summarize_result(result),
     };
 
@@ -419,7 +712,136 @@ pub fn outcome_for(check: &Check, result: &ToolResult) -> VerificationOutcome {
         status,
         exit_code,
         summary,
+        command,
+        scope,
+        affected_paths,
     }
+}
+
+/// Conservative path-based failure classification (Slice 5F Part 3).
+///
+/// - Any affected path matching the edited file → [`FailedRelevant`]
+/// - Paths extracted and none match the edit → [`FailedUnrelated`]
+/// - No usable paths → [`FailedUnknown`]
+pub fn classify_failure_status(
+    affected_paths: &[PathBuf],
+    edited_path: &Path,
+    _scope: VerificationScope,
+) -> VerificationStatus {
+    let edited = normalize_path(edited_path);
+    if edited.as_os_str().is_empty() || edited == Path::new(".") {
+        return VerificationStatus::FailedUnknown;
+    }
+    if affected_paths.is_empty() {
+        return VerificationStatus::FailedUnknown;
+    }
+
+    if affected_paths
+        .iter()
+        .any(|p| paths_refer_to_same_file(p, &edited))
+    {
+        VerificationStatus::FailedRelevant
+    } else {
+        VerificationStatus::FailedUnrelated
+    }
+}
+
+fn paths_refer_to_same_file(reported: &Path, edited: &Path) -> bool {
+    let a = normalize_path(reported);
+    let b = normalize_path(edited);
+    if a == b {
+        return true;
+    }
+    let a_s = a.to_string_lossy().replace('\\', "/");
+    let b_s = b.to_string_lossy().replace('\\', "/");
+    if a_s.ends_with(&b_s) || b_s.ends_with(&a_s) {
+        return true;
+    }
+    // Absolute vs workspace-relative: compare file_name + a parent component.
+    match (a.file_name(), b.file_name(), a.parent(), b.parent()) {
+        (Some(af), Some(bf), Some(ap), Some(bp)) if af == bf => ap.file_name() == bp.file_name(),
+        _ => false,
+    }
+}
+
+/// Extract file paths from common lint/test failure formats.
+pub fn extract_failure_paths(result: &ToolResult) -> Vec<PathBuf> {
+    let mut blob = String::new();
+    if let Some(err) = &result.error {
+        blob.push_str(err);
+        blob.push('\n');
+    }
+    blob.push_str(&result.output);
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw_line in blob.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        for candidate in path_candidates_in_line(line) {
+            let key = candidate.to_string_lossy().replace('\\', "/");
+            if seen.insert(key) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
+fn path_candidates_in_line(line: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let trimmed = line.trim_start_matches([' ', '\t', '-', '>', '|']);
+    let trimmed = trimmed.strip_prefix("-->").unwrap_or(trimmed).trim();
+
+    let token = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or(trimmed)
+        .trim_matches(['"', '\'', '`', ',', ';', '(', ')']);
+
+    let path_part = strip_line_col_suffix(token);
+    if looks_like_source_path(path_part) {
+        found.push(PathBuf::from(path_part));
+    }
+
+    for piece in line.split(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+        let piece = piece.trim_matches(['"', '\'', '`', ',', ';']);
+        let piece = strip_line_col_suffix(piece);
+        if looks_like_source_path(piece) && !found.iter().any(|p| p.as_os_str() == piece) {
+            found.push(PathBuf::from(piece));
+        }
+    }
+    found
+}
+
+fn strip_line_col_suffix(s: &str) -> &str {
+    let mut cut = s.len();
+    loop {
+        let head = &s[..cut];
+        if let Some(idx) = head.rfind(':') {
+            let after = &head[idx + 1..];
+            if !after.is_empty() && after.chars().all(|c| c.is_ascii_digit()) {
+                cut = idx;
+                continue;
+            }
+        }
+        break;
+    }
+    &s[..cut]
+}
+
+fn looks_like_source_path(s: &str) -> bool {
+    if s.len() < 3 || s.contains("://") {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    const EXTS: &[&str] = &[
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".java", ".kt", ".vue",
+        ".svelte",
+    ];
+    EXTS.iter().any(|ext| lower.ends_with(ext))
 }
 
 fn preferred_check_hint(blocked: &Check) -> String {
@@ -666,6 +1088,13 @@ mod tests {
                             confidence: 0.75,
                         },
                         CommandHint {
+                            label: "lint".into(),
+                            program: "npm".into(),
+                            args: vec!["run".into(), "lint".into()],
+                            working_directory: PathBuf::from("frontend"),
+                            confidence: 0.7,
+                        },
+                        CommandHint {
                             label: "dev".into(),
                             program: "npm".into(),
                             args: vec!["run".into(), "dev".into()],
@@ -732,7 +1161,7 @@ mod tests {
         let outcome = outcome_for(&check, &result);
         let suffix = format_auto_verify_suffix(&check, &result, &outcome);
         assert!(suffix.contains("[auto-verify"));
-        assert!(suffix.contains("failed"));
+        assert!(suffix.contains("failed_unknown") || suffix.contains("failed"));
         assert!(suffix.contains("npm test"));
         assert!(suffix.contains("# fail 2"));
     }
@@ -843,7 +1272,7 @@ mod tests {
             stop_reason: None,
         };
         let outcome = outcome_for(&check, &result);
-        assert_eq!(outcome.status, VerificationStatus::Failed);
+        assert_eq!(outcome.status, VerificationStatus::FailedUnknown);
         assert!(!outcome.summary.contains("EnvironmentBlocked"));
     }
 
@@ -889,5 +1318,160 @@ mod tests {
             stop_reason: None,
         };
         assert!(is_unusable_check_result(&result));
+    }
+
+    #[test]
+    fn part5f_narrow_eslint_prefers_edited_file() {
+        let ranked = rank_checks_for_edit(
+            &snapshot(),
+            Path::new("frontend/src/lib/task-status.ts"),
+        );
+        let focused = ranked
+            .iter()
+            .find(|(c, s)| {
+                *s == VerificationScope::EditedFile && c.command().contains("eslint")
+            })
+            .expect("focused eslint");
+        assert_eq!(focused.0.args.last().map(String::as_str), Some("src/lib/task-status.ts"));
+        assert!(ranked
+            .iter()
+            .any(|(c, s)| *s == VerificationScope::ProjectUnit && c.id.contains("lint")));
+    }
+
+    #[test]
+    fn part5f_narrow_django_test_to_app_label() {
+        let ranked =
+            rank_checks_for_edit(&snapshot(), Path::new("backend/annotations/serializers.py"));
+        let focused = ranked
+            .iter()
+            .find(|(c, s)| *s == VerificationScope::EditedFile && c.command().contains("annotations"))
+            .expect("targeted django test");
+        assert!(focused.0.args.iter().any(|a| a == "annotations"));
+    }
+
+    #[test]
+    fn part5f_unrelated_lint_paths_are_failed_unrelated() {
+        let check = Check {
+            id: "frontend:lint".into(),
+            kind: CheckKind::Lint,
+            program: "npm".into(),
+            args: vec!["run".into(), "lint".into()],
+            cwd: PathBuf::from("frontend"),
+            confidence: 0.7,
+        };
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 1\n\
+                     /home/proj/frontend/src/components/SiteNav.tsx\n\
+                       36:5  error  setState in effect\n\
+                     /home/proj/frontend/src/components/tasks/Board.tsx\n\
+                       52:7  error  setState in effect\n"
+                .into(),
+            diff: None,
+            error: Some("exited with code 1".into()),
+            stop_reason: None,
+        };
+        let outcome = outcome_for_edit(
+            &check,
+            &result,
+            Path::new("frontend/src/lib/task-status.ts"),
+            VerificationScope::ProjectUnit,
+        );
+        assert_eq!(outcome.status, VerificationStatus::FailedUnrelated);
+        assert_eq!(
+            CompletionAssessment::from_outcome(Some(&outcome)),
+            CompletionAssessment::LocallyVerified
+        );
+        assert!(!outcome.affected_paths.is_empty());
+    }
+
+    #[test]
+    fn part5f_edited_file_in_lint_output_is_failed_relevant() {
+        let check = Check {
+            id: "frontend:lint".into(),
+            kind: CheckKind::Lint,
+            program: "npx".into(),
+            args: vec!["eslint".into(), ".".into()],
+            cwd: PathBuf::from("frontend"),
+            confidence: 0.7,
+        };
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 1\nfrontend/src/lib/task-status.ts\n  14:3  error  Unexpected\n"
+                .into(),
+            diff: None,
+            error: Some("exited with code 1".into()),
+            stop_reason: None,
+        };
+        let outcome = outcome_for_edit(
+            &check,
+            &result,
+            Path::new("frontend/src/lib/task-status.ts"),
+            VerificationScope::EditedFile,
+        );
+        assert_eq!(outcome.status, VerificationStatus::FailedRelevant);
+        assert_eq!(
+            CompletionAssessment::from_outcome(Some(&outcome)),
+            CompletionAssessment::VerificationFailedRelevant
+        );
+    }
+
+    #[test]
+    fn part5f_ambiguous_failure_is_failed_unknown() {
+        let check = discover_checks(&snapshot())
+            .into_iter()
+            .find(|c| c.id == "backend:test")
+            .unwrap();
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 1\nFAIL: something broke with no path\n".into(),
+            diff: None,
+            error: Some("exited with code 1".into()),
+            stop_reason: None,
+        };
+        let outcome = outcome_for_edit(
+            &check,
+            &result,
+            Path::new("backend/annotations/serializers.py"),
+            VerificationScope::ProjectUnit,
+        );
+        assert_eq!(outcome.status, VerificationStatus::FailedUnknown);
+        assert_eq!(
+            CompletionAssessment::from_outcome(Some(&outcome)),
+            CompletionAssessment::Unverified
+        );
+    }
+
+    #[test]
+    fn part5f_env_blocked_maps_to_verification_blocked_assessment() {
+        let check = discover_checks(&snapshot())
+            .into_iter()
+            .find(|c| c.id == "backend:test")
+            .unwrap();
+        let result = ToolResult {
+            success: false,
+            output: "exit_code: 133\nzygote_host crash\n".into(),
+            diff: None,
+            error: Some("exited with code 133".into()),
+            stop_reason: None,
+        };
+        let outcome = outcome_for_edit(
+            &check,
+            &result,
+            Path::new("backend/annotations/serializers.py"),
+            VerificationScope::EditedFile,
+        );
+        assert_eq!(outcome.status, VerificationStatus::EnvironmentBlocked);
+        assert_eq!(
+            CompletionAssessment::from_outcome(Some(&outcome)),
+            CompletionAssessment::VerificationBlocked
+        );
+    }
+
+    #[test]
+    fn part5f_legacy_failed_serde_alias_roundtrips_as_unknown() {
+        let json = r#""failed""#;
+        let status: VerificationStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status, VerificationStatus::FailedUnknown);
     }
 }

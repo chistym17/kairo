@@ -6,7 +6,8 @@ use crate::context::{ContextBuilder, ContextManager};
 use crate::governance::{classify_progress, GovernanceDecision};
 use crate::llm::{render_call_line, LlmClient, LlmError, LlmToolCall, ModelUsage};
 use crate::logging::{
-    begin_run_log, emit_thinking_state, write_entry, write_event, write_run_summary, LogEntry,
+    begin_run_log, emit_thinking_state, write_entry, write_event, write_run_summary_with_assessment,
+    LogEntry,
 };
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
@@ -2103,9 +2104,14 @@ fn commit_tool_outcome(
                         &state.run_id,
                         "auto_post_edit_verify",
                         &format!(
-                            "check={} status={:?} summary={}",
+                            "check={} status={:?} scope={:?} assessment={} summary={}",
                             report.check.id,
                             report.outcome.status,
+                            report.outcome.scope,
+                            crate::verification::CompletionAssessment::from_outcome(Some(
+                                &report.outcome
+                            ))
+                            .as_str(),
                             report.outcome.summary.chars().take(200).collect::<String>()
                         ),
                         0,
@@ -2659,11 +2665,12 @@ fn is_harness_denial_text(result: &ToolResult) -> bool {
 }
 
 fn write_summary(state: &AgentState, reason: &StopReason) {
-    write_run_summary(
+    write_run_summary_with_assessment(
         &state.run_id,
         &state.model_id,
         reason,
         &state.efficiency_snapshot(),
+        Some(state.completion.assessment().as_str()),
     );
     let totals = state.model_usage.totals();
     if let Ok(json) = serde_json::to_string(&totals) {
