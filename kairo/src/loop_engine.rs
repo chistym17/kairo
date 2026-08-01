@@ -5,7 +5,9 @@ use crate::authorization::{
 use crate::context::{ContextBuilder, ContextManager};
 use crate::governance::{classify_progress, GovernanceDecision};
 use crate::llm::{render_call_line, LlmClient, LlmError, LlmToolCall, ModelUsage};
-use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
+use crate::logging::{
+    begin_run_log, emit_thinking_state, write_entry, write_event, write_run_summary, LogEntry,
+};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
 use crate::state::progress::ProgressKind;
@@ -85,14 +87,16 @@ pub async fn run(
         0,
     );
 
+    let log_path = begin_run_log(&state.run_id);
     crate::agent_println!(
-        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n[agent] turn_intent: {} (metadata)\n",
+        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n[agent] turn_intent: {} (metadata)\n[agent] log_file: {}\n",
         state.run_id,
         state.goal,
         state.model_id,
         state.max_steps,
         state.authorization.edit_policy,
-        state.turn_intent.as_str()
+        state.turn_intent.as_str(),
+        log_path.display()
     );
     if step_delay_ms > 0 {
         crate::agent_println!("[agent] step_delay: {}ms (opt-in pacing)", step_delay_ms);
@@ -299,6 +303,26 @@ pub async fn run(
                         None,
                         stalls_before,
                         None,
+                    );
+                    emit_thinking_state(
+                        &state.run_id,
+                        state.step_count,
+                        state.model_turns,
+                        "(text_only)",
+                        &json!({
+                            "transition": "continue",
+                            "transition_detail": "text_only_no_tool_call",
+                            "phase": state.run_control.phase.as_str(),
+                            "consecutive_stalls": state.stall.consecutive_stalls,
+                            "stall_kind": "NonResolvingResponse",
+                            "recovery_active": state.recovery.is_active(),
+                            "legacy_decision": "continue",
+                            "candidate_decision": "recover",
+                            "candidate_reason": "text_only_non_resolving",
+                            "exact_repeat": state.stall.is_repeat(),
+                            "coarse_repeat": state.stall.coarse_is_repeat(),
+                            "ping_pong": state.stall.is_ping_pong(),
+                        }),
                     );
 
                     if !text.trim().is_empty() {
@@ -1909,6 +1933,43 @@ fn commit_tool_outcome(
         transition = RuntimeTransition::Terminate(StopReason::NoProgress);
     }
 
+    let recovery_snap = state.recovery.snapshot();
+    emit_thinking_state(
+        &state.run_id,
+        step_index,
+        model_turn,
+        tool_name(&action),
+        &json!({
+            "transition": transition_label(&transition),
+            "transition_detail": format!("{transition:?}"),
+            "pre_apply_transition": format!("{pre_apply_transition:?}"),
+            "phase": state.run_control.phase.as_str(),
+            "consecutive_stalls": state.stall.consecutive_stalls,
+            "stall_kind": stall_kind.map(|k| format!("{k:?}")),
+            "progress_kind": format!("{progress_kind:?}"),
+            "dispatched": dispatched,
+            "exact_repeat": state.stall.is_repeat(),
+            "coarse_repeat": state.stall.coarse_is_repeat(),
+            "ping_pong": state.stall.is_ping_pong(),
+            "recovery_active": recovery_snap.active,
+            "recovery_reason": recovery_snap.reason.map(|r| format!("{r:?}")),
+            "recovery_target": recovery_snap.target.as_ref().map(|p| p.display().to_string()),
+            "recovery_consecutive_failures": recovery_snap.consecutive_failures,
+            "recovery_remaining_reads": recovery_snap.remaining_reads,
+            "guidance_attempts": state.recovery.guidance_attempts(),
+            "legacy_decision": legacy_label,
+            "candidate_decision": candidate.decision,
+            "candidate_reason": candidate.reason,
+            "stall_policy": stall_policy.as_str(),
+            "legacy_counters": {
+                "no_progress": state.run_control.no_progress,
+                "consecutive_denials": state.run_control.consecutive_denials,
+                "consecutive_invalid_actions": state.run_control.consecutive_invalid_actions,
+                "progress_consecutive_no_progress": state.progress.consecutive_no_progress,
+            },
+        }),
+    );
+
     let legacy_stop_source = legacy_stop_source_for(
         // Prefer post-recovery error (may include patch failure limit);
         // fall back to pre-denial text for denied-source-writes labelling
@@ -2298,6 +2359,15 @@ fn log_prompt_diagnostics(
 fn emit(observer: Option<&dyn AgentObserver>, event: AgentEvent) {
     if let Some(obs) = observer {
         obs.on_event(event);
+    }
+}
+
+fn transition_label(transition: &RuntimeTransition) -> &'static str {
+    match transition {
+        RuntimeTransition::Continue => "continue",
+        RuntimeTransition::Recover(_) => "recover",
+        RuntimeTransition::Complete(_) => "complete",
+        RuntimeTransition::Terminate(_) => "terminate",
     }
 }
 

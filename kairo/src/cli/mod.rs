@@ -49,8 +49,10 @@ Options:
   -h, --help             Show this help
 
 Logs:
-  JSONL run logs go under $XDG_DATA_HOME/kairo/logs
-  (default ~/.local/share/kairo/logs). Override with KAIRO_LOG_DIR.
+  Numbered JSONL files under ./logs (e.g. kairo/logs/1_<id>.jsonl when you
+  run from the crate). Override with KAIRO_LOG_DIR.
+  Each turn prints [transition] / [state] and writes thinking_state records
+  (always on — not quiet-gated).
 
 Examples:
   cd ~/projects/shop && kairo
