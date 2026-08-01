@@ -82,6 +82,46 @@ impl AllowedActionSnapshot {
     pub fn allows_tool(&self, tool: &str) -> bool {
         self.tools.iter().any(|t| *t == tool)
     }
+
+    /// Stable text block for recovery guidance (Part 5C Part 2).
+    ///
+    /// Lists the authoritative tool set and any active constraints. Does not
+    /// recommend a single forced next action.
+    pub fn render_for_guidance(&self) -> String {
+        let mut out = String::from("allowed_next_actions:");
+        for tool in &self.tools {
+            out.push_str("\n- ");
+            out.push_str(tool);
+        }
+        if self.constraints.is_empty() {
+            return out;
+        }
+        out.push_str("\nconstraints:");
+        for c in &self.constraints {
+            out.push_str("\n- ");
+            out.push_str(&c.render_for_guidance());
+        }
+        out
+    }
+}
+
+impl ActionConstraint {
+    pub fn render_for_guidance(&self) -> String {
+        match self {
+            Self::DuplicateReadRestricted { path } => {
+                format!(
+                    "read_file `{}`: duplicate/cached ranges blocked",
+                    path.display()
+                )
+            }
+            Self::DuplicateReadPathDisabled { path } => {
+                format!("read_file `{}`: path disabled", path.display())
+            }
+            Self::RecoveryReadTarget { path } => {
+                format!("read_file limited to recovery target `{}`", path.display())
+            }
+        }
+    }
 }
 
 /// Authoritative "what may the model do next?" view for recovery guidance.
@@ -639,6 +679,24 @@ mod tests {
             before_level
         );
         assert_eq!(recovery.guidance_attempts(), before_attempts);
+    }
+
+    #[test]
+    fn allowed_next_actions_render_includes_tools_and_constraints() {
+        let mut run = RunState::new();
+        let mut recovery = idle_recovery();
+        assert!(run.enter_act());
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let text = allowed_next_actions(&run, &recovery).render_for_guidance();
+        assert!(text.contains("allowed_next_actions:"));
+        assert!(text.contains("- read_file"));
+        assert!(text.contains("- update_plan"));
+        assert!(text.contains("- apply_patch"));
+        assert!(text.contains("- finish"));
+        assert!(text.contains("constraints:"));
+        assert!(text.contains("Board.tsx"));
+        assert!(text.contains("path disabled"));
     }
 
     #[test]

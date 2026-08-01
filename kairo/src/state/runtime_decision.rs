@@ -245,12 +245,13 @@ fn apply_general_recipe(
 
     let guidance = match action {
         RecoveryAction::InvalidArguments { tool, .. } => {
-            invalid_arguments_guidance(tool, attempt)
+            invalid_arguments_guidance(state, tool, attempt)
         }
         RecoveryAction::UnsupportedCapability {
             cause: UnsupportedCause::PolicyDenied,
+            tool,
             ..
-        } => unsupported_capability_guidance(state, attempt),
+        } => unsupported_capability_guidance(state, tool, attempt),
         RecoveryAction::UnsupportedCapability {
             cause: UnsupportedCause::DuplicateEvidence,
             tool: _,
@@ -546,22 +547,31 @@ fn append_guidance(result: &mut ToolResult, guidance: &str) {
     }
 }
 
-fn invalid_arguments_guidance(tool: &str, attempt: u32) -> String {
+fn allowed_next_block(state: &AgentState) -> String {
+    crate::state::action_policy::allowed_next_actions(&state.run_control, &state.recovery)
+        .render_for_guidance()
+}
+
+fn invalid_arguments_guidance(state: &AgentState, tool: &str, attempt: u32) -> String {
+    let allowed = allowed_next_block(state);
     if attempt <= 1 {
         format!(
-            "RECOVERY (invalid_arguments, attempt {attempt}): Fix the `{tool}` arguments and \
-             you may retry this same tool once. Do not repeat the identical malformed call."
+            "RECOVERY (invalid_arguments, attempt {attempt}): rejected `{tool}` — fix its \
+             arguments and you may retry this same tool once. Do not repeat the identical \
+             malformed call.\n{allowed}"
         )
     } else {
         format!(
-            "RECOVERY (invalid_arguments, attempt {attempt}): Same-tool retry exhausted for `{tool}`. \
-             Next action MUST be different — prefer apply_patch, update_plan, or finish with a \
-             concrete code blocker. Repeating the same malformed call will not progress."
+            "RECOVERY (invalid_arguments, attempt {attempt}): Same-tool retry exhausted for \
+             `{tool}`. Next action MUST be different and chosen from allowed_next_actions — \
+             do not force one specific tool; repeating the same malformed call will not \
+             progress.\n{allowed}"
         )
     }
 }
 
-fn unsupported_capability_guidance(state: &AgentState, attempt: u32) -> String {
+fn unsupported_capability_guidance(state: &AgentState, tool: &str, attempt: u32) -> String {
+    let allowed = allowed_next_block(state);
     let mut evidence = String::new();
     if !state.run_control.seen_files.is_empty() {
         evidence.push_str("\nFiles already in context:");
@@ -573,15 +583,16 @@ fn unsupported_capability_guidance(state: &AgentState, attempt: u32) -> String {
     }
     if attempt <= 1 {
         format!(
-            "RECOVERY (unsupported_capability, attempt {attempt}): That action is not available \
-             under the current policy. Permitted next steps: apply_patch on a seen file, \
-             update_plan, or finish with a concrete blocker.{evidence}"
+            "RECOVERY (unsupported_capability, attempt {attempt}): rejected `{tool}` — that \
+             action is not available under the current policy. Choose the next action from \
+             allowed_next_actions (do not assume a single required tool).{evidence}\n{allowed}"
         )
     } else {
         format!(
-            "RECOVERY (unsupported_capability, attempt {attempt}): Still requesting an unavailable \
-             action. Further exploration/search/unscoped reads will not be granted. \
-             Next response MUST call apply_patch on a seen file, update_plan, or finish.{evidence}"
+            "RECOVERY (unsupported_capability, attempt {attempt}): Still requesting an \
+             unavailable action (`{tool}`). Further exploration/search/unscoped reads will \
+             not be granted. Next response MUST use one of allowed_next_actions.{evidence}\n\
+             {allowed}"
         )
     }
 }
@@ -853,6 +864,8 @@ mod tests {
         assert!(g1.contains("attempt 1"));
         assert!(g2.contains("attempt 2"));
         assert!(g2.contains("Same-tool retry exhausted"));
+        assert!(g1.contains("allowed_next_actions:"));
+        assert!(g2.contains("allowed_next_actions:"));
         assert_eq!(state.recovery.guidance_attempts(), 2);
     }
 
@@ -1025,7 +1038,8 @@ mod tests {
         assert!(d.contains("scope=restrict") || d.contains("scope=disable_path"));
         assert!(d.contains("Cached / already-seen") || d.contains("already in context"));
         assert!(p.contains("unsupported_capability"));
-        assert!(p.contains("not available"));
+        assert!(p.contains("not available") || p.contains("rejected"));
+        assert!(p.contains("allowed_next_actions:"));
         assert_ne!(d, p);
         assert_eq!(
             state
@@ -1193,5 +1207,69 @@ mod tests {
             t,
             RuntimeTransition::Recover(RecoveryAction::MissingEvidence { .. })
         ));
+    }
+
+    #[test]
+    fn part2_policy_denied_locate_in_act_cites_allowed_next_snapshot() {
+        let mut state = empty_state();
+        assert!(state.run_control.enter_act());
+        state
+            .run_control
+            .note_file_seen(PathBuf::from("Board.tsx"));
+        let _ = state
+            .recovery
+            .note_act_duplicate(Path::new("Board.tsx"));
+        let _ = state
+            .recovery
+            .note_act_duplicate(Path::new("Board.tsx"));
+
+        let mut result = ToolResult::error("locate unavailable");
+        let _ = apply_recovery(
+            &mut state,
+            &mut result,
+            &RecoveryAction::UnsupportedCapability {
+                cause: UnsupportedCause::PolicyDenied,
+                tool: "locate".into(),
+                target: None,
+            },
+        );
+        let g = result.error.unwrap();
+        assert!(g.contains("rejected `locate`"));
+        assert!(g.contains("allowed_next_actions:"));
+        assert!(g.contains("- read_file"));
+        assert!(g.contains("- update_plan"));
+        assert!(g.contains("- apply_patch"));
+        assert!(g.contains("- finish"));
+        assert!(!g.contains("- locate"));
+        assert!(g.contains("constraints:"));
+        assert!(g.contains("Board.tsx"));
+        assert!(g.contains("path disabled"));
+        // Must not force a single tool.
+        assert!(!g.contains("MUST call apply_patch"));
+    }
+
+    #[test]
+    fn part2_policy_denied_attempt_guidance_differs_and_keeps_snapshot() {
+        let mut state = empty_state();
+        assert!(state.run_control.enter_act());
+        let recipe = RecoveryAction::UnsupportedCapability {
+            cause: UnsupportedCause::PolicyDenied,
+            tool: "locate".into(),
+            target: None,
+        };
+        let mut r1 = ToolResult::error("locate unavailable");
+        let _ = apply_recovery(&mut state, &mut r1, &recipe);
+        let g1 = r1.error.unwrap();
+
+        let mut r2 = ToolResult::error("locate unavailable");
+        let _ = apply_recovery(&mut state, &mut r2, &recipe);
+        let g2 = r2.error.unwrap();
+
+        assert_ne!(g1, g2);
+        assert!(g1.contains("attempt 1"));
+        assert!(g2.contains("attempt 2"));
+        assert!(g1.contains("allowed_next_actions:"));
+        assert!(g2.contains("allowed_next_actions:"));
+        assert!(g2.contains("Still requesting an unavailable action"));
     }
 }
