@@ -212,6 +212,9 @@ fn recipe_reason(action: &RecoveryAction) -> String {
             format!("missing_evidence_{}", relevance.as_str())
         }
         RecoveryAction::RepeatedVerification => "repeated_verification".into(),
+        RecoveryAction::NonResolving { cause } => {
+            format!("non_resolving_{}", cause.as_str())
+        }
     }
 }
 

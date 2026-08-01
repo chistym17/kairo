@@ -39,8 +39,8 @@ pub use recovery::{
 };
 pub use runtime_decision::{
     apply_recovery, decide_next_state, stop_reason_from_transition, CompletionReason,
-    RecoveryAction, RecoveryApplyResult, RelevanceRule, RuntimeTransition, TurnOutcome,
-    UnsupportedCause,
+    NoToolCallCause, RecoveryAction, RecoveryApplyResult, RelevanceRule, RuntimeTransition,
+    TurnOutcome, UnsupportedCause,
 };
 pub use stall::{ActionFingerprint, StallKind, StallState};
 pub use stall_policy::{

@@ -1,6 +1,6 @@
 use crate::authorization::{
     apply_decision, authorize, build_approval_request, tool_effect, ApprovalDecision,
-    ApprovalGate, AuthorizationDecision,
+    ApprovalGate, AuthorizationDecision, EditPolicy,
 };
 use crate::context::{ContextBuilder, ContextManager};
 use crate::governance::{classify_progress, GovernanceDecision};
@@ -12,8 +12,8 @@ use crate::session::Session;
 use crate::state::agent_state::AgentState;
 use crate::state::progress::ProgressKind;
 use crate::state::runtime_decision::{
-    apply_recovery, decide_next_state, stop_reason_from_transition, RuntimeTransition,
-    TurnOutcome,
+    apply_recovery, decide_next_state, stop_reason_from_transition, NoToolCallCause,
+    RecoveryAction, RuntimeTransition, TurnOutcome,
 };
 use crate::state::stall::{ActionFingerprint, StallKind};
 use crate::state::stall_policy::{
@@ -285,46 +285,6 @@ pub async fn run(
                     state.exploration.consecutive_single_readonly_turns = 0;
                     state.governance.note_no_tool_turn();
 
-                    // Slice 3 shadow classification (final-design-plan.md §7.1,
-                    // §8): a text-only turn never reaches `commit_tool_outcome`,
-                    // so it would otherwise never register as
-                    // `StallKind::NonResolvingResponse` — the one variant that
-                    // is specifically about "no useful tool action taken".
-                    // Recorded here, unconditionally, before any auto-finish /
-                    // guidance branch below decides what happens next.
-                    let stalls_before = state.stall.consecutive_stalls;
-                    state.stall.observe_fingerprint(
-                        ActionFingerprint::text_only(&text),
-                        Some(StallKind::NonResolvingResponse),
-                    );
-                    log_stall_shadow(
-                        state,
-                        Some(StallKind::NonResolvingResponse),
-                        None,
-                        stalls_before,
-                        None,
-                    );
-                    emit_thinking_state(
-                        &state.run_id,
-                        state.step_count,
-                        state.model_turns,
-                        "(text_only)",
-                        &json!({
-                            "transition": "continue",
-                            "transition_detail": "text_only_no_tool_call",
-                            "phase": state.run_control.phase.as_str(),
-                            "consecutive_stalls": state.stall.consecutive_stalls,
-                            "stall_kind": "NonResolvingResponse",
-                            "recovery_active": state.recovery.is_active(),
-                            "legacy_decision": "continue",
-                            "candidate_decision": "recover",
-                            "candidate_reason": "text_only_non_resolving",
-                            "exact_repeat": state.stall.is_repeat(),
-                            "coarse_repeat": state.stall.coarse_is_repeat(),
-                            "ping_pong": state.stall.is_ping_pong(),
-                        }),
-                    );
-
                     if !text.trim().is_empty() {
                         emit(
                             observer,
@@ -362,7 +322,6 @@ pub async fn run(
                                  returned text {n}× instead of finish"
                             );
                             let reason = StopReason::TaskComplete;
-                            // Surface the essay as the run's closing summary in the log.
                             write_event(
                                 &state.run_id,
                                 "finish_summary",
@@ -388,6 +347,64 @@ pub async fn run(
                         );
                         continue;
                     }
+
+                    // Part 5D: Agent incomplete work → Layer 4 NonResolving recovery.
+                    // Ask / ReadOnly and other exempt modes keep the legacy soft path.
+                    if should_bound_no_tool_call(state) {
+                        let cause = NoToolCallCause::from_response_text(&text);
+                        if let Some(reason) = commit_no_tool_call(
+                            state,
+                            observer,
+                            state.model_turns,
+                            &text,
+                            cause,
+                        ) {
+                            return reason;
+                        }
+                        emit(
+                            observer,
+                            AgentEvent::Error {
+                                run_id: state.run_id.clone(),
+                                step_index: Some(state.step_count),
+                                message: "model returned text instead of tool call".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
+                    // Legacy soft path (Ask / ReadOnly): shadow stall only.
+                    let stalls_before = state.stall.consecutive_stalls;
+                    state.stall.observe_fingerprint(
+                        ActionFingerprint::text_only(&text),
+                        Some(StallKind::NonResolvingResponse),
+                    );
+                    log_stall_shadow(
+                        state,
+                        Some(StallKind::NonResolvingResponse),
+                        None,
+                        stalls_before,
+                        None,
+                    );
+                    emit_thinking_state(
+                        &state.run_id,
+                        state.step_count,
+                        state.model_turns,
+                        "(text_only)",
+                        &json!({
+                            "transition": "continue",
+                            "transition_detail": "text_only_no_tool_call_unbounded",
+                            "phase": state.run_control.phase.as_str(),
+                            "consecutive_stalls": state.stall.consecutive_stalls,
+                            "stall_kind": "NonResolvingResponse",
+                            "recovery_active": state.recovery.is_active(),
+                            "legacy_decision": "continue",
+                            "candidate_decision": "recover",
+                            "candidate_reason": "text_only_non_resolving",
+                            "exact_repeat": state.stall.is_repeat(),
+                            "coarse_repeat": state.stall.coarse_is_repeat(),
+                            "ping_pong": state.stall.is_ping_pong(),
+                        }),
+                    );
 
                     if state.governance.semantic_policy
                         && state.governance.consecutive_no_tool_turns
@@ -1652,6 +1669,169 @@ fn read_file_cached(
             result
         }
     }
+}
+
+/// Part 5D: bound text-only recovery for Agent runs that still need an action.
+/// Ask / ReadOnly and post-green-verify paths are exempt.
+fn should_bound_no_tool_call(state: &AgentState) -> bool {
+    if state.completion.last_verify_success == Some(true) {
+        return false;
+    }
+    if matches!(
+        state.authorization.edit_policy,
+        EditPolicy::ReadOnly
+    ) {
+        return false;
+    }
+    true
+}
+
+fn truncate_no_tool_digest(text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return "(empty text)".to_string();
+    }
+    let mut out: String = t.chars().take(280).collect();
+    if t.chars().count() > 280 {
+        out.push('…');
+    }
+    out
+}
+
+/// Part 5D: commit a synthetic NonResolving recovery outcome for NoToolCall.
+fn commit_no_tool_call(
+    state: &mut AgentState,
+    observer: Option<&dyn AgentObserver>,
+    model_turn: u32,
+    text: &str,
+    cause: NoToolCallCause,
+) -> Option<StopReason> {
+    let digest = truncate_no_tool_digest(text);
+    let stalls_before = state.stall.consecutive_stalls;
+    state.stall.observe_fingerprint(
+        ActionFingerprint::no_tool_call_cause(cause.as_str()),
+        Some(StallKind::NonResolvingResponse),
+    );
+    log_stall_shadow(
+        state,
+        Some(StallKind::NonResolvingResponse),
+        None,
+        stalls_before,
+        None,
+    );
+
+    let mut result = ToolResult {
+        success: false,
+        output: digest.clone(),
+        diff: None,
+        error: Some(format!(
+            "No tool call ({})",
+            cause.as_str()
+        )),
+        stop_reason: None,
+    };
+
+    let recipe = RecoveryAction::NonResolving { cause };
+    let applied = apply_recovery(state, &mut result, &recipe);
+    if let Some(message) = applied.phase_guidance {
+        log_phase_transition(state, message);
+    }
+    if let Some(err) = result.error.as_deref() {
+        state.run_control.queue_phase_guidance(err);
+    }
+    state.run_control.require_tool_choice = true;
+
+    let transition = match applied
+        .stop_reason
+        .clone()
+        .or_else(|| result.stop_reason.clone())
+    {
+        Some(reason) => {
+            result.stop_reason = Some(reason.clone());
+            RuntimeTransition::Terminate(reason)
+        }
+        None => RuntimeTransition::Continue,
+    };
+
+    let turn_outcome = TurnOutcome {
+        stop_reason: result.stop_reason.clone(),
+        stall_kind: Some(StallKind::NonResolvingResponse),
+        dispatched: false,
+        tool_name: "no_tool_call".into(),
+        target_path: None,
+    };
+    let stall_policy = StallPolicyMode::from_env();
+    let candidate = compute_candidate_decision(state, &turn_outcome, &transition);
+    let legacy_label = legacy_decision_label(result.stop_reason.as_ref(), true);
+    log_candidate_decision(state, stall_policy, legacy_label, &candidate);
+
+    let step_index = state.step_count;
+    emit_thinking_state(
+        &state.run_id,
+        step_index,
+        model_turn,
+        "(text_only)",
+        &json!({
+            "transition": transition_label(&transition),
+            "transition_detail": format!("{transition:?}"),
+            "phase": state.run_control.phase.as_str(),
+            "consecutive_stalls": state.stall.consecutive_stalls,
+            "stall_kind": "NonResolvingResponse",
+            "no_tool_call_cause": cause.as_str(),
+            "dispatched": false,
+            "exact_repeat": state.stall.is_repeat(),
+            "coarse_repeat": state.stall.coarse_is_repeat(),
+            "ping_pong": state.stall.is_ping_pong(),
+            "recovery_active": state.recovery.is_active(),
+            "guidance_attempts": state.recovery.guidance_attempts(),
+            "legacy_decision": legacy_label,
+            "candidate_decision": candidate.decision,
+            "candidate_reason": candidate.reason,
+            "stall_policy": stall_policy.as_str(),
+        }),
+    );
+
+    // Synthetic step so history carries the digest + recovery guidance
+    // without re-injecting the full truncated essay.
+    let action = Action::UpdatePlan {
+        objective: format!("(no_tool_call:{})", cause.as_str()),
+        steps: digest,
+    };
+    emit(
+        observer,
+        AgentEvent::ToolCompleted {
+            run_id: state.run_id.clone(),
+            step_index,
+            tool: "no_tool_call".into(),
+            success: false,
+        },
+    );
+    let stop_reason = result.stop_reason.clone();
+    let step = Step::new(
+        state.step_count,
+        model_turn,
+        action,
+        result,
+        format!("no_tool_call_{}", cause.as_str()),
+    );
+    let entry = LogEntry::from_step(&state.run_id, &state.model_id, &step);
+    write_entry(&entry);
+    state.record_step(step);
+    emit(
+        observer,
+        AgentEvent::StepCompleted {
+            run_id: state.run_id.clone(),
+            step_index: state.step_count - 1,
+            stop_reason: stop_reason.as_ref().map(|r| format!("{:?}", r)),
+        },
+    );
+
+    if let Some(reason) = stop_reason.or_else(|| stop_reason_from_transition(transition)) {
+        crate::agent_println!("\n[agent] stopping: {:?}", reason);
+        write_summary(state, &reason);
+        return Some(reason);
+    }
+    None
 }
 
 /// Extract a tool name from a malformed-tool error when the parser included
@@ -3396,7 +3576,9 @@ fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorization::EditPolicy;
     use crate::state::phase::Phase;
+    use crate::state::runtime_decision::NoToolCallCause;
     use std::path::PathBuf;
 
     #[test]
@@ -3530,5 +3712,50 @@ mod tests {
                 .contains("duplicate read denied")
         );
         assert!(err2.error.as_deref().unwrap().contains("disabled"));
+    }
+
+    #[test]
+    fn part5d_commit_no_tool_call_bounds_and_sets_tool_choice() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        assert!(state.run_control.enter_act());
+        assert!(should_bound_no_tool_call(&state));
+
+        let text = "[truncated: max_tokens reached with no tool call] long analysis of move_task";
+        let stop1 = commit_no_tool_call(
+            &mut state,
+            None,
+            1,
+            text,
+            NoToolCallCause::MaxTokens,
+        );
+        assert!(stop1.is_none());
+        assert!(state.run_control.require_tool_choice);
+        assert!(state.step_count >= 1);
+        let err = state.history.last().unwrap().result.error.clone().unwrap();
+        assert!(err.contains("allowed_next_actions:"));
+        assert!(err.contains("truncated") || err.contains("max_tokens"));
+
+        let _ = commit_no_tool_call(
+            &mut state,
+            None,
+            2,
+            "different essay about the same bug",
+            NoToolCallCause::MaxTokens,
+        );
+        let stop3 = commit_no_tool_call(
+            &mut state,
+            None,
+            3,
+            "yet another truncated essay",
+            NoToolCallCause::MaxTokens,
+        );
+        assert_eq!(stop3, Some(StopReason::NoProgress));
+    }
+
+    #[test]
+    fn part5d_ask_readonly_does_not_bound_no_tool_call() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        state.authorization.edit_policy = EditPolicy::ReadOnly;
+        assert!(!should_bound_no_tool_call(&state));
     }
 }

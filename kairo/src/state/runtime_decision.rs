@@ -93,6 +93,32 @@ impl RelevanceRule {
     }
 }
 
+/// Why a model turn produced no tool call (Part 5D).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoToolCallCause {
+    /// Ordinary text / final-answer style response with no tools.
+    TextOnly,
+    /// Provider hit max_tokens (`finish_reason = length`) before a tool call.
+    MaxTokens,
+}
+
+impl NoToolCallCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TextOnly => "text_only",
+            Self::MaxTokens => "max_tokens",
+        }
+    }
+
+    pub fn from_response_text(text: &str) -> Self {
+        if text.contains("truncated: max_tokens reached") {
+            Self::MaxTokens
+        } else {
+            Self::TextOnly
+        }
+    }
+}
+
 /// Bounded recovery recipe (final-design-plan.md §7.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryAction {
@@ -116,6 +142,8 @@ pub enum RecoveryAction {
     },
     /// Repeated verification → require patch/finish next (cached block already applied).
     RepeatedVerification,
+    /// Text-only / truncated turn with no tool call (Part 5D).
+    NonResolving { cause: NoToolCallCause },
 }
 
 /// Why the run may complete without a hard failure (Slice 5/6 will own these).
@@ -203,6 +231,9 @@ pub fn decide_next_state(state: &AgentState, outcome: &TurnOutcome) -> RuntimeTr
         StallKind::RepeatedVerification => {
             RuntimeTransition::Recover(RecoveryAction::RepeatedVerification)
         }
+        // Empty searches / non-resolving tool successes stay Continue.
+        // Text-only NoToolCall commits apply `RecoveryAction::NonResolving`
+        // directly (Part 5D) rather than relying on this branch.
         StallKind::NonResolvingResponse => RuntimeTransition::Continue,
     }
 }
@@ -284,6 +315,10 @@ fn apply_general_recipe(
             missing_evidence_guidance(path, attempt, *relevance, granted)
         }
         RecoveryAction::RepeatedVerification => repeated_verification_guidance(attempt),
+        RecoveryAction::NonResolving { cause } => {
+            state.run_control.require_tool_choice = true;
+            non_resolving_guidance(state, *cause, attempt)
+        }
         RecoveryAction::FailedPatch { .. } => unreachable!("handled above"),
     };
     append_guidance(result, &guidance);
@@ -339,6 +374,11 @@ fn recovery_key(action: &RecoveryAction) -> RecoveryKey {
         RecoveryAction::RepeatedVerification => {
             RecoveryKey::new("repeated_verification", "verify", None)
         }
+        RecoveryAction::NonResolving { cause } => RecoveryKey::new(
+            format!("non_resolving_{}", cause.as_str()),
+            "no_tool_call",
+            None,
+        ),
     }
 }
 
@@ -720,6 +760,33 @@ fn repeated_verification_guidance(attempt: u32) -> String {
     }
 }
 
+fn non_resolving_guidance(state: &AgentState, cause: NoToolCallCause, attempt: u32) -> String {
+    let allowed = allowed_next_block(state);
+    let cause_line = match cause {
+        NoToolCallCause::MaxTokens => {
+            "Your previous response was truncated before a tool call (max_tokens). \
+             Use a tool immediately and keep any explanation brief."
+        }
+        NoToolCallCause::TextOnly => {
+            "Your last response did not perform an action and the task is still incomplete. \
+             Do not continue with a long analysis."
+        }
+    };
+    if attempt <= 1 {
+        format!(
+            "RECOVERY (non_resolving, cause={}, attempt {attempt}): {cause_line}\n{allowed}",
+            cause.as_str()
+        )
+    } else {
+        format!(
+            "RECOVERY (non_resolving, cause={}, attempt {attempt}): Still no tool call. \
+             Next response MUST be exactly one tool from allowed_next_actions — \
+             no essay, no continued analysis.\n{allowed}",
+            cause.as_str()
+        )
+    }
+}
+
 /// Collapse a transition to the `Option<StopReason>` the agent loop understands.
 ///
 /// `Recover` must be applied via [`apply_recovery`] *before* calling this;
@@ -744,7 +811,7 @@ pub fn stop_reason_from_transition(transition: RuntimeTransition) -> Option<Stop
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::stall::StallState;
+    use crate::state::stall::{ActionFingerprint, StallState};
     use crate::state::step::Action;
     use crate::state::AgentPlan;
 
@@ -1303,5 +1370,75 @@ mod tests {
                     .contains("recovery recipe exhausted"));
             }
         }
+    }
+
+    #[test]
+    fn part5d_max_tokens_no_tool_recovery_cites_allowed_next_and_terminates() {
+        let mut state = empty_state();
+        assert!(state.run_control.enter_act());
+        let recipe = RecoveryAction::NonResolving {
+            cause: NoToolCallCause::MaxTokens,
+        };
+        let action_fp = ActionFingerprint::no_tool_call_cause("max_tokens");
+        for i in 1..=3 {
+            state.stall.observe_fingerprint(
+                action_fp.clone(),
+                Some(StallKind::NonResolvingResponse),
+            );
+            let mut result = ToolResult::error("no tool");
+            let applied = apply_recovery(&mut state, &mut result, &recipe);
+            let g = result.error.clone().unwrap();
+            assert!(g.contains("allowed_next_actions:"), "{g}");
+            assert!(g.contains("max_tokens") || g.contains("truncated"), "{g}");
+            assert!(state.run_control.require_tool_choice);
+            if i < 3 {
+                assert!(applied.stop_reason.is_none(), "i={i}");
+                if i == 1 {
+                    assert!(g.contains("truncated before a tool call") || g.contains("max_tokens"));
+                    assert!(!g.contains("Still no tool call"));
+                } else {
+                    assert!(g.contains("Still no tool call"));
+                }
+            } else {
+                assert_eq!(applied.stop_reason, Some(StopReason::NoProgress));
+            }
+        }
+    }
+
+    #[test]
+    fn part5d_different_essays_same_cause_still_escalate() {
+        let mut state = empty_state();
+        assert!(state.run_control.enter_act());
+        let recipe = RecoveryAction::NonResolving {
+            cause: NoToolCallCause::TextOnly,
+        };
+        // Stable cause fingerprint — essay bytes must not reset the key.
+        let fp = ActionFingerprint::no_tool_call_cause("text_only");
+        for i in 1..=3 {
+            state
+                .stall
+                .observe_fingerprint(fp.clone(), Some(StallKind::NonResolvingResponse));
+            let mut result = ToolResult::error(format!("essay variant {i}"));
+            let applied = apply_recovery(&mut state, &mut result, &recipe);
+            if i < 3 {
+                assert!(applied.stop_reason.is_none(), "i={i}");
+            } else {
+                assert_eq!(applied.stop_reason, Some(StopReason::NoProgress));
+            }
+        }
+    }
+
+    #[test]
+    fn no_tool_call_cause_detects_max_tokens_marker() {
+        assert_eq!(
+            NoToolCallCause::from_response_text(
+                "[truncated: max_tokens reached with no tool call] analysis..."
+            ),
+            NoToolCallCause::MaxTokens
+        );
+        assert_eq!(
+            NoToolCallCause::from_response_text("here is my analysis of the bug"),
+            NoToolCallCause::TextOnly
+        );
     }
 }

@@ -115,6 +115,12 @@ impl ActionFingerprint {
         ActionFingerprint(format!("no_tool_call:{:x}", h.finish()))
     }
 
+    /// Stable Part 5D fingerprint keyed by no-tool cause (not essay bytes),
+    /// so different long analyses still escalate as the same stuck intent.
+    pub fn no_tool_call_cause(cause: &str) -> Self {
+        ActionFingerprint(format!("no_tool_call_cause:{cause}"))
+    }
+
     /// Coarser, "same intent against the same target" identity — diagnostic
     /// only, logged alongside `of`'s exact identity, never a replacement for
     /// it. Currently scoped to `read_file` only (drops `offset`/`limit`,
