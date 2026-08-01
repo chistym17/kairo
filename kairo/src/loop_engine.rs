@@ -422,6 +422,7 @@ pub async fn run(
                     crate::agent_println!("[agent] malformed tool call: {}", msg);
                     write_event(&state.run_id, "malformed_tool_call", &msg, 0);
                     state.model_turns += 1;
+                    state.run_control.require_tool_choice = true;
                     emit(
                         observer,
                         AgentEvent::Error {
@@ -430,6 +431,14 @@ pub async fn run(
                             message: format!("malformed tool call: {}", msg),
                         },
                     );
+                    // Part 5C Part 4: commit a synthetic InvalidArguments
+                    // outcome so Layer 4 recovery + fingerprints bound the
+                    // retry loop (logs 8/9: 51× malformed update_plan).
+                    if let Some(reason) =
+                        commit_malformed_tool_call(state, observer, state.model_turns, &msg)
+                    {
+                        return reason;
+                    }
                     continue;
                 }
 
@@ -1643,6 +1652,142 @@ fn read_file_cached(
             result
         }
     }
+}
+
+/// Extract a tool name from a malformed-tool error when the parser included
+/// `tool \`name\``. Falls back to scanning for known tool tokens.
+fn extract_malformed_tool_name(msg: &str) -> &str {
+    if let Some(rest) = msg.strip_prefix("tool `") {
+        if let Some(end) = rest.find('`') {
+            let name = &rest[..end];
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    const KNOWN: &[&str] = &[
+        "update_plan",
+        "apply_patch",
+        "read_file",
+        "search_code",
+        "locate",
+        "find_files",
+        "write_file",
+        "run_shell",
+        "run_command",
+        "finish",
+        "list_files",
+        "git_status",
+        "git_diff",
+        "detect_project_snapshot",
+        "summarize_repo",
+    ];
+    for name in KNOWN {
+        if msg.contains(name) {
+            return name;
+        }
+    }
+    "unknown_tool"
+}
+
+/// Stable synthetic action so repeated malformed calls of the same tool share
+/// an [`ActionFingerprint`] (Part 5C Part 4).
+fn synthetic_action_for_malformed(tool: &str) -> Action {
+    use std::path::PathBuf;
+    match tool {
+        "update_plan" => Action::UpdatePlan {
+            objective: "malformed".into(),
+            steps: "malformed".into(),
+        },
+        "apply_patch" => Action::ApplyPatch {
+            path: PathBuf::from("malformed"),
+            diff: String::new(),
+        },
+        "read_file" => Action::ReadFile {
+            path: PathBuf::from("malformed"),
+            offset: 1,
+            limit: 1,
+        },
+        "write_file" => Action::WriteFile {
+            path: PathBuf::from("malformed"),
+            content: String::new(),
+        },
+        "search_code" => Action::SearchCode {
+            query: "malformed".into(),
+            path: PathBuf::from("."),
+        },
+        "locate" => Action::Locate {
+            query: "malformed".into(),
+            path: PathBuf::from("."),
+        },
+        "find_files" => Action::FindFiles {
+            pattern: "malformed".into(),
+            path: PathBuf::from("."),
+        },
+        "list_files" => Action::ListFiles {
+            path: PathBuf::from("."),
+        },
+        "run_shell" => Action::RunShell {
+            command: "malformed".into(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 1,
+        },
+        "run_command" => Action::RunCommand {
+            cmd: "malformed".into(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 1,
+        },
+        "finish" => Action::Finish {
+            summary: "malformed".into(),
+        },
+        "git_status" => Action::GitStatus,
+        "git_diff" => Action::GitDiff { path: None },
+        "detect_project_snapshot" => Action::DetectProjectSnapshot {
+            path: PathBuf::from("."),
+        },
+        "summarize_repo" => Action::SummarizeRepo {
+            depth: "overview".into(),
+            path: PathBuf::from("."),
+            focus: None,
+        },
+        other => Action::UpdatePlan {
+            objective: format!("malformed:{other}"),
+            steps: "malformed".into(),
+        },
+    }
+}
+
+/// Part 5C Part 4: turn a parse-time malformed tool call into a committed
+/// `InvalidArguments` outcome so Layer 4 recovery can bound retries.
+fn commit_malformed_tool_call(
+    state: &mut AgentState,
+    observer: Option<&dyn AgentObserver>,
+    model_turn: u32,
+    msg: &str,
+) -> Option<StopReason> {
+    let tool = extract_malformed_tool_name(msg);
+    let action = synthetic_action_for_malformed(tool);
+    let brief = if msg.len() > 400 {
+        format!("{}…", &msg[..400])
+    } else {
+        msg.to_string()
+    };
+    let result = ToolResult::error(format!(
+        "Malformed tool call for `{tool}`: {brief}\n\
+         Arguments must be valid JSON matching the tool schema. \
+         Do not repeat the identical malformed call."
+    ));
+    let step_index = state.step_count;
+    commit_tool_outcome(
+        state,
+        observer,
+        step_index,
+        model_turn,
+        action,
+        format!("malformed_{tool}"),
+        result,
+        false, // never dispatched
+    )
 }
 
 fn is_duplicate_read_outcome(action: &Action, result: &ToolResult) -> bool {
@@ -3307,6 +3452,37 @@ mod tests {
         assert!(!is_parallel_readonly(&Action::Finish {
             summary: "done".into(),
         }));
+    }
+
+    #[test]
+    fn extract_malformed_tool_name_prefers_tool_backticks() {
+        assert_eq!(
+            extract_malformed_tool_name(
+                "tool `update_plan`: arguments is not valid JSON: expected `,` or `}`"
+            ),
+            "update_plan"
+        );
+        assert_eq!(
+            extract_malformed_tool_name("arguments is not valid JSON — update_plan raw"),
+            "update_plan"
+        );
+    }
+
+    #[test]
+    fn part4_repeated_malformed_update_plan_terminates_via_layer4() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        assert!(state.run_control.enter_act());
+        let msg = "tool `update_plan`: arguments is not valid JSON: expected `,` or `}` — raw: {\"steps\": [ ] Explore}";
+        for i in 1..=3 {
+            let stop = commit_malformed_tool_call(&mut state, None, i, msg);
+            if i < 3 {
+                assert!(stop.is_none(), "i={i}");
+            } else {
+                assert_eq!(stop, Some(StopReason::NoProgress));
+            }
+        }
+        // Must have recorded steps so the model would see failures in history.
+        assert!(state.step_count >= 3);
     }
 
     #[test]

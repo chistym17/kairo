@@ -38,13 +38,19 @@ pub fn parse_tool_calls_message(message: &Value) -> Result<Vec<LlmToolCall>, Llm
         })?;
 
         let args: Value = serde_json::from_str(args_str).map_err(|e| {
+            let raw = if args_str.len() > 240 {
+                format!("{}…", &args_str[..240])
+            } else {
+                args_str.to_string()
+            };
             LlmError::MalformedToolCall(format!(
-                "arguments is not valid JSON: {} — raw: {}",
-                e, args_str
+                "tool `{tool_name}`: arguments is not valid JSON: {e} — raw: {raw}"
             ))
         })?;
 
-        let action = parse_tool_call(tool_name, &args).map_err(LlmError::MalformedToolCall)?;
+        let action = parse_tool_call(tool_name, &args).map_err(|e| {
+            LlmError::MalformedToolCall(format!("tool `{tool_name}`: {e}"))
+        })?;
         out.push(LlmToolCall {
             action,
             tool_call_id,
@@ -125,5 +131,30 @@ mod tests {
 
         let calls = parse_tool_calls_message(&message).unwrap();
         assert_eq!(calls.len(), MAX_TOOL_CALLS_PER_TURN);
+    }
+
+    #[test]
+    fn malformed_json_arguments_include_tool_name() {
+        let message = json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {
+                    "id": "call_bad",
+                    "type": "function",
+                    "function": {
+                        "name": "update_plan",
+                        "arguments": "{\"objective\": \"x\", \"steps\": [ ] Explore"
+                    }
+                }
+            ]
+        });
+        match parse_tool_calls_message(&message) {
+            Err(LlmError::MalformedToolCall(msg)) => {
+                assert!(msg.contains("tool `update_plan`"), "{msg}");
+                assert!(msg.contains("not valid JSON"), "{msg}");
+            }
+            other => panic!("expected MalformedToolCall, got {other:?}"),
+        }
     }
 }
