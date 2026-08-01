@@ -435,6 +435,30 @@ mod tests {
     }
 
     #[test]
+    fn coarse_ping_pong_detects_two_path_oscillation_with_shifting_ranges() {
+        let mut s = StallState::new();
+        s.observe(
+            &read_range("Board.tsx", 1, 50),
+            Some(StallKind::DuplicateEvidence),
+        );
+        s.observe(
+            &read_range("store.ts", 10, 40),
+            Some(StallKind::DuplicateEvidence),
+        );
+        s.observe(
+            &read_range("Board.tsx", 100, 50),
+            Some(StallKind::DuplicateEvidence),
+        );
+        s.observe(
+            &read_range("store.ts", 200, 30),
+            Some(StallKind::DuplicateEvidence),
+        );
+        assert!(!s.is_ping_pong(), "shifting ranges break exact ping-pong");
+        assert!(s.coarse_is_ping_pong());
+        assert!(!s.coarse_is_repeat());
+    }
+
+    #[test]
     fn progressive_reads_of_one_large_file_are_progress_not_stalls() {
         // Genuinely new evidence each time (different ranges, both
         // classified `None` upstream by `classify_stall`) must reset both

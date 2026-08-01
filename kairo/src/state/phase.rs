@@ -468,6 +468,10 @@ impl RunState {
     ///
     /// Returns [`StopReason::NoProgress`] when consecutive harness denials hit
     /// [`NO_PROGRESS_STOP_THRESHOLD`]. Any non-denial outcome clears the streak.
+    ///
+    /// Callers may demote the returned stop for committed `DuplicateEvidence`
+    /// reads (Part 5E): the counter still increments for telemetry, but Layer 4
+    /// owns terminate for duplicate/disabled-read thrash.
     pub fn observe_denial_streak(&mut self, result: &ToolResult) -> Option<StopReason> {
         if is_denied_result(result) {
             self.consecutive_denials = self.consecutive_denials.saturating_add(1);
@@ -1022,6 +1026,23 @@ mod tests {
         assert_eq!(state.consecutive_denials, 3);
         assert!(state.observe_denial_streak(&ok_result()).is_none());
         assert_eq!(state.consecutive_denials, 0);
+    }
+
+    #[test]
+    fn part5e_duplicate_denials_still_count_for_telemetry() {
+        // Demotion of the stop is at the commit_tool_outcome call site;
+        // observe_denial_streak itself still increments and would return stop.
+        let mut state = RunState::new();
+        let denied = denied_result("Duplicate read denied: Exact content already available");
+        for i in 1..NO_PROGRESS_STOP_THRESHOLD {
+            assert!(state.observe_denial_streak(&denied).is_none());
+            assert_eq!(state.consecutive_denials, i);
+        }
+        assert_eq!(
+            state.observe_denial_streak(&denied),
+            Some(StopReason::NoProgress)
+        );
+        assert_eq!(state.consecutive_denials, NO_PROGRESS_STOP_THRESHOLD);
     }
 
     #[test]

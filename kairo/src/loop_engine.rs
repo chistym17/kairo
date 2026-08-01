@@ -1989,6 +1989,12 @@ fn is_duplicate_read_outcome(action: &Action, result: &ToolResult) -> bool {
         .unwrap_or(false)
 }
 
+/// Part 5E: Layer 4 owns terminate for duplicate/disabled-read thrash.
+/// Legacy `consecutive_denials` may still increment for telemetry.
+fn denial_streak_stop_applies(duplicate_read: bool) -> bool {
+    !duplicate_read
+}
+
 /// Log, observe, and record a completed tool. Returns Some(stop) if the run should end.
 ///
 /// `dispatched` is true when the tool passed pre-dispatch gates and was invoked
@@ -2175,7 +2181,18 @@ fn commit_tool_outcome(
     // `apply_recovery` *after* denial streak, and are folded into the
     // legacy label from the post-recovery error text.
     let pre_existing_stop_error = result.error.clone();
+    // Always count denials for telemetry comparability. Part 5E: do not let
+    // `consecutive_denials` terminate duplicate-evidence thrash — Layer 4
+    // owns that stop (including cross-target coarse ping-pong). Setting
+    // stop_reason here would also short-circuit `decide_next_state` past
+    // Recover, so demotion must happen before Layer 4.
     let denial_streak_stop = state.run_control.observe_denial_streak(&result);
+    let denial_streak_stop =
+        if denial_streak_stop_applies(duplicate_read) {
+            denial_streak_stop
+        } else {
+            None
+        };
     let denial_streak_stopped = denial_streak_stop.is_some();
 
     if let Some(reason) = denial_streak_stop {
@@ -3757,5 +3774,11 @@ mod tests {
         let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
         state.authorization.edit_policy = EditPolicy::ReadOnly;
         assert!(!should_bound_no_tool_call(&state));
+    }
+
+    #[test]
+    fn part5e_denial_streak_stop_demoted_for_duplicate_reads_only() {
+        assert!(!denial_streak_stop_applies(true));
+        assert!(denial_streak_stop_applies(false));
     }
 }

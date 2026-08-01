@@ -270,6 +270,16 @@ fn apply_general_recipe(
     let exact_repeat = state.stall.is_repeat();
     let coarse_repeat = state.stall.coarse_is_repeat();
     let ping_pong = state.stall.is_ping_pong();
+    // Part 5E: Board↔store-style thrash with shifting ranges is exact-new
+    // failure but coarse A→B→A→B. Only DuplicateEvidence owns that stop;
+    // same-target RecoveryKey escalation stays on the attempt counter.
+    let coarse_ping_pong = matches!(
+        action,
+        RecoveryAction::UnsupportedCapability {
+            cause: UnsupportedCause::DuplicateEvidence,
+            ..
+        }
+    ) && state.stall.coarse_is_ping_pong();
     if exact_repeat || coarse_repeat {
         attempt = attempt.max(2);
     }
@@ -324,15 +334,17 @@ fn apply_general_recipe(
     append_guidance(result, &guidance);
 
     // Part 4: terminate general recipes on same-key exhaustion with a
-    // fingerprint stuckness signal. Ping-pong across keys is also caught
-    // when consecutive stalls are already high.
-    let fingerprint_stuck = exact_repeat || coarse_repeat || ping_pong;
+    // fingerprint stuckness signal. Part 5E: exact or coarse ping-pong
+    // across targets terminates without requiring one RecoveryKey ×3.
+    let fingerprint_stuck = exact_repeat || coarse_repeat || ping_pong || coarse_ping_pong;
     let key_exhausted = state.recovery.guidance_attempts() >= GENERAL_RECIPE_TERMINATE_ATTEMPTS;
-    let ping_pong_exhausted = ping_pong && state.stall.consecutive_stalls >= 4;
+    let ping_pong_exhausted =
+        (ping_pong || coarse_ping_pong) && state.stall.consecutive_stalls >= 4;
     if (key_exhausted && fingerprint_stuck) || ping_pong_exhausted {
         let stop_msg = format!(
             "Stopped: recovery recipe exhausted after repeated non-progress \
-             (exact_repeat={exact_repeat}, coarse_repeat={coarse_repeat}, ping_pong={ping_pong}). \
+             (exact_repeat={exact_repeat}, coarse_repeat={coarse_repeat}, \
+             ping_pong={ping_pong}, coarse_ping_pong={coarse_ping_pong}). \
              apply_patch a seen file, update_plan, or finish with blockers."
         );
         append_guidance(result, &stop_msg);
@@ -1440,5 +1452,147 @@ mod tests {
             NoToolCallCause::from_response_text("here is my analysis of the bug"),
             NoToolCallCause::TextOnly
         );
+    }
+
+    fn read_range(path: &str, offset: u32, limit: u32) -> Action {
+        Action::ReadFile {
+            path: PathBuf::from(path),
+            offset,
+            limit,
+        }
+    }
+
+    fn dup_recipe(path: &str) -> RecoveryAction {
+        RecoveryAction::UnsupportedCapability {
+            cause: UnsupportedCause::DuplicateEvidence,
+            tool: "read_file".into(),
+            target: Some(PathBuf::from(path)),
+        }
+    }
+
+    #[test]
+    fn part5e_coarse_board_store_ping_pong_terminates_without_same_key_x3() {
+        let mut state = empty_state();
+        let board = "frontend-v2/components/kanban/Board.tsx";
+        let store = "frontend-v2/store/kanban.ts";
+        // Shifting ranges: exact fingerprints differ, coarse is A→B→A→B.
+        let seq = [
+            (read_range(board, 1, 50), board),
+            (read_range(store, 10, 40), store),
+            (read_range(board, 100, 50), board),
+            (read_range(store, 200, 30), store),
+        ];
+        for (i, (action, path)) in seq.iter().enumerate() {
+            state
+                .stall
+                .observe(action, Some(StallKind::DuplicateEvidence));
+            let mut result = ToolResult::error("duplicate read denied");
+            let applied = apply_recovery(&mut state, &mut result, &dup_recipe(path));
+            // Alternating keys keep guidance_attempts at 1.
+            assert_eq!(state.recovery.guidance_attempts(), 1, "i={i}");
+            if i < 3 {
+                assert!(applied.stop_reason.is_none(), "i={i}");
+                assert!(!state.stall.is_ping_pong(), "exact should not ping-pong");
+            } else {
+                assert!(state.stall.coarse_is_ping_pong());
+                assert_eq!(applied.stop_reason, Some(StopReason::NoProgress));
+                let err = result.error.as_deref().unwrap();
+                assert!(err.contains("recovery recipe exhausted"), "{err}");
+                assert!(err.contains("coarse_ping_pong=true"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn part5e_same_target_duplicate_still_exhausts_recovery_key() {
+        let mut state = empty_state();
+        let path = "frontend-v2/components/kanban/Board.tsx";
+        let recipe = dup_recipe(path);
+        for i in 1..=3 {
+            state.stall.observe(
+                &read_range(path, 1, 50),
+                Some(StallKind::DuplicateEvidence),
+            );
+            let mut result = ToolResult::error("duplicate read denied");
+            let applied = apply_recovery(&mut state, &mut result, &recipe);
+            if i < 3 {
+                assert!(applied.stop_reason.is_none(), "i={i}");
+            } else {
+                assert_eq!(state.recovery.guidance_attempts(), 3);
+                assert_eq!(applied.stop_reason, Some(StopReason::NoProgress));
+            }
+        }
+    }
+
+    #[test]
+    fn part5e_progress_resets_duplicate_oscillation_history() {
+        let mut state = empty_state();
+        let board = "Board.tsx";
+        let store = "store.ts";
+        state
+            .stall
+            .observe(&read_range(board, 1, 50), Some(StallKind::DuplicateEvidence));
+        state
+            .stall
+            .observe(&read_range(store, 1, 50), Some(StallKind::DuplicateEvidence));
+        state
+            .stall
+            .observe(&read_range(board, 1, 50), Some(StallKind::DuplicateEvidence));
+        // Genuine plan/patch progress clears stall history.
+        state.stall.observe(
+            &Action::UpdatePlan {
+                objective: "fix dates".into(),
+                steps: "- patch Board".into(),
+            },
+            None,
+        );
+        assert_eq!(state.stall.consecutive_stalls, 0);
+        assert!(!state.stall.coarse_is_ping_pong());
+
+        // Fresh oscillation must rebuild from empty history.
+        state
+            .stall
+            .observe(&read_range(board, 1, 50), Some(StallKind::DuplicateEvidence));
+        state
+            .stall
+            .observe(&read_range(store, 1, 50), Some(StallKind::DuplicateEvidence));
+        assert!(!state.stall.coarse_is_ping_pong());
+        let mut result = ToolResult::error("duplicate read denied");
+        let applied = apply_recovery(&mut state, &mut result, &dup_recipe(board));
+        assert!(applied.stop_reason.is_none());
+    }
+
+    #[test]
+    fn part5e_failed_patch_budget_still_owns_target_mismatch_path() {
+        let mut state = empty_state();
+        let target = PathBuf::from("a.rs");
+        // Seed FailedPatch mode + stall thrash that would look like ping-pong
+        // if general recipes owned it — FailedPatch must ignore that.
+        for _ in 0..4 {
+            state.stall.observe(
+                &read_range("wrong.rs", 1, 10),
+                Some(StallKind::ScopeViolation),
+            );
+            state.stall.observe(
+                &read_range("also_wrong.rs", 1, 10),
+                Some(StallKind::ScopeViolation),
+            );
+        }
+        assert!(state.stall.is_ping_pong() || state.stall.coarse_is_ping_pong());
+
+        let recipe = RecoveryAction::FailedPatch {
+            path: target.clone(),
+        };
+        // FailedPatch applies independently; terminate only via its budget.
+        for i in 1..=2 {
+            let mut result = ToolResult::error("hunk mismatch");
+            let applied = apply_recovery(&mut state, &mut result, &recipe);
+            assert!(
+                applied.stop_reason.is_none(),
+                "FailedPatch must not terminate early from stall ping-pong at i={i}"
+            );
+        }
+        assert_eq!(state.recovery.consecutive_failures(), 2);
+        assert!(state.recovery.is_active());
     }
 }
