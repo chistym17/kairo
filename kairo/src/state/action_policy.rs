@@ -395,6 +395,20 @@ fn escalate_invalid(
     let n = run.consecutive_invalid_actions;
     let max = contract.max_invalid_actions.max(1);
 
+    // Finish is already the terminal phase: a non-finish tool must not open a
+    // recovery loop. Auto-complete immediately from recorded edit/verify state.
+    if matches!(reason, InvalidActionReason::PhaseAlreadyComplete) {
+        return ActionDecision::Stop {
+            reason: StopReason::CompletedUnverified,
+            message: format!(
+                "Phase already complete (`finish`). Rejected non-finish tool `{name}` \
+                 ({reason}).\n\
+                 Auto-completing with the recorded workspace edits and verification state.",
+                reason = reason.as_str()
+            ),
+        };
+    }
+
     // Completion-oriented fallbacks still stop / transition. Thrash fallbacks
     // (Act `FinishWithBlocker`, patch_recovery `StopNoProgress`) defer stop to
     // Layer 4 so rejected-action recovery can apply allowed_next_actions +
@@ -508,19 +522,14 @@ fn fallback_decision(
             reason: StopReason::CompletedUnverified,
             message: format!("{detail}\nFinishing unverified."),
         },
-        InvalidFallback::AutoComplete => {
-            let reason = if run.entered_finish_turn.is_some() {
-                // Prefer TaskComplete only when verify already passed — callers
-                // may refine; default CompletedUnverified is safer.
-                StopReason::CompletedUnverified
-            } else {
-                StopReason::CompletedUnverified
-            };
-            ActionDecision::Stop {
-                reason,
-                message: format!("{detail}\nAuto-completing finish phase."),
-            }
-        }
+        InvalidFallback::AutoComplete => ActionDecision::Stop {
+            reason: StopReason::CompletedUnverified,
+            message: format!(
+                "{detail}\n\
+                 Auto-completing finish phase with the recorded workspace edits \
+                 and verification state."
+            ),
+        },
         InvalidFallback::StopNoProgress => ActionDecision::Stop {
             reason: StopReason::NoProgress,
             message: detail,
@@ -817,9 +826,70 @@ mod tests {
             &Action::GitDiff { path: None },
         );
         match d {
-            ActionDecision::Stop { .. } => {}
+            ActionDecision::Stop {
+                reason: StopReason::CompletedUnverified,
+                message,
+            } => {
+                assert!(message.contains("phase_already_complete"), "{message}");
+                assert!(message.contains("Auto-completing"), "{message}");
+                assert!(
+                    !message.contains("allowed_next_actions"),
+                    "must not ask the model to recover: {message}"
+                );
+                assert!(
+                    !message.to_ascii_lowercase().contains("retry"),
+                    "must not ask for a retry: {message}"
+                );
+            }
             other => panic!("expected Finish AutoComplete stop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finish_phase_read_file_auto_completes_without_reject_and_retry() {
+        let mut run = RunState::new();
+        let recovery = idle_recovery();
+        run.phase = Phase::Finish;
+        run.note_file_seen(PathBuf::from("views.py"));
+        let d = validate_action(&mut run, &recovery, &read("views.py"));
+        match d {
+            ActionDecision::Stop {
+                reason: StopReason::CompletedUnverified,
+                message,
+            } => {
+                assert!(message.contains("Phase already complete"), "{message}");
+                assert!(message.contains("read_file"), "{message}");
+                assert!(!message.contains("RECOVERY"), "{message}");
+            }
+            ActionDecision::RejectAndRetry { .. } => {
+                panic!("Finish non-finish must not open RejectAndRetry recovery")
+            }
+            other => panic!("expected immediate AutoComplete stop, got {other:?}"),
+        }
+        // Counter still records the phase-already-complete observation.
+        assert_eq!(run.consecutive_invalid_actions, 1);
+    }
+
+    #[test]
+    fn finish_phase_apply_patch_auto_completes_immediately() {
+        let mut run = RunState::new();
+        let recovery = idle_recovery();
+        run.phase = Phase::Finish;
+        let d = validate_action(
+            &mut run,
+            &recovery,
+            &Action::ApplyPatch {
+                path: PathBuf::from("serializers.py"),
+                diff: "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n".into(),
+            },
+        );
+        assert!(matches!(
+            d,
+            ActionDecision::Stop {
+                reason: StopReason::CompletedUnverified,
+                ..
+            }
+        ));
     }
 
     #[test]

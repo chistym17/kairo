@@ -3191,7 +3191,11 @@ fn evaluate_action(
                 &message[..message.len().min(400)],
                 0,
             );
-            return EvaluationOutcome::RejectAndStop(ToolResult::error(message), reason);
+            // Stamp stop_reason so Layer 4 Terminate skips Recover recipes
+            // (e.g. InvalidArguments "fix and retry") on Finish auto-complete.
+            let mut result = ToolResult::error(message);
+            result.stop_reason = Some(reason.clone());
+            return EvaluationOutcome::RejectAndStop(result, reason);
         }
     }
 
