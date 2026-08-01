@@ -14,6 +14,7 @@
 //! successful recovery reread resets the former and must leave this one's
 //! `consecutive_failures` untouched.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::state::stop_reason::StopReason;
@@ -79,6 +80,11 @@ pub struct RecoveryState {
     evidence_grant_path: Option<PathBuf>,
     evidence_grant_remaining: u32,
     evidence_grant_key: Option<RecoveryKey>,
+    /// Act-phase duplicate-evidence escalation per path (Part 5B).
+    /// Level 1 = cached/duplicate ranges blocked; level ≥2 = path disabled for
+    /// `read_file`. Does **not** set [`RecoveryReason`] / `is_active()` — that
+    /// remains FailedPatch-only so Act keeps apply_patch/update_plan/finish.
+    duplicate_escalation: HashMap<String, u32>,
 }
 
 /// Identity for a bounded recovery-guidance sequence.
@@ -186,8 +192,52 @@ impl RecoveryState {
         self.evidence_grant_path = None;
         self.evidence_grant_remaining = 0;
         self.evidence_grant_key = None;
+        self.duplicate_escalation.clear();
         // denied_source_writes is a run-lifetime budget, not tied to one
         // recovery episode — leave it alone (matches prior PatchRecoveryState).
+    }
+
+    /// Clear only Act duplicate-evidence path restrictions (e.g. after a
+    /// successful `update_plan`). Leaves FailedPatch budgets untouched.
+    pub fn clear_duplicate_escalation(&mut self) {
+        self.duplicate_escalation.clear();
+    }
+
+    /// Record one Act duplicate-evidence hit for `path`. Returns the new level
+    /// (1 = restrict cached ranges, 2+ = disable path).
+    pub fn note_act_duplicate(&mut self, path: &Path) -> u32 {
+        let key = normalize(path);
+        let entry = self.duplicate_escalation.entry(key).or_insert(0);
+        *entry = (*entry).saturating_add(1);
+        *entry
+    }
+
+    pub fn duplicate_escalation_level(&self, path: &Path) -> u32 {
+        self.duplicate_escalation
+            .get(&normalize(path))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Level ≥1: further *cached* reads of this path should be rejected in Act.
+    pub fn is_act_duplicate_restricted(&self, path: &Path) -> bool {
+        self.duplicate_escalation_level(path) >= 1
+    }
+
+    /// Level ≥2: any `read_file` of this path is disabled in Act.
+    pub fn is_act_duplicate_path_disabled(&self, path: &Path) -> bool {
+        self.duplicate_escalation_level(path) >= 2
+    }
+
+    /// Paths currently under duplicate-evidence restriction (for snapshots).
+    pub fn duplicate_escalation_paths(&self) -> Vec<(PathBuf, u32)> {
+        let mut out: Vec<_> = self
+            .duplicate_escalation
+            .iter()
+            .map(|(p, lvl)| (PathBuf::from(p), *lvl))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Record one application of a general recovery recipe keyed by
@@ -566,5 +616,26 @@ mod tests {
         assert!(!s.has_evidence_grant_for(path));
         // Same key cannot refresh after consume.
         assert!(!s.grant_evidence_read(path, key));
+    }
+
+    #[test]
+    fn act_duplicate_escalation_is_per_path_and_clears_without_touching_patch_budget() {
+        let mut s = RecoveryState::new();
+        let a = Path::new("Board.tsx");
+        let b = Path::new("store.ts");
+        assert_eq!(s.note_act_duplicate(a), 1);
+        assert!(s.is_act_duplicate_restricted(a));
+        assert!(!s.is_act_duplicate_path_disabled(a));
+        assert_eq!(s.note_act_duplicate(a), 2);
+        assert!(s.is_act_duplicate_path_disabled(a));
+        assert_eq!(s.note_act_duplicate(b), 1);
+        assert!(!s.is_act_duplicate_path_disabled(b));
+
+        let _ = s.after_patch_failure(Path::new("x.rs"), ToolResult::error("hunk"));
+        assert_eq!(s.consecutive_failures(), 1);
+        s.clear_duplicate_escalation();
+        assert_eq!(s.duplicate_escalation_level(a), 0);
+        assert_eq!(s.consecutive_failures(), 1);
+        assert!(s.is_active());
     }
 }

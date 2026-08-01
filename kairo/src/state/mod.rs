@@ -18,7 +18,8 @@ pub mod workspace_summary;
 
 pub use agent_state::AgentState;
 pub use action_policy::{
-    validate_action, ActionDecision, InvalidActionReason, InvalidFallback, PhaseContract,
+    allowed_next_actions, validate_action, ActionConstraint, ActionDecision,
+    AllowedActionSnapshot, InvalidActionReason, InvalidFallback, PhaseContract,
 };
 pub use completion::CompletionTracker;
 pub use efficiency::RunEfficiency;

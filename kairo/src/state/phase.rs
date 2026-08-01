@@ -316,7 +316,7 @@ impl RunState {
             && matches!(self.phase, Phase::Act)
             && !recovery.is_active()
         {
-            return Some(self.act_guidance_with_evidence(ACT_STICKY_MESSAGE));
+            return Some(self.act_guidance_with_evidence_and_recovery(ACT_STICKY_MESSAGE, recovery));
         }
         None
     }
@@ -338,6 +338,34 @@ impl RunState {
              finish may only report a concrete code blocker (file + bug), \
              never request more tools or permissions.",
         );
+        out
+    }
+
+    /// Sticky Act reminder including Part 5B duplicate-path restrictions.
+    pub fn act_guidance_with_evidence_and_recovery(
+        &self,
+        base: &str,
+        recovery: &RecoveryState,
+    ) -> String {
+        let mut out = self.act_guidance_with_evidence(base);
+        let blocked = recovery.duplicate_escalation_paths();
+        if blocked.is_empty() {
+            return out;
+        }
+        out.push_str("\n\nDuplicate-evidence restrictions (read_file still in schema):\n");
+        for (path, level) in blocked {
+            if level >= 2 {
+                out.push_str(&format!(
+                    "- {} — read_file DISABLED for this path\n",
+                    path.display()
+                ));
+            } else {
+                out.push_str(&format!(
+                    "- {} — duplicate/cached ranges blocked\n",
+                    path.display()
+                ));
+            }
+        }
         out
     }
 
@@ -819,6 +847,23 @@ mod tests {
         assert!(sticky.contains("Board.tsx"));
         state.note_act_progress();
         assert!(state.phase_guidance_for_injection(&recovery).is_none());
+    }
+
+    #[test]
+    fn sticky_act_guidance_lists_duplicate_path_restrictions() {
+        let mut state = RunState::new();
+        let mut recovery = RecoveryState::new();
+        state.note_file_seen(PathBuf::from("Board.tsx"));
+        assert!(state.enter_act());
+        let _ = state.phase_guidance_for_injection(&recovery); // drain one-shot
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let sticky = state.phase_guidance_for_injection(&recovery).unwrap();
+        assert!(sticky.contains("Duplicate-evidence restrictions"));
+        assert!(sticky.contains("Board.tsx"));
+        assert!(sticky.contains("duplicate/cached ranges blocked"));
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let sticky2 = state.phase_guidance_for_injection(&recovery).unwrap();
+        assert!(sticky2.contains("DISABLED"));
     }
 
     #[test]

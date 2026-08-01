@@ -2,8 +2,13 @@
 //!
 //! Schema filtering is the first defense; this validator is the second when the
 //! model (or provider) still emits tools/args that violate the current phase.
+//!
+//! Part 5C Part 1: [`allowed_next_actions`] is the pure, derived snapshot of
+//! what the runtime currently permits — guidance (Part 2+) must cite this
+//! rather than handwritten tool lists.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::state::phase::{Phase, RunState, ACT_TOOLS, FINISH_TOOLS, PATCH_RECOVERY_TOOLS, VERIFY_TOOLS};
 use crate::state::recovery::RecoveryState;
@@ -45,6 +50,66 @@ pub enum InvalidFallback {
     AutoComplete,
     /// Hard stop.
     StopNoProgress,
+}
+
+/// A capability still listed in the tool schema, but narrowed by Layer-1 state.
+///
+/// Part 5C: constraints are separate from [`AllowedActionSnapshot::tools`] so
+/// Act can keep `read_file` visible while documenting path-level restrictions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionConstraint {
+    /// Part 5B level ≥1: further cached/duplicate ranges of this path are blocked.
+    DuplicateReadRestricted { path: PathBuf },
+    /// Part 5B level ≥2: any `read_file` of this path is disabled in Act.
+    DuplicateReadPathDisabled { path: PathBuf },
+    /// FailedPatch recovery: `read_file` is limited to this target path.
+    RecoveryReadTarget { path: PathBuf },
+}
+
+/// Pure snapshot of currently permitted tools + active constraints.
+///
+/// Derived only from [`RunState`] + [`RecoveryState`] (via `effective_tools` /
+/// recovery fields). Does not inspect the latest rejected call, mutate
+/// recovery attempts, or queue guidance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedActionSnapshot {
+    pub tools: Vec<&'static str>,
+    pub constraints: Vec<ActionConstraint>,
+}
+
+impl AllowedActionSnapshot {
+    /// Whether `tool` appears in the exposed tool set.
+    pub fn allows_tool(&self, tool: &str) -> bool {
+        self.tools.iter().any(|t| *t == tool)
+    }
+}
+
+/// Authoritative "what may the model do next?" view for recovery guidance.
+///
+/// - Tools come from [`RunState::effective_tools`] (same source as the schema).
+/// - Constraints annotate scope limits that do not remove tools from the schema
+///   (Part 5B path disable/restrict, FailedPatch read target).
+pub fn allowed_next_actions(run: &RunState, recovery: &RecoveryState) -> AllowedActionSnapshot {
+    let tools: Vec<&'static str> = run.effective_tools(recovery).to_vec();
+    let mut constraints = Vec::new();
+
+    if recovery.is_active() {
+        if let Some(target) = recovery.target() {
+            constraints.push(ActionConstraint::RecoveryReadTarget {
+                path: target.to_path_buf(),
+            });
+        }
+    } else if matches!(run.phase, Phase::Act) {
+        for (path, level) in recovery.duplicate_escalation_paths() {
+            if level >= 2 {
+                constraints.push(ActionConstraint::DuplicateReadPathDisabled { path });
+            } else if level >= 1 {
+                constraints.push(ActionConstraint::DuplicateReadRestricted { path });
+            }
+        }
+    }
+
+    AllowedActionSnapshot { tools, constraints }
 }
 
 /// Contract for the current phase / recovery mode.
@@ -179,6 +244,8 @@ fn classify_invalid(
             // the tool vanishing from the schema.
             // MissingEvidence may attach a one-shot evidence grant without
             // engaging FailedPatch recovery mode (`is_active()` false).
+            // Part 5B path-disable lives in `apply_act_duplicate_read_gate`
+            // (not here) so denials keep DuplicateEvidence classification.
             if !act_read_scope(run).permits_path(path)
                 && !recovery.has_evidence_grant_for(path)
             {
@@ -466,6 +533,112 @@ mod tests {
 
     fn idle_recovery() -> RecoveryState {
         RecoveryState::new()
+    }
+
+    #[test]
+    fn allowed_next_actions_explore_is_full_exploratory_set() {
+        let run = RunState::new();
+        let recovery = idle_recovery();
+        let snap = allowed_next_actions(&run, &recovery);
+        assert_eq!(snap.tools, run.effective_tools(&recovery));
+        assert!(snap.tools.contains(&"read_file"));
+        assert!(snap.tools.contains(&"search_code"));
+        assert!(snap.tools.contains(&"locate"));
+        assert!(snap.tools.contains(&"apply_patch"));
+        assert!(snap.tools.contains(&"finish"));
+        assert!(snap.constraints.is_empty());
+    }
+
+    #[test]
+    fn allowed_next_actions_act_keeps_read_file_and_lists_duplicate_constraints() {
+        let mut run = RunState::new();
+        let mut recovery = idle_recovery();
+        assert!(run.enter_act());
+
+        let snap0 = allowed_next_actions(&run, &recovery);
+        assert_eq!(snap0.tools, ACT_TOOLS.to_vec());
+        assert!(snap0.allows_tool("read_file"));
+        assert!(snap0.allows_tool("update_plan"));
+        assert!(snap0.allows_tool("apply_patch"));
+        assert!(snap0.allows_tool("finish"));
+        assert!(!snap0.allows_tool("locate"));
+        assert!(snap0.constraints.is_empty());
+
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let snap1 = allowed_next_actions(&run, &recovery);
+        assert_eq!(snap1.tools, ACT_TOOLS.to_vec());
+        assert!(snap1.allows_tool("read_file"));
+        assert_eq!(
+            snap1.constraints,
+            vec![ActionConstraint::DuplicateReadRestricted {
+                path: PathBuf::from("Board.tsx"),
+            }]
+        );
+
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let snap2 = allowed_next_actions(&run, &recovery);
+        assert_eq!(snap2.tools, ACT_TOOLS.to_vec());
+        assert!(snap2.allows_tool("read_file"));
+        assert_eq!(
+            snap2.constraints,
+            vec![ActionConstraint::DuplicateReadPathDisabled {
+                path: PathBuf::from("Board.tsx"),
+            }]
+        );
+    }
+
+    #[test]
+    fn allowed_next_actions_failed_patch_matches_recovery_contract() {
+        let run = RunState::new();
+        let mut recovery = idle_recovery();
+        let path = PathBuf::from("src/Board.tsx");
+        let _ = recovery.after_patch_failure(&path, ToolResult::error("hunk mismatch"));
+        assert!(recovery.is_active());
+
+        let snap = allowed_next_actions(&run, &recovery);
+        assert_eq!(snap.tools, PATCH_RECOVERY_TOOLS.to_vec());
+        assert_eq!(snap.tools, run.effective_tools(&recovery));
+        assert!(!snap.allows_tool("update_plan"));
+        assert!(!snap.allows_tool("search_code"));
+        assert!(snap.allows_tool("read_file"));
+        assert!(snap.allows_tool("apply_patch"));
+        assert!(snap.allows_tool("finish"));
+        assert_eq!(
+            snap.constraints,
+            vec![ActionConstraint::RecoveryReadTarget {
+                path: path.clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn allowed_next_actions_finish_is_finish_only() {
+        let mut run = RunState::new();
+        let recovery = idle_recovery();
+        run.phase = Phase::Finish;
+        let snap = allowed_next_actions(&run, &recovery);
+        assert_eq!(snap.tools, FINISH_TOOLS.to_vec());
+        assert_eq!(snap.tools, run.effective_tools(&recovery));
+        assert!(snap.allows_tool("finish"));
+        assert_eq!(snap.tools.len(), 1);
+        assert!(snap.constraints.is_empty());
+    }
+
+    #[test]
+    fn allowed_next_actions_is_pure_and_does_not_mutate_recovery() {
+        let mut run = RunState::new();
+        let mut recovery = idle_recovery();
+        assert!(run.enter_act());
+        let _ = recovery.note_act_duplicate(Path::new("a.rs"));
+        let before_level = recovery.duplicate_escalation_level(Path::new("a.rs"));
+        let before_attempts = recovery.guidance_attempts();
+        let _ = allowed_next_actions(&run, &recovery);
+        let _ = allowed_next_actions(&run, &recovery);
+        assert_eq!(
+            recovery.duplicate_escalation_level(Path::new("a.rs")),
+            before_level
+        );
+        assert_eq!(recovery.guidance_attempts(), before_attempts);
     }
 
     #[test]

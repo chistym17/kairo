@@ -253,8 +253,19 @@ fn apply_general_recipe(
         } => unsupported_capability_guidance(state, attempt),
         RecoveryAction::UnsupportedCapability {
             cause: UnsupportedCause::DuplicateEvidence,
-            ..
-        } => duplicate_evidence_guidance(state, attempt),
+            tool: _,
+            target,
+        } => {
+            // Part 5B: escalate Act read scope for this path (not FailedPatch mode).
+            let mut level = 0u32;
+            if let Some(path) = target {
+                level = state.recovery.note_act_duplicate(path);
+                let snap = duplicate_scope_snapshot_message(path, level);
+                state.run_control.queue_phase_guidance(&snap);
+                write_duplicate_escalation_event(state, path, level);
+            }
+            duplicate_evidence_guidance(state, attempt, level, target.as_deref())
+        }
         RecoveryAction::MissingEvidence { path, relevance } => {
             // First *key* attempt: one bounded workspace-relative grant.
             // Fingerprint escalation must not skip the grant.
@@ -575,29 +586,74 @@ fn unsupported_capability_guidance(state: &AgentState, attempt: u32) -> String {
     }
 }
 
-fn duplicate_evidence_guidance(state: &AgentState, attempt: u32) -> String {
+fn duplicate_evidence_guidance(
+    state: &AgentState,
+    attempt: u32,
+    level: u32,
+    path: Option<&Path>,
+) -> String {
     let mut evidence = String::new();
     if !state.run_control.seen_files.is_empty() {
         evidence.push_str("\nCached / already-seen files:");
         let mut paths: Vec<_> = state.run_control.seen_files.iter().collect();
         paths.sort_by_key(|p| p.to_string_lossy().to_string());
-        for path in paths.iter().take(8) {
-            evidence.push_str(&format!("\n- {}", path.display()));
+        for p in paths.iter().take(8) {
+            evidence.push_str(&format!("\n- {}", p.display()));
         }
     }
-    if attempt <= 1 {
+    let target = path
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<path>".into());
+    if level <= 1 {
         format!(
-            "RECOVERY (duplicate_evidence, attempt {attempt}): That read/search returned evidence \
-             already in context (or was denied as a duplicate). Do not re-fetch the same content. \
-             Next action MUST be a different family — apply_patch, update_plan, or finish.{evidence}"
+            "RECOVERY (duplicate_evidence, attempt {attempt}, scope=restrict): \
+             The requested content for `{target}` is already available in context. \
+             Further duplicate reads of this file are unavailable. Use existing evidence to \
+             update_plan, apply_patch, or finish. A genuinely unread range of another seen \
+             file may still be read once.{evidence}"
         )
     } else {
         format!(
-            "RECOVERY (duplicate_evidence, attempt {attempt}): Still thrashing on known evidence. \
-             Re-reads/searches of cached content will not progress. apply_patch a seen file, \
-             update_plan, or finish summarizing what you already know.{evidence}"
+            "RECOVERY (duplicate_evidence, attempt {attempt}, scope=disable_path): \
+             `read_file` for `{target}` is disabled after repeated duplicate evidence. \
+             Next action MUST be apply_patch, update_plan, or finish — not another read of \
+             that path.{evidence}"
         )
     }
+}
+
+fn duplicate_scope_snapshot_message(path: &Path, level: u32) -> String {
+    if level <= 1 {
+        format!(
+            "The requested content is already available in context.\n\
+             Further duplicate reads of `{}` are unavailable.\n\
+             Use the existing evidence to update the plan, apply a patch, or finish.\n\
+             read_file remains available for other seen files / unread ranges.",
+            path.display()
+        )
+    } else {
+        format!(
+            "read_file for `{}` is now disabled (duplicate evidence exhausted).\n\
+             Available actions: update_plan, apply_patch, finish.\n\
+             A different relevant unseen file may still be requested only via MissingEvidence rules.",
+            path.display()
+        )
+    }
+}
+
+fn write_duplicate_escalation_event(state: &AgentState, path: &Path, level: u32) {
+    let payload = serde_json::json!({
+        "path": path.display().to_string(),
+        "level": level,
+        "restricted": level >= 1,
+        "path_disabled": level >= 2,
+    });
+    crate::logging::write_event(
+        &state.run_id,
+        "duplicate_evidence_escalation",
+        &payload.to_string(),
+        0,
+    );
 }
 
 fn missing_evidence_guidance(
@@ -966,10 +1022,17 @@ mod tests {
         let d = dup.error.unwrap();
         let p = pol.error.unwrap();
         assert!(d.contains("duplicate_evidence"));
+        assert!(d.contains("scope=restrict") || d.contains("scope=disable_path"));
         assert!(d.contains("Cached / already-seen") || d.contains("already in context"));
         assert!(p.contains("unsupported_capability"));
         assert!(p.contains("not available"));
         assert_ne!(d, p);
+        assert_eq!(
+            state
+                .recovery
+                .duplicate_escalation_level(Path::new("seen.rs")),
+            1
+        );
     }
 
     #[test]
@@ -1008,5 +1071,127 @@ mod tests {
                     .contains("recovery recipe exhausted"));
             }
         }
+    }
+
+    #[test]
+    fn part5b_duplicate_escalation_restricts_then_disables_same_path() {
+        let mut state = empty_state();
+        state
+            .run_control
+            .note_file_seen(PathBuf::from("seen.rs"));
+        let path = PathBuf::from("seen.rs");
+        let recipe = RecoveryAction::UnsupportedCapability {
+            cause: UnsupportedCause::DuplicateEvidence,
+            tool: "read_file".into(),
+            target: Some(path.clone()),
+        };
+
+        let mut r1 = ToolResult::error("duplicate read denied");
+        let a1 = apply_recovery(&mut state, &mut r1, &recipe);
+        assert!(a1.stop_reason.is_none());
+        assert_eq!(state.recovery.duplicate_escalation_level(&path), 1);
+        assert!(state.recovery.is_act_duplicate_restricted(&path));
+        assert!(!state.recovery.is_act_duplicate_path_disabled(&path));
+        let g1 = r1.error.clone().unwrap();
+        assert!(g1.contains("scope=restrict"));
+
+        let mut r2 = ToolResult::error("duplicate read denied");
+        let a2 = apply_recovery(&mut state, &mut r2, &recipe);
+        assert!(a2.stop_reason.is_none());
+        assert_eq!(state.recovery.duplicate_escalation_level(&path), 2);
+        assert!(state.recovery.is_act_duplicate_path_disabled(&path));
+        let g2 = r2.error.clone().unwrap();
+        assert!(g2.contains("scope=disable_path"));
+        assert_ne!(g1, g2);
+
+        // Act schema still exposes read_file.
+        assert!(state
+            .run_control
+            .effective_tools(&state.recovery)
+            .contains(&"read_file"));
+
+        // FailedPatch budget untouched.
+        assert_eq!(state.recovery.consecutive_failures(), 0);
+        assert!(!state.recovery.is_active());
+    }
+
+    #[test]
+    fn part5b_update_plan_clears_duplicate_without_clearing_failed_patch() {
+        let mut state = empty_state();
+        let patch_path = PathBuf::from("a.rs");
+        let _ = state
+            .recovery
+            .after_patch_failure(&patch_path, ToolResult::error("hunk"));
+        assert!(state.recovery.is_active());
+        assert_eq!(state.recovery.consecutive_failures(), 1);
+
+        let _ = state.recovery.note_act_duplicate(Path::new("seen.rs"));
+        assert_eq!(
+            state
+                .recovery
+                .duplicate_escalation_level(Path::new("seen.rs")),
+            1
+        );
+
+        state.recovery.clear_duplicate_escalation();
+        assert_eq!(
+            state
+                .recovery
+                .duplicate_escalation_level(Path::new("seen.rs")),
+            0
+        );
+        assert!(state.recovery.is_active());
+        assert_eq!(state.recovery.consecutive_failures(), 1);
+        assert!(state.recovery.has_grant_for(&patch_path));
+    }
+
+    #[test]
+    fn part5b_successful_patch_clear_wipes_duplicate_escalation() {
+        let mut state = empty_state();
+        let _ = state.recovery.note_act_duplicate(Path::new("seen.rs"));
+        assert!(state.recovery.is_act_duplicate_restricted(Path::new("seen.rs")));
+        state.recovery.clear();
+        assert_eq!(
+            state
+                .recovery
+                .duplicate_escalation_level(Path::new("seen.rs")),
+            0
+        );
+    }
+
+    #[test]
+    fn part5b_missing_evidence_still_possible_for_other_relevant_unseen() {
+        let mut state = empty_state();
+        state
+            .run_control
+            .note_file_seen(PathBuf::from("seen.rs"));
+        let _ = state.recovery.note_act_duplicate(Path::new("seen.rs"));
+        let _ = state.recovery.note_act_duplicate(Path::new("seen.rs"));
+        assert!(state
+            .recovery
+            .is_act_duplicate_path_disabled(Path::new("seen.rs")));
+
+        // Plan names a different unseen file → MissingEvidence, not blocked
+        // by the seen.rs duplicate escalation.
+        state.task.plan = Some(
+            AgentPlan::from_update(
+                "fix date rules",
+                "- edit frontend-v2/lib/task-status.ts\n- verify board",
+            )
+            .unwrap(),
+        );
+        let t = decide_next_state(
+            &state,
+            &outcome(
+                Some(StallKind::ScopeViolation),
+                false,
+                "read_file",
+                Some("frontend-v2/lib/task-status.ts"),
+            ),
+        );
+        assert!(matches!(
+            t,
+            RuntimeTransition::Recover(RecoveryAction::MissingEvidence { .. })
+        ));
     }
 }

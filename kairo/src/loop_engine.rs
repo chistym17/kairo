@@ -846,7 +846,9 @@ async fn execute_one_tool(
             log_phase_transition(state, message);
         }
     } else if result.success && matches!(action, Action::UpdatePlan { .. }) {
-        // Keep act_force_edit sticky — planning is not progress toward an edit.
+        // Planning is not Act edit progress, but it does clear duplicate-read
+        // path restrictions so the model can act on an updated plan.
+        state.recovery.clear_duplicate_escalation();
     } else if result.success && matches!(action, Action::Finish { .. }) {
         state.run_control.note_act_progress();
     }
@@ -2497,6 +2499,78 @@ fn goal_with_plan(state: &mut AgentState) -> String {
     out
 }
 
+/// Part 5B: after Act duplicate-evidence escalation, keep `read_file` in the
+/// schema but reject cached ranges (level ≥1) or the whole path (level ≥2).
+/// Skipped during FailedPatch / MissingEvidence grants.
+fn apply_act_duplicate_read_gate(
+    state: &mut AgentState,
+    action: &Action,
+) -> Result<(), ToolResult> {
+    let Action::ReadFile {
+        path,
+        offset,
+        limit,
+    } = action
+    else {
+        return Ok(());
+    };
+    if !matches!(state.run_control.phase, crate::state::phase::Phase::Act) {
+        return Ok(());
+    }
+    // FailedPatch recovery mode owns its own read scope.
+    if state.recovery.is_active() {
+        return Ok(());
+    }
+    if state.recovery.has_any_read_grant_for(path) {
+        return Ok(());
+    }
+
+    let level = state.recovery.duplicate_escalation_level(path);
+    if level >= 2 {
+        let message = format!(
+            "Duplicate read denied: read_file for `{}` is disabled after repeated \
+             duplicate evidence in Act. The content is already in context.\n\
+             Use apply_patch, update_plan, or finish. Do not re-read this path.",
+            path.display()
+        );
+        write_event(
+            &state.run_id,
+            "act_duplicate_path_disabled",
+            &path.display().to_string(),
+            0,
+        );
+        return Err(ToolResult::error(message));
+    }
+    if level >= 1 {
+        match state
+            .read_cache
+            .resolve(&state.workspace_root, path, *offset, *limit)
+        {
+            tools::read_cache::ReadResolve::AlreadyRead(mut denied) => {
+                let extra = format!(
+                    "\n\nFurther duplicate reads of `{}` are unavailable under Act \
+                     duplicate-evidence policy. Use existing evidence to update_plan, \
+                     apply_patch, or finish.",
+                    path.display()
+                );
+                match &mut denied.error {
+                    Some(e) => e.push_str(&extra),
+                    None => denied.error = Some(extra.trim().to_string()),
+                }
+                write_event(
+                    &state.run_id,
+                    "act_duplicate_range_blocked",
+                    &path.display().to_string(),
+                    0,
+                );
+                return Err(denied);
+            }
+            tools::read_cache::ReadResolve::Live { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 fn apply_shell_mutation_gate(
     state: &mut AgentState,
     action: &Action,
@@ -2699,6 +2773,10 @@ fn evaluate_action(
     }
 
     if let Err(denied) = apply_shell_mutation_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = apply_act_duplicate_read_gate(state, action) {
         return EvaluationOutcome::Reject(denied);
     }
 
@@ -3174,6 +3252,7 @@ fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::phase::Phase;
     use std::path::PathBuf;
 
     #[test]
@@ -3229,5 +3308,52 @@ mod tests {
         assert!(!is_parallel_readonly(&Action::Finish {
             summary: "done".into(),
         }));
+    }
+
+    #[test]
+    fn act_duplicate_read_gate_restricts_cached_then_disables_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("seen.rs");
+        std::fs::write(&file, "fn main() {}\n".repeat(20)).unwrap();
+
+        let mut state = AgentState::new("goal", dir.path().to_path_buf(), "test-model", 10);
+        state.run_control.phase = Phase::Act;
+        let path = PathBuf::from("seen.rs");
+        state.run_control.note_file_seen(path.clone());
+        state
+            .read_cache
+            .store_range(dir.path(), &path, 1, 20, 1);
+
+        let action = Action::ReadFile {
+            path: path.clone(),
+            offset: 1,
+            limit: 20,
+        };
+
+        // Level 0: gate is a no-op.
+        assert!(apply_act_duplicate_read_gate(&mut state, &action).is_ok());
+
+        let _ = state.recovery.note_act_duplicate(&path);
+        assert_eq!(state.recovery.duplicate_escalation_level(&path), 1);
+        let err = apply_act_duplicate_read_gate(&mut state, &action).unwrap_err();
+        assert!(
+            err.error
+                .as_deref()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("duplicate read denied")
+        );
+
+        let _ = state.recovery.note_act_duplicate(&path);
+        assert!(state.recovery.is_act_duplicate_path_disabled(&path));
+        let err2 = apply_act_duplicate_read_gate(&mut state, &action).unwrap_err();
+        assert!(
+            err2.error
+                .as_deref()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("duplicate read denied")
+        );
+        assert!(err2.error.as_deref().unwrap().contains("disabled"));
     }
 }
