@@ -8,6 +8,8 @@ use crate::llm::{render_call_line, LlmClient, LlmError, LlmToolCall, ModelUsage}
 use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
+use crate::state::progress::ProgressKind;
+use crate::state::stall::{ActionFingerprint, StallKind};
 use crate::state::step::{Action, Step};
 use crate::state::stop_reason::StopReason;
 use crate::tools;
@@ -195,13 +197,13 @@ pub async fn run(
                     &session_messages_snapshot,
                     &state.history,
                     tool_policy.as_ref(),
-                    state.run_control.effective_tools(),
+                    state.run_control.effective_tools(&state.recovery),
                 );
             request.prefer_required_tool_choice = state.run_control.require_tool_choice;
             crate::agent_println!(
                 "[phase={}] exposed_tools=[{}]",
-                state.run_control.tool_mode_label(),
-                state.run_control.effective_tools().join(", ")
+                state.run_control.tool_mode_label(&state.recovery),
+                state.run_control.effective_tools(&state.recovery).join(", ")
             );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
@@ -271,6 +273,26 @@ pub async fn run(
                         state.exploration.model_turns_since_edit.saturating_add(1);
                     state.exploration.consecutive_single_readonly_turns = 0;
                     state.governance.note_no_tool_turn();
+
+                    // Slice 3 shadow classification (final-design-plan.md §7.1,
+                    // §8): a text-only turn never reaches `commit_tool_outcome`,
+                    // so it would otherwise never register as
+                    // `StallKind::NonResolvingResponse` — the one variant that
+                    // is specifically about "no useful tool action taken".
+                    // Recorded here, unconditionally, before any auto-finish /
+                    // guidance branch below decides what happens next.
+                    let stalls_before = state.stall.consecutive_stalls;
+                    state.stall.observe_fingerprint(
+                        ActionFingerprint::text_only(&text),
+                        Some(StallKind::NonResolvingResponse),
+                    );
+                    log_stall_shadow(
+                        state,
+                        Some(StallKind::NonResolvingResponse),
+                        None,
+                        stalls_before,
+                        None,
+                    );
 
                     if !text.trim().is_empty() {
                         emit(
@@ -448,13 +470,13 @@ pub async fn run(
                                 &session_messages_snapshot,
                                 &state.history,
                                 tool_policy.as_ref(),
-                                state.run_control.effective_tools(),
+                                state.run_control.effective_tools(&state.recovery),
                             );
                         request.prefer_required_tool_choice = state.run_control.require_tool_choice;
                         crate::agent_println!(
                             "[phase={}] exposed_tools=[{}]",
-                            state.run_control.tool_mode_label(),
-                            state.run_control.effective_tools().join(", ")
+                            state.run_control.tool_mode_label(&state.recovery),
+                            state.run_control.effective_tools(&state.recovery).join(", ")
                         );
 
                         write_event(
@@ -775,29 +797,30 @@ async fn execute_one_tool(
 
     if let Action::ApplyPatch { path, .. } = &action {
         if result.success {
-            state.patch_recovery.note_successful_mutation();
-            state.run_control.clear_patch_recovery();
+            state.recovery.note_successful_mutation();
             state.run_control.note_act_progress();
-            if let Some(message) = state.run_control.enter_verify() {
+            if let Some(message) = state.run_control.enter_verify(&state.recovery) {
                 log_phase_transition(state, message);
             }
         } else {
-            result = state.patch_recovery.after_patch_failure(path, result);
+            let outcome = state.recovery.after_patch_failure(path, result);
+            result = outcome.result;
             write_event(
                 &state.run_id,
                 "patch_recovery_granted",
                 &format!("{} (1 reread)", path.display()),
                 0,
             );
-            if let Some(message) = state.run_control.enter_patch_recovery(path) {
-                log_phase_transition(state, message);
+            if outcome.show_phase_guidance {
+                if let Some(message) = state.run_control.engage_patch_recovery_phase() {
+                    log_phase_transition(state, message);
+                }
             }
         }
     } else if result.success && matches!(action, Action::WriteFile { .. }) {
-        state.patch_recovery.note_successful_mutation();
-        state.run_control.clear_patch_recovery();
+        state.recovery.note_successful_mutation();
         state.run_control.note_act_progress();
-        if let Some(message) = state.run_control.enter_verify() {
+        if let Some(message) = state.run_control.enter_verify(&state.recovery) {
             log_phase_transition(state, message);
         }
     } else if result.success && matches!(action, Action::UpdatePlan { .. }) {
@@ -989,7 +1012,7 @@ async fn execute_readonly_group(
                     limit,
                 } = &action
                 {
-                    if state.patch_recovery.try_consume_read(path) {
+                    if state.recovery.try_consume_read(path) {
                         state.read_cache.invalidate_path(path);
                         write_event(
                             &state.run_id,
@@ -1502,7 +1525,7 @@ fn read_file_cached(
     limit: u32,
 ) -> ToolResult {
     let step_index = state.step_count;
-    if state.patch_recovery.try_consume_read(path) {
+    if state.recovery.try_consume_read(path) {
         state.read_cache.invalidate_path(path);
         write_event(
             &state.run_id,
@@ -1678,7 +1701,7 @@ fn commit_tool_outcome(
                         .note_verification_outcome(model_turn, report.outcome.clone());
                     if let Some(message) = state
                         .run_control
-                        .observe_verification(&report.outcome, model_turn)
+                        .observe_verification(&mut state.recovery, &report.outcome, model_turn)
                     {
                         log_phase_transition(state, message);
                     }
@@ -1744,9 +1767,13 @@ fn commit_tool_outcome(
         })
         .unwrap_or(false);
 
-    state
+    let progress_kind = state
         .progress
         .observe_tool(&action, &result, duplicate_read);
+
+    let stall_kind = classify_stall(&action, &result, progress_kind, duplicate_read);
+    let stalls_before = state.stall.consecutive_stalls;
+    state.stall.observe(&action, stall_kind);
 
     if let Some(message) = state.run_control.observe_tool_outcome(
         &action,
@@ -1757,8 +1784,36 @@ fn commit_tool_outcome(
         log_phase_transition(state, message);
     }
 
-    if let Some(reason) = state.run_control.observe_denial_streak(&result) {
-        let stop_msg = state.run_control.no_progress_stop_message();
+    // Logged only after *both* `RunState` updates above (`observe_tool_outcome`
+    // for `no_progress`, `observe_denial_streak` below for
+    // `consecutive_denials`) so every legacy counter in the payload reflects
+    // this same turn's update — logging any earlier would snapshot some of
+    // them one turn stale relative to the new counter and `progress`,
+    // making the shadow-mode comparison misleading rather than just noisy.
+    // Captured *before* `observe_denial_streak` (which can set its own
+    // `Terminate` message on `result.error` below) so `legacy_stop_source`
+    // can tell apart the two independent pre-existing stop paths that may
+    // have already written into `result` earlier this turn — patch-recovery
+    // (`PatchRecoveryState::after_patch_failure` / `deny_write_existing_source`,
+    // both applied before dispatch or right after, well before this
+    // function runs) — from the one this function is about to compute
+    // itself (`consecutive_denials`).
+    let pre_existing_stop_error = result.error.clone();
+    let denial_streak_stop = state.run_control.observe_denial_streak(&result);
+    let legacy_stop_source = legacy_stop_source_for(
+        pre_existing_stop_error.as_deref(),
+        denial_streak_stop.is_some(),
+    );
+    log_stall_shadow(
+        state,
+        stall_kind,
+        Some(progress_kind),
+        stalls_before,
+        legacy_stop_source,
+    );
+
+    if let Some(reason) = denial_streak_stop {
+        let stop_msg = state.run_control.no_progress_stop_message(&state.recovery);
         write_event(&state.run_id, "no_progress_stop", &stop_msg, 0);
         crate::agent_println!("\n[agent] {}", stop_msg);
         match &mut result.error {
@@ -1818,7 +1873,11 @@ fn commit_tool_outcome(
                         .completion
                         .note_verification_outcome(model_turn, outcome.clone());
                     if let Some(message) =
-                        state.run_control.observe_verification(&outcome, model_turn)
+                        state.run_control.observe_verification(
+                            &mut state.recovery,
+                            &outcome,
+                            model_turn,
+                        )
                     {
                         log_phase_transition(state, message);
                     }
@@ -1900,6 +1959,195 @@ fn commit_tool_outcome(
     } else {
         None
     }
+}
+
+/// Slice 3 shadow classification (final-design-plan.md §7.1, §8): maps one
+/// committed tool outcome onto the six `StallKind`s, so `StallState` (logged
+/// only — see `commit_tool_outcome`) can be compared against the four
+/// legacy counters it is a candidate to replace. Reuses `progress_kind`
+/// (already computed by `ProgressState::observe_tool`, which is itself the
+/// source of the legacy `consecutive_no_progress` counter) rather than
+/// re-deriving evidence/mutation/decision judgments from scratch.
+///
+/// `None` (progress — resets `consecutive_stalls`) is returned only for
+/// `Mutation`, `PlanUpdated`, `Decision`, `NewEvidence`, and
+/// `VerificationResult`. Note what this does **not** include: a bare
+/// `result.success == true` is not itself a reset condition — e.g. a
+/// successful `read_file`/`search_code` that returns content whose evidence
+/// key (path + line range + content hash / query match set) was already
+/// ingested this run still classifies as `ProgressKind::NoProgress`
+/// (`ProgressState::classify_and_ingest`), i.e. a stall here, not progress.
+///
+/// This reset boundary is **identical** to legacy `consecutive_no_progress`
+/// (`ProgressState`), since both read the same `progress_kind` value from
+/// the same call to `observe_tool`. It is deliberately **stricter** than
+/// the other two legacy counters, which is a real, expected divergence to
+/// watch for in the shadow-mode comparison rather than a bug to fix here:
+/// `consecutive_denials` (`RunState::observe_denial_streak`) resets on
+/// *any* successful dispatch, including a successful-but-empty search or a
+/// successful re-read of already-known content, because it only checks
+/// denial-style error text; `consecutive_invalid_actions`
+/// (`action_policy::validate_action`) resets on any phase-contract-valid
+/// action regardless of whether it produced new evidence. So the new
+/// counter is expected to run *higher*, not lower, than those two on
+/// exploration-heavy transcripts — that is a genuine behavior difference to
+/// surface in the comparison, not evidence the new counter is unwired.
+fn classify_stall(
+    action: &Action,
+    result: &ToolResult,
+    progress_kind: ProgressKind,
+    duplicate_read: bool,
+) -> Option<StallKind> {
+    match progress_kind {
+        ProgressKind::Mutation
+        | ProgressKind::PlanUpdated
+        | ProgressKind::Decision
+        | ProgressKind::NewEvidence
+        | ProgressKind::VerificationResult => None,
+        ProgressKind::NoProgress => Some(if duplicate_read {
+            StallKind::DuplicateEvidence
+        } else if matches!(action, Action::ApplyPatch { .. } | Action::WriteFile { .. }) {
+            StallKind::FailedMutation
+        } else if matches!(action, Action::RunCommand { .. } | Action::RunShell { .. }) {
+            StallKind::RepeatedVerification
+        } else if is_harness_denial_text(result) {
+            StallKind::ScopeViolation
+        } else if !result.success {
+            StallKind::InvalidArguments
+        } else {
+            StallKind::NonResolvingResponse
+        }),
+    }
+}
+
+/// Structured shadow-mode log record (Slice 3, final-design-plan.md §8):
+/// explicit `classification` ("stall" vs "progress") plus the `progress_kind`
+/// (or `None` for text-only turns, which never produce one) that drove it,
+/// so a reviewer can audit every reset for legitimacy — not just infer it
+/// from the before/after counter values — alongside all four legacy
+/// counters for direct comparison.
+///
+/// Logs both fingerprint interpretations side by side — `exact_*` (same
+/// call) and `coarse_*` (same target/intent, currently only distinct from
+/// exact for `read_file`) — so a reviewer can see cases like a model
+/// dodging the duplicate-read cache via shifting line ranges: `exact_repeat`
+/// false but `coarse_repeat` true. Diagnostic only; neither set of flags
+/// drives `consecutive_stalls`.
+///
+/// Also logs `PatchRecoveryState`'s own counters (`recovery.*`) and, when
+/// this turn triggered a stop, which subsystem's threshold actually fired
+/// (`legacy_stop_source`). This exists because a real corpus run showed
+/// `consecutive_stalls` resetting to 0 on a legitimate patch-recovery
+/// reread at the exact moment `PatchRecoveryState::consecutive_failures`
+/// was two-of-three toward its own independent stop — a divergence that
+/// was invisible in this log before `recovery` was added. Per design
+/// review: this is deliberately **not** fixed by making `StallState`
+/// preserve patch-failure streaks across a recovery reset — `Progress`
+/// ("is the agent generally still making progress?") and `Recovery`
+/// ("has this specific mutation target repeatedly failed?") answer
+/// different questions and must stay in their own Layer-1 fields
+/// (final-design-plan.md §4); this function only ever *reads* both, it
+/// does not let either influence the other.
+///
+/// `legacy_stop_source` covers the two stop paths observable from a
+/// `ToolResult` at this call site (`patch_recovery_failure_limit`,
+/// `denied_source_writes_limit`) plus the one this function computes
+/// itself (`consecutive_denials_limit`). It does **not** cover the
+/// `consecutive_invalid_actions` fallback stop, which terminates via
+/// `EvaluationOutcome::RejectAndStop` before a `ToolResult.stop_reason` is
+/// ever set — that path already logs its own `invalid_action_stop` event
+/// at the moment it fires, which corpus aggregation should treat as a
+/// fourth, equivalent stop-source signal until it's folded into this one.
+fn log_stall_shadow(
+    state: &AgentState,
+    stall_kind: Option<StallKind>,
+    progress_kind: Option<ProgressKind>,
+    counter_before: u32,
+    legacy_stop_source: Option<&'static str>,
+) {
+    let recovery = state.recovery.snapshot();
+    let payload = json!({
+        "classification": if stall_kind.is_some() { "stall" } else { "progress" },
+        "stall_kind": stall_kind.map(|k| format!("{k:?}")),
+        "progress_kind": progress_kind.map(|k| format!("{k:?}")),
+        "counter_before": counter_before,
+        "counter_after": state.stall.consecutive_stalls,
+        "exact_repeat": state.stall.is_repeat(),
+        "exact_ping_pong": state.stall.is_ping_pong(),
+        "exact_new_failure": state.stall.is_new_failure(),
+        "coarse_repeat": state.stall.coarse_is_repeat(),
+        "coarse_ping_pong": state.stall.coarse_is_ping_pong(),
+        "coarse_new_failure": state.stall.coarse_is_new_failure(),
+        "legacy": {
+            "no_progress": state.run_control.no_progress,
+            "consecutive_denials": state.run_control.consecutive_denials,
+            "consecutive_invalid_actions": state.run_control.consecutive_invalid_actions,
+            "progress_consecutive_no_progress": state.progress.consecutive_no_progress,
+        },
+        "recovery": {
+            "active": recovery.active,
+            "reason": recovery.reason.map(|r| format!("{r:?}")),
+            "target": recovery.target.as_ref().map(|p| p.display().to_string()),
+            "consecutive_failures": recovery.consecutive_failures,
+            "remaining_reads": recovery.remaining_reads,
+            "denied_source_writes": recovery.denied_source_writes,
+        },
+        "legacy_stop_source": legacy_stop_source,
+    });
+    write_event(&state.run_id, "stall_shadow", &payload.to_string(), 0);
+}
+
+/// Identifies which authoritative subsystem's threshold produced this
+/// turn's stop, if any — see `log_stall_shadow`'s doc comment for why this
+/// exists and what it deliberately doesn't cover yet.
+fn legacy_stop_source_for(
+    pre_existing_stop_error: Option<&str>,
+    denial_streak_stopped: bool,
+) -> Option<&'static str> {
+    if let Some(err) = pre_existing_stop_error {
+        if err.contains("consecutive apply_patch failures") {
+            return Some("patch_recovery_failure_limit");
+        }
+        if err.contains("denied write_file attempts") {
+            return Some("denied_source_writes_limit");
+        }
+    }
+    if denial_streak_stopped {
+        return Some("consecutive_denials_limit");
+    }
+    None
+}
+
+/// Mirrors the denial-text markers `phase::is_denied_result` (private to
+/// that module) and the shape/authorization/existing-source rejection
+/// messages produced in `evaluate_action`'s gates. Duplicated rather than
+/// shared: unifying these into one structured `ActionFailureKind` is Slice
+/// 4/6 work (final-design-plan.md §6, §9), not this shadow-mode comparison.
+fn is_harness_denial_text(result: &ToolResult) -> bool {
+    if result.success {
+        return false;
+    }
+    let Some(err) = result.error.as_deref() else {
+        return false;
+    };
+    if err.starts_with("ACTION_NOT_AVAILABLE")
+        || err.starts_with("PHASE TRANSITION: ACT")
+        || err.starts_with("Stopped after ")
+    {
+        return true;
+    }
+    let l = err.to_ascii_lowercase();
+    l.contains("duplicate read denied")
+        || l.contains("exact content already available")
+        || l.contains("exploration checkpoint active")
+        || l.contains("is not available in")
+        || l.contains("phase_tool_denied")
+        || l.contains("authorization required")
+        || l.contains("authorization denied")
+        || l.contains("edit policy is")
+        || l.contains("must use apply_patch")
+        || l.contains("shell mutation")
+        || l.contains("blocked:")
 }
 
 fn write_summary(state: &AgentState, reason: &StopReason) {
@@ -2001,7 +2249,10 @@ fn goal_with_plan(state: &mut AgentState) -> String {
     // Phase guidance (Act / Verify / Finish) is always injected — it is the
     // primary control signal and must reach the model even when quiet CLI hides logs.
     let mut injected_guidance = false;
-    if let Some(guidance) = state.run_control.phase_guidance_for_injection() {
+    if let Some(guidance) = state
+        .run_control
+        .phase_guidance_for_injection(&state.recovery)
+    {
         write_event(
             &state.run_id,
             "phase_guidance",
@@ -2124,7 +2375,7 @@ fn apply_action_policy_gate(
 ) -> Result<(), ActionPolicyGateError> {
     use crate::state::action_policy::{denial_tool_result, validate_action, ActionDecision};
 
-    match validate_action(&mut state.run_control, action) {
+    match validate_action(&mut state.run_control, &state.recovery, action) {
         ActionDecision::Allow => Ok(()),
         ActionDecision::RejectAndRetry {
             reason,
@@ -2164,7 +2415,7 @@ fn log_phase_transition(state: &AgentState, message: &str) {
     write_event(&state.run_id, "phase_transition", message, 0);
     crate::agent_println!(
         "[agent] phase → {} — {}",
-        state.run_control.tool_mode_label(),
+        state.run_control.tool_mode_label(&state.recovery),
         message.lines().next().unwrap_or(message)
     );
 }
@@ -2175,7 +2426,7 @@ fn apply_evidence_checkpoint_gate(
 ) -> Result<(), ToolResult> {
     // Recovery reread after patch failure is not generic exploration thrash.
     if let Action::ReadFile { path, .. } = action {
-        if state.patch_recovery.has_grant_for(path) {
+        if state.recovery.has_grant_for(path) {
             return Ok(());
         }
     }
@@ -2290,7 +2541,7 @@ fn evaluate_action(
     // Existing source files must use apply_patch — write_file rewrites break APIs.
     if let Action::WriteFile { path, .. } = action {
         if let Some(denied) = state
-            .patch_recovery
+            .recovery
             .deny_write_existing_source(&state.workspace_root, path)
         {
             write_event(

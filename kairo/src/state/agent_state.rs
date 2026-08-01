@@ -11,9 +11,10 @@ use crate::session::{TaskSessionState, TurnIntent};
 use crate::state::completion::CompletionTracker;
 use crate::state::efficiency::RunEfficiency;
 use crate::state::exploration::ExplorationTracker;
-use crate::state::patch_recovery::PatchRecoveryState;
+use crate::state::recovery::RecoveryState;
 use crate::state::phase::RunState;
 use crate::state::progress::ProgressState;
+use crate::state::stall::StallState;
 use crate::state::step::Step;
 use crate::llm::{ModelPricing, UsageAccumulator};
 use crate::tools::project_snapshot::ProjectSnapshot;
@@ -63,8 +64,14 @@ pub struct AgentState {
     /// Phase + seen-evidence tracking for runtime tool control (slice 1–6).
     pub run_control: RunState,
 
-    /// Targeted reread grant after failed apply_patch; write_file source policy.
-    pub patch_recovery: PatchRecoveryState,
+    /// Tagged stall counter, shadow mode only — logged alongside the four
+    /// legacy counters for comparison, not yet consulted for any decision
+    /// (final-design-plan.md §7.1, §8 Slice 3).
+    pub stall: StallState,
+
+    /// Layer 1 Recovery — failed-patch grant + mutation/write budgets
+    /// (final-design-plan.md §4, Slice 4 Part 1).
+    pub recovery: RecoveryState,
 
     /// Objective post-edit completion milestones.
     pub completion: CompletionTracker,
@@ -116,7 +123,8 @@ impl AgentState {
             exploration: ExplorationTracker::new(),
             progress: ProgressState::new(),
             run_control: RunState::new(),
-            patch_recovery: PatchRecoveryState::new(),
+            stall: StallState::new(),
+            recovery: RecoveryState::new(),
             completion: CompletionTracker::new(),
             governance: GovernanceState::new(),
             run_started: Instant::now(),

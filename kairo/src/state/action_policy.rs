@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 
 use crate::state::phase::{Phase, RunState, ACT_TOOLS, FINISH_TOOLS, PATCH_RECOVERY_TOOLS, VERIFY_TOOLS};
+use crate::state::recovery::RecoveryState;
 use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
 use crate::state::tool_scope::{ScopeBudget, ToolScope};
@@ -78,8 +79,8 @@ pub enum ActionDecision {
 /// Default max invalid actions before phase fallback (Explore / Act).
 pub const DEFAULT_MAX_INVALID_ACTIONS: usize = 3;
 
-pub fn contract_for(run: &RunState) -> PhaseContract {
-    if run.patch_fail_recovery {
+pub fn contract_for(run: &RunState, recovery: &RecoveryState) -> PhaseContract {
+    if recovery.is_active() {
         return PhaseContract {
             allowed_tools: PATCH_RECOVERY_TOOLS,
             max_invalid_actions: DEFAULT_MAX_INVALID_ACTIONS,
@@ -121,11 +122,15 @@ pub fn contract_for(run: &RunState) -> PhaseContract {
 ///
 /// Updates `consecutive_invalid_actions` on `run`. Callers apply the decision
 /// (commit deny, queue guidance, stop, transition).
-pub fn validate_action(run: &mut RunState, action: &Action) -> ActionDecision {
-    let contract = contract_for(run);
+pub fn validate_action(
+    run: &mut RunState,
+    recovery: &RecoveryState,
+    action: &Action,
+) -> ActionDecision {
+    let contract = contract_for(run, recovery);
     let name = action_tool_name(action);
 
-    let invalid = classify_invalid(run, action, name, &contract);
+    let invalid = classify_invalid(run, recovery, action, name, &contract);
 
     match invalid {
         None => {
@@ -138,6 +143,7 @@ pub fn validate_action(run: &mut RunState, action: &Action) -> ActionDecision {
 
 fn classify_invalid(
     run: &RunState,
+    recovery: &RecoveryState,
     action: &Action,
     name: &str,
     contract: &PhaseContract,
@@ -154,7 +160,7 @@ fn classify_invalid(
     if let Action::Finish { summary } = action {
         if run.act_force_edit
             && matches!(run.phase, Phase::Act)
-            && !run.patch_fail_recovery
+            && !recovery.is_active()
             && is_escape_finish(summary)
         {
             return Some(InvalidActionReason::ArgumentPolicyViolation);
@@ -162,8 +168,8 @@ fn classify_invalid(
     }
 
     if let Action::ReadFile { path, .. } = action {
-        if run.patch_fail_recovery {
-            if !patch_recovery_scope(run).permits_path(path) {
+        if recovery.is_active() {
+            if !patch_recovery_scope(recovery).permits_path(path) {
                 return Some(InvalidActionReason::RecoveryTargetMismatch);
             }
         } else if matches!(run.phase, Phase::Act) {
@@ -205,26 +211,19 @@ fn act_read_scope(run: &RunState) -> ToolScope {
 
 /// The `ToolScope` governing `read_file` during patch recovery: bounded to
 /// the single failed-patch target (final-design-plan.md §5.2's recovery
-/// example). `run.patch_fail_path` is always `Some` whenever
-/// `patch_fail_recovery` is true (set together in `enter_patch_recovery`) —
-/// the `disabled()` fallback exists only so this function cannot panic if
-/// that invariant is ever violated, not because it is expected to trigger.
+/// example). `RecoveryState::target` is always `Some` whenever recovery is
+/// active — the `disabled()` fallback exists only so this function cannot
+/// panic if that invariant is ever violated.
 ///
 /// Budget is deliberately left `Unlimited` here rather than `Uses(1)`: the
 /// real one-shot consumption for this grant already happens correctly at
-/// dispatch time via `PatchRecoveryState::try_consume_read` (`loop_engine.rs`)
-/// — a sibling of `RunState` on `AgentState` that this function, taking only
-/// `&RunState`, cannot see. Reporting `Uses(1)` here regardless of whether
-/// the grant was already spent this turn would make the `ToolScope` lie
-/// about its own budget, which is worse than the scope simply not knowing.
-/// Giving this scope the real remaining count requires threading
-/// `PatchRecoveryState`'s counter in, which is deferred with the rest of the
-/// `PatchRecoveryState` + `RunState.patch_fail_recovery` state merge
-/// (final-design-plan.md §4, §9) rather than done piecemeal here.
-fn patch_recovery_scope(run: &RunState) -> ToolScope {
-    match run.patch_fail_path.as_ref() {
+/// dispatch time via `RecoveryState::try_consume_read` (`loop_engine.rs`).
+/// Reporting `Uses(1)` here regardless of whether the grant was already
+/// spent this turn would make the `ToolScope` lie about its own budget.
+fn patch_recovery_scope(recovery: &RecoveryState) -> ToolScope {
+    match recovery.target() {
         Some(path) => {
-            let paths: HashSet<_> = std::iter::once(path.clone()).collect();
+            let paths: HashSet<_> = std::iter::once(path.to_path_buf()).collect();
             ToolScope::bounded_paths(paths, ScopeBudget::Unlimited)
         }
         None => ToolScope::disabled(),
@@ -461,17 +460,22 @@ mod tests {
         }
     }
 
+    fn idle_recovery() -> RecoveryState {
+        RecoveryState::new()
+    }
+
     #[test]
     fn act_read_file_is_invalid_and_escalates() {
         let mut run = RunState::new();
+        let recovery = idle_recovery();
         assert!(run.enter_act());
-        let _ = run.phase_guidance_for_injection(); // clear one-shot
+        let _ = run.phase_guidance_for_injection(&recovery); // clear one-shot
 
-        let d1 = validate_action(&mut run, &read("Board.tsx"));
+        let d1 = validate_action(&mut run, &recovery, &read("Board.tsx"));
         assert!(matches!(d1, ActionDecision::RejectAndRetry { require_tool_choice: false, .. }));
         assert_eq!(run.consecutive_invalid_actions, 1);
 
-        let d2 = validate_action(&mut run, &read("Board.tsx"));
+        let d2 = validate_action(&mut run, &recovery, &read("Board.tsx"));
         match d2 {
             ActionDecision::RejectAndRetry {
                 require_tool_choice: true,
@@ -481,7 +485,7 @@ mod tests {
         }
         assert!(run.require_tool_choice);
 
-        let d3 = validate_action(&mut run, &read("Board.tsx"));
+        let d3 = validate_action(&mut run, &recovery, &read("Board.tsx"));
         match d3 {
             ActionDecision::Stop {
                 reason: StopReason::NoProgress,
@@ -494,11 +498,12 @@ mod tests {
     #[test]
     fn act_allows_read_of_previously_seen_file() {
         let mut run = RunState::new();
+        let recovery = idle_recovery();
         run.note_file_seen(PathBuf::from("Board.tsx"));
         assert!(run.enter_act());
-        let _ = run.phase_guidance_for_injection(); // clear one-shot
+        let _ = run.phase_guidance_for_injection(&recovery);
 
-        let decision = validate_action(&mut run, &read("Board.tsx"));
+        let decision = validate_action(&mut run, &recovery, &read("Board.tsx"));
         assert!(matches!(decision, ActionDecision::Allow));
         assert_eq!(run.consecutive_invalid_actions, 0);
     }
@@ -506,13 +511,12 @@ mod tests {
     #[test]
     fn act_rejects_read_outside_seen_files_scope() {
         let mut run = RunState::new();
-        // A different file is in scope, but the requested one is not — this
-        // must not be treated as "Act allows any read" once one file is seen.
+        let recovery = idle_recovery();
         run.note_file_seen(PathBuf::from("Board.tsx"));
         assert!(run.enter_act());
-        let _ = run.phase_guidance_for_injection();
+        let _ = run.phase_guidance_for_injection(&recovery);
 
-        let decision = validate_action(&mut run, &read("store.ts"));
+        let decision = validate_action(&mut run, &recovery, &read("store.ts"));
         match decision {
             ActionDecision::RejectAndRetry {
                 reason: InvalidActionReason::ArgumentPolicyViolation,
@@ -525,12 +529,14 @@ mod tests {
     #[test]
     fn valid_act_action_resets_counter() {
         let mut run = RunState::new();
+        let recovery = idle_recovery();
         let _ = run.enter_act();
-        let _ = validate_action(&mut run, &read("x.rs"));
+        let _ = validate_action(&mut run, &recovery, &read("x.rs"));
         assert_eq!(run.consecutive_invalid_actions, 1);
 
         let d = validate_action(
             &mut run,
+            &recovery,
             &Action::UpdatePlan {
                 objective: "fix board".into(),
                 steps: "[ ] patch store".into(),
@@ -544,22 +550,9 @@ mod tests {
     #[test]
     fn explore_fallback_transitions_to_act() {
         let mut run = RunState::new();
-        // Invent a tool that Explore doesn't have — use finish? Explore has finish.
-        // Write is allowed in explore. Use a made-up path: ApplyPatch is allowed.
-        // For invalid in explore, call something not in EXPLORE - all common tools are in explore.
-        // Force by temporarily... Actually Explore has almost everything.
-        // Call with Finish is allowed. 
-        // The only way to get invalid in Explore with current EXPLORE_TOOLS is hard.
-        // We can set consecutive_invalid_actions manually and call escalate via repeated
-        // unavailable - wait, EXPLORE includes write_file, apply_patch, etc.
-        // Looking at EXPLORE_TOOLS - it has everything. So Explore invalid is rare unless
-        // we remove something. For test, set phase Act is enough.
-        // Test TransitionToAct by setting fallback path: put run in Explore and
-        // use validate with a tool not in list - we need a tool not in EXPLORE.
-        // EXPLORE doesn't include... it has all. Skip explore transition test
-        // by constructing contract path: set consecutive high and call fallback.
+        let recovery = idle_recovery();
         run.consecutive_invalid_actions = 2;
-        let contract = contract_for(&run);
+        let contract = contract_for(&run, &recovery);
         assert!(matches!(contract.fallback, InvalidFallback::TransitionToAct));
         let d = escalate_invalid(
             &mut run,
@@ -574,9 +567,10 @@ mod tests {
     #[test]
     fn escape_finish_requesting_tools_is_rejected_in_act() {
         let mut run = RunState::new();
+        let recovery = idle_recovery();
         run.note_file_seen(PathBuf::from("Board.tsx"));
         assert!(run.enter_act());
-        let _ = run.phase_guidance_for_injection();
+        let _ = run.phase_guidance_for_injection(&recovery);
 
         let finish = Action::Finish {
             summary: "I was unable to complete the investigation because tools are restricted \
@@ -584,7 +578,7 @@ mod tests {
                       permissions so I can complete the fix."
                 .into(),
         };
-        let d = validate_action(&mut run, &finish);
+        let d = validate_action(&mut run, &recovery, &finish);
         match d {
             ActionDecision::RejectAndRetry {
                 reason: InvalidActionReason::ArgumentPolicyViolation,
@@ -602,6 +596,7 @@ mod tests {
     #[test]
     fn concrete_code_blocker_finish_is_allowed_in_act() {
         let mut run = RunState::new();
+        let recovery = idle_recovery();
         assert!(run.enter_act());
         let finish = Action::Finish {
             summary: "Blocked: Board.tsx fetchTasks likely sends local date while \
@@ -609,7 +604,7 @@ mod tests {
                 .into(),
         };
         assert!(matches!(
-            validate_action(&mut run, &finish),
+            validate_action(&mut run, &recovery, &finish),
             ActionDecision::Allow
         ));
     }
@@ -627,11 +622,18 @@ mod tests {
         ));
     }
 
+    fn engage_failed_patch(run: &mut RunState, path: &Path) -> RecoveryState {
+        let mut recovery = RecoveryState::new();
+        let _ = recovery.after_patch_failure(path, ToolResult::error("hunk mismatch"));
+        let _ = run.engage_patch_recovery_phase();
+        recovery
+    }
+
     #[test]
     fn recovery_wrong_path_is_recovery_mismatch() {
         let mut run = RunState::new();
-        let _ = run.enter_patch_recovery(Path::new("a.rs"));
-        let d = validate_action(&mut run, &read("b.rs"));
+        let recovery = engage_failed_patch(&mut run, Path::new("a.rs"));
+        let d = validate_action(&mut run, &recovery, &read("b.rs"));
         match d {
             ActionDecision::RejectAndRetry {
                 reason: InvalidActionReason::RecoveryTargetMismatch,
@@ -644,24 +646,21 @@ mod tests {
     #[test]
     fn recovery_exact_path_is_allowed_via_tool_scope() {
         let mut run = RunState::new();
-        let _ = run.enter_patch_recovery(Path::new("src/Board.tsx"));
-        let d = validate_action(&mut run, &read("src/Board.tsx"));
+        let recovery = engage_failed_patch(&mut run, Path::new("src/Board.tsx"));
+        let d = validate_action(&mut run, &recovery, &read("src/Board.tsx"));
         assert!(matches!(d, ActionDecision::Allow));
     }
 
     #[test]
     fn recovery_scope_ignores_act_seen_files_evidence() {
-        // Recovery is bounded to the failed target only — a file that is
-        // separately in seen_files (e.g. from before the patch attempt) must
-        // not leak into the recovery scope's allow-list.
         let mut run = RunState::new();
         run.note_file_seen(PathBuf::from("other.rs"));
-        let _ = run.enter_patch_recovery(Path::new("target.rs"));
+        let recovery = engage_failed_patch(&mut run, Path::new("target.rs"));
         assert!(matches!(
-            validate_action(&mut run, &read("target.rs")),
+            validate_action(&mut run, &recovery, &read("target.rs")),
             ActionDecision::Allow
         ));
-        match validate_action(&mut run, &read("other.rs")) {
+        match validate_action(&mut run, &recovery, &read("other.rs")) {
             ActionDecision::RejectAndRetry {
                 reason: InvalidActionReason::RecoveryTargetMismatch,
                 ..
@@ -672,12 +671,9 @@ mod tests {
 
     #[test]
     fn patch_recovery_scope_is_disabled_without_a_target() {
-        // Defensive only: enter_patch_recovery always sets patch_fail_path
-        // together with patch_fail_recovery, so this combination should not
-        // occur in practice — this just proves the fallback can't panic.
-        let mut run = RunState::new();
-        run.patch_fail_recovery = true;
-        run.patch_fail_path = None;
-        assert!(!patch_recovery_scope(&run).permits_path(Path::new("anything.rs")));
+        // Defensive only: active recovery without a target should not panic.
+        let recovery = RecoveryState::new();
+        // Manually impossible via public API; prove disabled fallback for empty target.
+        assert!(!patch_recovery_scope(&recovery).permits_path(Path::new("anything.rs")));
     }
 }
