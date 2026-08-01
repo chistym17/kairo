@@ -10,6 +10,7 @@ pub mod progress;
 pub mod recovery;
 pub mod runtime_decision;
 pub mod stall;
+pub mod stall_policy;
 pub mod step;
 pub mod stop_reason;
 pub mod tool_scope;
@@ -37,8 +38,13 @@ pub use recovery::{
 };
 pub use runtime_decision::{
     apply_recovery, decide_next_state, stop_reason_from_transition, CompletionReason,
-    RecoveryAction, RecoveryApplyResult, RuntimeTransition, TurnOutcome, UnsupportedCause,
+    RecoveryAction, RecoveryApplyResult, RelevanceRule, RuntimeTransition, TurnOutcome,
+    UnsupportedCause,
 };
 pub use stall::{ActionFingerprint, StallKind, StallState};
+pub use stall_policy::{
+    compute_candidate_decision, legacy_decision_label, log_candidate_decision, StallPolicyMode,
+    MIXED_STALL_RECOVER_AT, MIXED_STALL_TERMINATE_AT,
+};
 pub use step::{Action, Step};
 pub use stop_reason::StopReason;

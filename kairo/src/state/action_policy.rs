@@ -177,7 +177,11 @@ fn classify_invalid(
             // in Act's schema, but a read outside the seen-files scope is
             // still rejected — as a uniform ArgumentPolicyViolation, not by
             // the tool vanishing from the schema.
-            if !act_read_scope(run).permits_path(path) {
+            // MissingEvidence may attach a one-shot evidence grant without
+            // engaging FailedPatch recovery mode (`is_active()` false).
+            if !act_read_scope(run).permits_path(path)
+                && !recovery.has_evidence_grant_for(path)
+            {
                 return Some(InvalidActionReason::ArgumentPolicyViolation);
             }
         } else if matches!(run.phase, Phase::Verify) {

@@ -23,9 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::session::task_state::TaskSessionState;
 use crate::state::agent_state::AgentState;
-use crate::state::plan::AgentPlan;
 use crate::state::recovery::RecoveryKey;
 use crate::state::stall::StallKind;
 use crate::state::stop_reason::StopReason;
@@ -66,6 +64,35 @@ pub enum UnsupportedCause {
     DuplicateEvidence,
 }
 
+/// Why an unseen path was treated as relevant for MissingEvidence.
+/// Logged on every grant so corpus runs can audit basename false-positives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelevanceRule {
+    RecoveryTarget,
+    ModifiedFile,
+    GoalFullPath,
+    GoalBasename,
+    PlanFullPath,
+    PlanBasename,
+    DecisionFullPath,
+    DecisionBasename,
+}
+
+impl RelevanceRule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RecoveryTarget => "recovery_target",
+            Self::ModifiedFile => "modified_file",
+            Self::GoalFullPath => "goal_full_path",
+            Self::GoalBasename => "goal_basename",
+            Self::PlanFullPath => "plan_full_path",
+            Self::PlanBasename => "plan_basename",
+            Self::DecisionFullPath => "decision_full_path",
+            Self::DecisionBasename => "decision_basename",
+        }
+    }
+}
+
 /// Bounded recovery recipe (final-design-plan.md §7.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryAction {
@@ -82,8 +109,11 @@ pub enum RecoveryAction {
         tool: String,
         target: Option<PathBuf>,
     },
-    /// Missing evidence for a *relevant* unseen path — guidance only (no grant).
-    MissingEvidence { path: PathBuf },
+    /// Relevant unseen path → one bounded read grant (not full patch-recovery mode).
+    MissingEvidence {
+        path: PathBuf,
+        relevance: RelevanceRule,
+    },
     /// Repeated verification → require patch/finish next (cached block already applied).
     RepeatedVerification,
 }
@@ -147,12 +177,13 @@ pub fn decide_next_state(state: &AgentState, outcome: &TurnOutcome) -> RuntimeTr
         StallKind::ScopeViolation => {
             if outcome.tool_name == "read_file" {
                 if let Some(path) = outcome.target_path.as_ref() {
-                    if !state.run_control.has_seen_file(path)
-                        && is_relevant_missing_evidence(state, path)
-                    {
-                        return RuntimeTransition::Recover(RecoveryAction::MissingEvidence {
-                            path: path.clone(),
-                        });
+                    if !state.run_control.has_seen_file(path) {
+                        if let Some(relevance) = classify_relevance(state, path) {
+                            return RuntimeTransition::Recover(RecoveryAction::MissingEvidence {
+                                path: path.clone(),
+                                relevance,
+                            });
+                        }
                     }
                 }
             }
@@ -201,7 +232,8 @@ fn apply_general_recipe(
     action: &RecoveryAction,
 ) -> RecoveryApplyResult {
     let key = recovery_key(action);
-    let mut attempt = state.recovery.note_guidance_attempt(key);
+    let key_attempt = state.recovery.note_guidance_attempt(key.clone());
+    let mut attempt = key_attempt;
 
     // Part 4: identical/coarse-repeat stalls escalate at least to tier 2.
     let exact_repeat = state.stall.is_repeat();
@@ -223,8 +255,21 @@ fn apply_general_recipe(
             cause: UnsupportedCause::DuplicateEvidence,
             ..
         } => duplicate_evidence_guidance(state, attempt),
-        RecoveryAction::MissingEvidence { path } => {
-            missing_evidence_guidance(path, attempt)
+        RecoveryAction::MissingEvidence { path, relevance } => {
+            // First *key* attempt: one bounded workspace-relative grant.
+            // Fingerprint escalation must not skip the grant.
+            let mut granted = false;
+            if key_attempt == 1 {
+                if let Some(norm) =
+                    normalize_workspace_rel_file(&state.workspace_root, path)
+                {
+                    granted = state.recovery.grant_evidence_read(&norm, key.clone());
+                    log_missing_evidence_relevance(state, &norm, *relevance, granted);
+                } else {
+                    log_missing_evidence_relevance(state, path, *relevance, false);
+                }
+            }
+            missing_evidence_guidance(path, attempt, *relevance, granted)
         }
         RecoveryAction::RepeatedVerification => repeated_verification_guidance(attempt),
         RecoveryAction::FailedPatch { .. } => unreachable!("handled above"),
@@ -276,7 +321,7 @@ fn recovery_key(action: &RecoveryAction) -> RecoveryKey {
             };
             RecoveryKey::new(reason, tool.clone(), target.clone())
         }
-        RecoveryAction::MissingEvidence { path } => {
+        RecoveryAction::MissingEvidence { path, .. } => {
             RecoveryKey::new("missing_evidence", "read_file", Some(path.clone()))
         }
         RecoveryAction::RepeatedVerification => {
@@ -286,80 +331,156 @@ fn recovery_key(action: &RecoveryAction) -> RecoveryKey {
 }
 
 /// Unseen `read_file` is MissingEvidence only with a bounded relevance signal.
-fn is_relevant_missing_evidence(state: &AgentState, path: &Path) -> bool {
-    // Active / granted failed-patch target.
+/// Returns which rule matched (for logging / corpus audit).
+fn classify_relevance(state: &AgentState, path: &Path) -> Option<RelevanceRule> {
     if state
         .recovery
         .target()
         .is_some_and(|t| path_eq(t, path))
     {
-        return true;
+        return Some(RelevanceRule::RecoveryTarget);
     }
-    // Explicitly modified this run.
     if state
         .task
         .modified_files
         .iter()
         .any(|p| path_eq(p, path))
     {
-        return true;
+        return Some(RelevanceRule::ModifiedFile);
     }
-    // Named in the goal.
-    if path_mentioned_in_text(&state.goal, path) {
-        return true;
+    if let Some(rule) = match_in_text(
+        &state.goal,
+        path,
+        RelevanceRule::GoalFullPath,
+        RelevanceRule::GoalBasename,
+    ) {
+        return Some(rule);
     }
-    // Named in the current plan.
     if let Some(plan) = state.task.plan.as_ref() {
-        if path_mentioned_in_plan(plan, path) {
-            return true;
+        if let Some(rule) = match_in_text(
+            &plan.objective,
+            path,
+            RelevanceRule::PlanFullPath,
+            RelevanceRule::PlanBasename,
+        ) {
+            return Some(rule);
+        }
+        for s in &plan.steps {
+            if let Some(rule) = match_in_text(
+                &s.text,
+                path,
+                RelevanceRule::PlanFullPath,
+                RelevanceRule::PlanBasename,
+            ) {
+                return Some(rule);
+            }
+        }
+        for c in &plan.constraints {
+            if let Some(rule) = match_in_text(
+                &c.text,
+                path,
+                RelevanceRule::PlanFullPath,
+                RelevanceRule::PlanBasename,
+            ) {
+                return Some(rule);
+            }
         }
     }
-    // Named in recent decisions / objective memory.
-    if path_mentioned_in_task(&state.task, path) {
-        return true;
-    }
-    false
-}
-
-fn path_mentioned_in_task(task: &TaskSessionState, path: &Path) -> bool {
-    if let Some(obj) = task.objective.as_deref() {
-        if path_mentioned_in_text(obj, path) {
-            return true;
+    if let Some(obj) = state.task.objective.as_deref() {
+        if let Some(rule) = match_in_text(
+            obj,
+            path,
+            RelevanceRule::DecisionFullPath,
+            RelevanceRule::DecisionBasename,
+        ) {
+            return Some(rule);
         }
     }
-    task.decisions
-        .iter()
-        .any(|d| path_mentioned_in_text(&d.text, path))
+    for d in &state.task.decisions {
+        if let Some(rule) = match_in_text(
+            &d.text,
+            path,
+            RelevanceRule::DecisionFullPath,
+            RelevanceRule::DecisionBasename,
+        ) {
+            return Some(rule);
+        }
+    }
+    None
 }
 
-fn path_mentioned_in_plan(plan: &AgentPlan, path: &Path) -> bool {
-    if path_mentioned_in_text(&plan.objective, path) {
-        return true;
-    }
-    if plan
-        .steps
-        .iter()
-        .any(|s| path_mentioned_in_text(&s.text, path))
-    {
-        return true;
-    }
-    plan.constraints
-        .iter()
-        .any(|c| path_mentioned_in_text(&c.text, path))
-}
-
-fn path_mentioned_in_text(text: &str, path: &Path) -> bool {
+fn match_in_text(
+    text: &str,
+    path: &Path,
+    full: RelevanceRule,
+    basename: RelevanceRule,
+) -> Option<RelevanceRule> {
     let display = path.to_string_lossy().replace('\\', "/");
     if !display.is_empty() && text.contains(display.as_str()) {
-        return true;
+        return Some(full);
     }
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        // Avoid matching tiny tokens like "a" / "ts".
+        // Basename ≥5 reduces `a`/`ts` noise; common names like `utils` can
+        // still false-positive — corpus logs `relevance` to measure that.
         if name.len() >= 5 && text.contains(name) {
-            return true;
+            return Some(basename);
         }
     }
-    false
+    None
+}
+
+/// Normalize to a workspace-relative path that names an existing regular file.
+/// Rejects absolute paths, `..` escapes, directories, and missing files.
+fn normalize_workspace_rel_file(workspace: &Path, path: &Path) -> Option<PathBuf> {
+    if path.is_absolute() {
+        return None;
+    }
+    let display = path.to_string_lossy().replace('\\', "/");
+    if display.split('/').any(|c| c == "..") {
+        return None;
+    }
+    let trimmed = display.trim_start_matches("./");
+    if trimmed.is_empty() {
+        return None;
+    }
+    let full = workspace.join(trimmed);
+    let meta = std::fs::symlink_metadata(&full).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    // Refuse symlink escape: canonicalize parent and ensure under workspace.
+    let canon_file = full.canonicalize().ok()?;
+    let canon_root = workspace.canonicalize().ok()?;
+    if !canon_file.starts_with(&canon_root) {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
+fn log_missing_evidence_relevance(
+    state: &AgentState,
+    path: &Path,
+    relevance: RelevanceRule,
+    granted: bool,
+) {
+    let payload = serde_json::json!({
+        "path": path.display().to_string(),
+        "relevance": relevance.as_str(),
+        "granted": granted,
+        "recovery_key": state.recovery.guidance_key().map(|k| {
+            serde_json::json!({
+                "reason": k.reason,
+                "tool": k.tool,
+                "target": k.target.as_ref().map(|p| p.display().to_string()),
+            })
+        }),
+    });
+    crate::logging::write_event(
+        &state.run_id,
+        "missing_evidence_relevance",
+        &payload.to_string(),
+        0,
+    );
 }
 
 fn path_eq(a: &Path, b: &Path) -> bool {
@@ -479,20 +600,40 @@ fn duplicate_evidence_guidance(state: &AgentState, attempt: u32) -> String {
     }
 }
 
-fn missing_evidence_guidance(path: &Path, attempt: u32) -> String {
+fn missing_evidence_guidance(
+    path: &Path,
+    attempt: u32,
+    relevance: RelevanceRule,
+    granted: bool,
+) -> String {
     let target = path.display();
+    let grant_note = if granted {
+        format!(
+            " One bounded read of `{target}` is granted for this recovery key \
+             (relevance={}).",
+            relevance.as_str()
+        )
+    } else if attempt == 1 {
+        format!(
+            " No read grant issued (path must be a regular workspace-relative file; \
+             relevance={}).",
+            relevance.as_str()
+        )
+    } else {
+        String::new()
+    };
     if attempt <= 1 {
         format!(
-            "RECOVERY (missing_evidence, attempt {attempt}): `{target}` is relevant but not in \
-             the seen-file scope for this phase. Name it in update_plan as a dependency, finish \
-             with that blocker, or patch a file already in context — unrestricted exploration \
-             will not reopen."
+            "RECOVERY (missing_evidence, attempt {attempt}): `{target}` is relevant but was \
+             outside seen-file scope.{grant_note} After the granted read (if any), prefer \
+             apply_patch, update_plan, or finish — unrestricted exploration will not reopen."
         )
     } else {
         format!(
-            "RECOVERY (missing_evidence, attempt {attempt}): Repeated request for unseen `{target}` \
-             denied. Next action MUST be apply_patch (seen file), update_plan naming `{target}`, \
-             or finish with that blocker."
+            "RECOVERY (missing_evidence, attempt {attempt}): Repeated request for `{target}` \
+             (relevance={}). Grant not refreshed. Next action MUST be apply_patch (seen file), \
+             update_plan, or finish with that blocker.",
+            relevance.as_str()
         )
     }
 }
@@ -680,6 +821,7 @@ mod tests {
             &mut r2,
             &RecoveryAction::MissingEvidence {
                 path: PathBuf::from("relevant_helper.ts"),
+                relevance: RelevanceRule::PlanBasename,
             },
         );
         assert_eq!(state.recovery.guidance_attempts(), 1);
@@ -764,6 +906,7 @@ mod tests {
             t,
             RuntimeTransition::Recover(RecoveryAction::MissingEvidence {
                 path: PathBuf::from("task_status.ts"),
+                relevance: RelevanceRule::RecoveryTarget,
             })
         );
     }

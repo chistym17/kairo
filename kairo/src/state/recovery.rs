@@ -72,6 +72,13 @@ pub struct RecoveryState {
     guidance_key: Option<RecoveryKey>,
     /// Attempts for `guidance_key` only. Reset when the key changes.
     guidance_attempts: u32,
+    /// One-shot MissingEvidence read grant — does **not** engage FailedPatch
+    /// recovery mode (`is_active()` stays false). Separate from
+    /// `remaining_reads` / `target` so Act tooling is not locked to
+    /// `PATCH_RECOVERY_TOOLS`.
+    evidence_grant_path: Option<PathBuf>,
+    evidence_grant_remaining: u32,
+    evidence_grant_key: Option<RecoveryKey>,
 }
 
 /// Identity for a bounded recovery-guidance sequence.
@@ -176,6 +183,9 @@ impl RecoveryState {
         self.consecutive_failures = 0;
         self.guidance_key = None;
         self.guidance_attempts = 0;
+        self.evidence_grant_path = None;
+        self.evidence_grant_remaining = 0;
+        self.evidence_grant_key = None;
         // denied_source_writes is a run-lifetime budget, not tied to one
         // recovery episode — leave it alone (matches prior PatchRecoveryState).
     }
@@ -200,6 +210,53 @@ impl RecoveryState {
 
     pub fn guidance_key(&self) -> Option<&RecoveryKey> {
         self.guidance_key.as_ref()
+    }
+
+    pub fn has_evidence_grant_for(&self, path: &Path) -> bool {
+        self.evidence_grant_remaining > 0
+            && self
+                .evidence_grant_path
+                .as_ref()
+                .is_some_and(|p| paths_equal(p, path))
+    }
+
+    /// Grant one bounded MissingEvidence read for a normalized workspace-relative
+    /// path. Does not engage FailedPatch mode. Same `RecoveryKey` will not
+    /// refresh an already-consumed grant (caller should escalate via guidance).
+    pub fn grant_evidence_read(&mut self, path: &Path, key: RecoveryKey) -> bool {
+        if self.evidence_grant_key.as_ref() == Some(&key)
+            && self.evidence_grant_remaining == 0
+            && self
+                .evidence_grant_path
+                .as_ref()
+                .is_some_and(|p| paths_equal(p, path))
+        {
+            // Already used for this key+path — no unlimited refresh.
+            return false;
+        }
+        self.evidence_grant_path = Some(path.to_path_buf());
+        self.evidence_grant_remaining = 1;
+        self.evidence_grant_key = Some(key);
+        true
+    }
+
+    /// Consume the MissingEvidence one-shot grant (scope allow + dup-read bypass).
+    pub fn try_consume_evidence_grant(&mut self, path: &Path) -> bool {
+        if !self.has_evidence_grant_for(path) {
+            return false;
+        }
+        self.evidence_grant_remaining = self.evidence_grant_remaining.saturating_sub(1);
+        true
+    }
+
+    /// True when either FailedPatch or MissingEvidence grants this path.
+    pub fn has_any_read_grant_for(&self, path: &Path) -> bool {
+        self.has_grant_for(path) || self.has_evidence_grant_for(path)
+    }
+
+    /// Consume FailedPatch grant first, else MissingEvidence grant.
+    pub fn try_consume_any_read_grant(&mut self, path: &Path) -> bool {
+        self.try_consume_read(path) || self.try_consume_evidence_grant(path)
     }
 
     /// After a failed `apply_patch`: activate recovery, grant one reread, and
@@ -495,5 +552,19 @@ mod tests {
         assert_eq!(s.note_guidance_attempt(a_other), 1);
         // Back to original key → new sequence (not resume).
         assert_eq!(s.note_guidance_attempt(a), 1);
+    }
+
+    #[test]
+    fn evidence_grant_is_one_shot_and_does_not_activate_failed_patch_mode() {
+        let mut s = RecoveryState::new();
+        let path = Path::new("src/helper.ts");
+        let key = RecoveryKey::new("missing_evidence", "read_file", Some(path.to_path_buf()));
+        assert!(s.grant_evidence_read(path, key.clone()));
+        assert!(!s.is_active());
+        assert!(s.has_evidence_grant_for(path));
+        assert!(s.try_consume_evidence_grant(path));
+        assert!(!s.has_evidence_grant_for(path));
+        // Same key cannot refresh after consume.
+        assert!(!s.grant_evidence_read(path, key));
     }
 }

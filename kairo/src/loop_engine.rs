@@ -14,6 +14,9 @@ use crate::state::runtime_decision::{
     TurnOutcome,
 };
 use crate::state::stall::{ActionFingerprint, StallKind};
+use crate::state::stall_policy::{
+    compute_candidate_decision, legacy_decision_label, log_candidate_decision, StallPolicyMode,
+};
 use crate::state::step::{Action, Step};
 use crate::state::stop_reason::StopReason;
 use crate::tools;
@@ -1018,7 +1021,7 @@ async fn execute_readonly_group(
                     limit,
                 } = &action
                 {
-                    if state.recovery.try_consume_read(path) {
+                    if state.recovery.try_consume_any_read_grant(path) {
                         state.read_cache.invalidate_path(path);
                         write_event(
                             &state.run_id,
@@ -1544,7 +1547,7 @@ fn read_file_cached(
     limit: u32,
 ) -> ToolResult {
     let step_index = state.step_count;
-    if state.recovery.try_consume_read(path) {
+    if state.recovery.try_consume_any_read_grant(path) {
         state.read_cache.invalidate_path(path);
         write_event(
             &state.run_id,
@@ -1841,17 +1844,19 @@ fn commit_tool_outcome(
     // Slice 4 Part 3: Layer 4 may Recover before the step is recorded so
     // guidance lands on the logged ToolResult. FailedPatch (dispatched
     // hunk-mismatch only) is applied here — not in execute_one_tool.
-    let mut transition = decide_next_state(
-        state,
-        &TurnOutcome {
-            stop_reason: result.stop_reason.clone(),
-            stall_kind,
-            dispatched,
-            tool_name: tool_name(&action).to_string(),
-            target_path: action_target_path(&action),
-        },
-    );
-    if let RuntimeTransition::Recover(recipe) = transition {
+    let turn_outcome = TurnOutcome {
+        stop_reason: result.stop_reason.clone(),
+        stall_kind,
+        dispatched,
+        tool_name: tool_name(&action).to_string(),
+        target_path: action_target_path(&action),
+    };
+    let mut recovered = false;
+    let mut transition = decide_next_state(state, &turn_outcome);
+    // Snapshot pre-apply Recover for candidate logging (Part 5A).
+    let pre_apply_transition = transition.clone();
+    if let RuntimeTransition::Recover(recipe) = pre_apply_transition.clone() {
+        recovered = true;
         let applied = apply_recovery(state, &mut result, &recipe);
         if let Some(message) = applied.phase_guidance {
             log_phase_transition(state, message);
@@ -1866,6 +1871,42 @@ fn commit_tool_outcome(
             }
             None => RuntimeTransition::Continue,
         };
+    } else {
+        transition = pre_apply_transition.clone();
+    }
+
+    // Part 5: candidate unified decision (shadow by default). Legacy counters
+    // stay authoritative; Unified may add mixed-stall terminate only.
+    let stall_policy = StallPolicyMode::from_env();
+    let candidate = compute_candidate_decision(state, &turn_outcome, &pre_apply_transition);
+    // Recompute after apply so Part 4 terminate is visible on the candidate
+    // when layer4 became Terminate.
+    let candidate = if matches!(transition, RuntimeTransition::Terminate(_)) {
+        compute_candidate_decision(state, &turn_outcome, &transition)
+    } else {
+        candidate
+    };
+    let legacy_label = legacy_decision_label(result.stop_reason.as_ref(), recovered);
+    log_candidate_decision(state, stall_policy, legacy_label, &candidate);
+
+    if stall_policy.applies_mixed_stall_terminate()
+        && candidate.decision == "terminate"
+        && candidate.reason.starts_with("mixed_stall_terminate")
+        && result.stop_reason.is_none()
+    {
+        let stop_msg = format!(
+            "Stopped: unified stall policy (KAIRO_STALL_POLICY=unified) — {}",
+            candidate.reason
+        );
+        match &mut result.error {
+            Some(e) => {
+                e.push_str("\n\n");
+                e.push_str(&stop_msg);
+            }
+            None => result.error = Some(stop_msg),
+        }
+        result.stop_reason = Some(StopReason::NoProgress);
+        transition = RuntimeTransition::Terminate(StopReason::NoProgress);
     }
 
     let legacy_stop_source = legacy_stop_source_for(
