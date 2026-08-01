@@ -566,9 +566,29 @@ fn apply_failed_patch(
     result: &mut ToolResult,
     path: &Path,
 ) -> RecoveryApplyResult {
-    let outcome = state.recovery.after_patch_failure(path, result.clone());
+    let packet = crate::state::recovery::build_grounded_patch_packet(
+        &state.workspace_root,
+        path,
+        result.error.as_deref(),
+    );
+    let outcome =
+        state
+            .recovery
+            .after_patch_failure_with_packet(path, result.clone(), packet);
     *result = outcome.result;
     write_recovery_event(state, path);
+    if state.recovery.has_grounded_packet_for(path) {
+        crate::logging::write_event(
+            &state.run_id,
+            "patch_grounded_packet",
+            &format!(
+                "{} lines={}",
+                path.display(),
+                state.recovery.grounded_lines().len()
+            ),
+            0,
+        );
+    }
     let phase_guidance = if outcome.show_phase_guidance {
         state.run_control.engage_patch_recovery_phase()
     } else {
@@ -884,6 +904,8 @@ mod tests {
 
     #[test]
     fn shape_invalid_patch_selects_invalid_arguments_not_failed_patch() {
+        // Also covers unrepairable bare `@@` hunks: the loop rejects them
+        // pre-dispatch (`dispatched=false`), so they must not burn FailedPatch.
         let state = empty_state();
         let t = decide_next_state(
             &state,

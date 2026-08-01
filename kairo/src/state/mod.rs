@@ -34,7 +34,8 @@ pub use phase::{
 pub use plan::{AgentPlan, PlanConstraint, PlanStatus, PlanStep};
 pub use progress::ProgressState;
 pub use recovery::{
-    RecoveryKey, RecoveryReason, RecoverySnapshot, RecoveryState, MAX_CONSECUTIVE_PATCH_FAILURES,
+    build_grounded_patch_packet, patch_cites_grounded_line, GroundedPatchPacket, RecoveryKey,
+    RecoveryReason, RecoverySnapshot, RecoveryState, MAX_CONSECUTIVE_PATCH_FAILURES,
     MAX_DENIED_SOURCE_WRITES,
 };
 pub use runtime_decision::{

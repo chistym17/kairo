@@ -45,6 +45,23 @@ pub fn execute(path: &Path, patch: &str, workspace_root: &Path) -> ToolResult {
         Err(e) => return ToolResult::error(format!("failed to read {}: {}", path.display(), e)),
     };
 
+    // Defense in depth: rewrite uniquely grounded bare `@@` headers before mpatch.
+    // The loop normalizes pre-dispatch so unrepairable bare hunks stay
+    // InvalidArguments (dispatched=false); this path covers direct callers/tests.
+    let owned_patch;
+    let patch = match crate::tools::patch_normalize::normalize_bare_hunks(
+        path,
+        patch,
+        workspace_root,
+    ) {
+        Ok(None) => patch,
+        Ok(Some(normalized)) => {
+            owned_patch = normalized;
+            owned_patch.as_str()
+        }
+        Err(e) => return ToolResult::error(e.user_message()),
+    };
+
     let new_content = match patch_content_str(patch, Some(&old_content), &ApplyOptions::new()) {
         Ok(c) => c,
         Err(e) => {
@@ -425,6 +442,65 @@ export const api = {\n\
     }
 
     #[test]
+    fn bare_hunk_unique_match_applies() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("serializers.py");
+        fs::write(
+            &path,
+            "\
+class TaskSerializer:
+    def get_shapes(self, obj):
+        return ShapeSerializer(obj.shapes.all(), many=True).data
+",
+        )
+        .unwrap();
+        let patch = "\
+--- serializers.py
++++ serializers.py
+@@
+     def get_shapes(self, obj):
+-        return ShapeSerializer(obj.shapes.all(), many=True).data
++        return ShapeSerializer(obj.shapes.all(), many=True, context=self.context).data
+";
+        let result = execute(Path::new("serializers.py"), patch, dir.path());
+        assert!(result.success, "{:?}", result.error);
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("context=self.context"), "{body}");
+    }
+
+    #[test]
+    fn bare_hunk_ambiguous_is_pre_mpatch_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("serializers.py");
+        fs::write(
+            &path,
+            "\
+class TaskSerializer:
+    def get_shapes(self, obj):
+        return ShapeSerializer(obj.shapes.all(), many=True).data
+
+    def get_other(self, obj):
+        return ShapeSerializer(obj.shapes.all(), many=True).data
+",
+        )
+        .unwrap();
+        let patch = "\
+--- serializers.py
++++ serializers.py
+@@
+-        return ShapeSerializer(obj.shapes.all(), many=True).data
++        return ShapeSerializer(obj.shapes.all(), many=True, context=self.context).data
+";
+        let result = execute(Path::new("serializers.py"), patch, dir.path());
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("Bare hunk header could not be normalized"), "{err}");
+        assert!(err.contains("matched"), "{err}");
+        // File untouched.
+        assert!(!fs::read_to_string(&path).unwrap().contains("context=self.context"));
+    }
+
+    #[test]
     fn context_only_hunk_is_rejected_as_noop() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("store.js");
@@ -470,4 +546,6 @@ export function updateIssue(id, patch) {
         assert!(err.contains("no content change"), "{err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), body);
     }
+
+
 }

@@ -779,7 +779,7 @@ async fn execute_one_tool(
     approval_gate: Option<&dyn ApprovalGate>,
     session: &mut Option<&mut Session>,
 ) -> Option<StopReason> {
-    let action = tool_call.action.clone();
+    let mut action = tool_call.action.clone();
     let tool_call_id = tool_call.tool_call_id.clone();
     let step_index = state.step_count;
 
@@ -841,6 +841,22 @@ async fn execute_one_tool(
             write_summary(state, &reason);
             return Some(reason);
         }
+    }
+
+    // Shape-normalize bare `@@` hunks before dispatch. Unrepairable bare
+    // hunks are InvalidArguments (dispatched=false); successful rewrite still
+    // counts as a real dispatch when mpatch runs.
+    if let Err(result) = apply_bare_hunk_normalize_gate(state, &mut action) {
+        return commit_tool_outcome(
+            state,
+            observer,
+            step_index,
+            model_turn,
+            action,
+            tool_call_id,
+            result,
+            false, // never dispatched
+        );
     }
 
     let mut result = produce_tool_result(state, &action, verified_for_finish);
@@ -2847,6 +2863,69 @@ fn goal_with_plan(state: &mut AgentState) -> String {
     out
 }
 
+/// Rewrite uniquely grounded bare `@@` headers before `mpatch` dispatch.
+/// Ambiguous / weak bare hunks reject here as InvalidArguments (`dispatched=false`).
+fn apply_bare_hunk_normalize_gate(
+    state: &AgentState,
+    action: &mut Action,
+) -> Result<(), ToolResult> {
+    let Action::ApplyPatch { path, diff } = action else {
+        return Ok(());
+    };
+    match crate::tools::patch_normalize::normalize_bare_hunks(
+        path,
+        diff,
+        &state.workspace_root,
+    ) {
+        Ok(None) => Ok(()),
+        Ok(Some(normalized)) => {
+            write_event(
+                &state.run_id,
+                "patch_hunk_normalized",
+                &format!("{} bare hunk(s) rewritten with numbered headers", path.display()),
+                0,
+            );
+            *diff = normalized;
+            Ok(())
+        }
+        Err(err) => {
+            let message = err.user_message();
+            write_event(
+                &state.run_id,
+                "patch_bare_hunk_rejected",
+                &message[..message.len().min(400)],
+                0,
+            );
+            Err(ToolResult::error(message))
+        }
+    }
+}
+
+/// Slice 5G: after a FailedPatch mismatch with a grounded excerpt, reject
+/// apply_patch retries that cite none of those exact lines (context/removal).
+fn apply_grounded_patch_gate(
+    state: &mut AgentState,
+    action: &Action,
+) -> Result<(), ToolResult> {
+    let Action::ApplyPatch { path, diff } = action else {
+        return Ok(());
+    };
+    if let Some(denied) = state.recovery.reject_ungrounded_patch(path, diff) {
+        write_event(
+            &state.run_id,
+            "patch_ungrounded_reject",
+            &format!(
+                "{} failures={}",
+                path.display(),
+                state.recovery.consecutive_failures()
+            ),
+            0,
+        );
+        return Err(denied);
+    }
+    Ok(())
+}
+
 /// Part 5B: after Act duplicate-evidence escalation, keep `read_file` in the
 /// schema but reject cached ranges (level ≥1) or the whole path (level ≥2).
 /// Skipped during FailedPatch / MissingEvidence grants.
@@ -3125,6 +3204,13 @@ fn evaluate_action(
     }
 
     if let Err(denied) = apply_act_duplicate_read_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = apply_grounded_patch_gate(state, action) {
+        if let Some(reason) = denied.stop_reason.clone() {
+            return EvaluationOutcome::RejectAndStop(denied, reason);
+        }
         return EvaluationOutcome::Reject(denied);
     }
 

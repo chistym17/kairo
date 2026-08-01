@@ -85,6 +85,11 @@ pub struct RecoveryState {
     /// `read_file`. Does **not** set [`RecoveryReason`] / `is_active()` — that
     /// remains FailedPatch-only so Act keeps apply_patch/update_plan/finish.
     duplicate_escalation: HashMap<String, u32>,
+    /// Exact file lines from the last FailedPatch mismatch (Slice 5G).
+    /// Next apply_patch on this target must cite ≥1 of these as context/removal.
+    grounded_lines: Vec<String>,
+    /// Formatted excerpt shown in recovery guidance / ungrounded rejects.
+    grounded_display: Option<String>,
 }
 
 /// Identity for a bounded recovery-guidance sequence.
@@ -193,6 +198,8 @@ impl RecoveryState {
         self.evidence_grant_remaining = 0;
         self.evidence_grant_key = None;
         self.duplicate_escalation.clear();
+        self.grounded_lines.clear();
+        self.grounded_display = None;
         // denied_source_writes is a run-lifetime budget, not tied to one
         // recovery episode — leave it alone (matches prior PatchRecoveryState).
     }
@@ -309,22 +316,26 @@ impl RecoveryState {
         self.try_consume_read(path) || self.try_consume_evidence_grant(path)
     }
 
-    /// After a failed `apply_patch`: activate recovery, grant one reread, and
-    /// maybe terminate when the same-target failure budget is exhausted.
-    pub fn after_patch_failure(&mut self, path: &Path, mut result: ToolResult) -> PatchFailureOutcome {
-        let path_buf = path.to_path_buf();
-        let show_phase_guidance = !(self.is_active()
-            && self
-                .target
-                .as_ref()
-                .is_some_and(|p| paths_equal(p, path)));
+    /// After a failed `apply_patch`: activate recovery, grant one reread, attach
+    /// a grounded nearby-lines packet, and maybe terminate when the same-target
+    /// failure budget is exhausted.
+    pub fn after_patch_failure(&mut self, path: &Path, result: ToolResult) -> PatchFailureOutcome {
+        self.after_patch_failure_with_packet(path, result, None)
+    }
 
-        if self
-            .target
-            .as_ref()
-            .is_some_and(|p| paths_equal(p, path))
-            && self.consecutive_failures > 0
-        {
+    /// Like [`after_patch_failure`], storing an optional grounded excerpt for
+    /// the next retry (Slice 5G).
+    pub fn after_patch_failure_with_packet(
+        &mut self,
+        path: &Path,
+        mut result: ToolResult,
+        packet: Option<GroundedPatchPacket>,
+    ) -> PatchFailureOutcome {
+        let path_buf = path.to_path_buf();
+        let same_target = self.target.as_ref().is_some_and(|p| paths_equal(p, path));
+        let show_phase_guidance = !(self.is_active() && same_target);
+
+        if same_target && self.consecutive_failures > 0 {
             self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         } else {
             self.consecutive_failures = 1;
@@ -334,14 +345,17 @@ impl RecoveryState {
         self.target = Some(path_buf);
         self.remaining_reads = 1;
 
-        let recovery = format!(
-            "\n\nPatch failed because the expected context did not match (or made no change).\n\
-             You may reread this file once to refresh the relevant section:\n\
-             {}\n\
-             After rereading, submit a smaller apply_patch against the current content.\n\
-             Do not rewrite the entire file with write_file.",
-            path.display()
-        );
+        if let Some(packet) = packet {
+            self.grounded_lines = packet.lines;
+            self.grounded_display = Some(packet.display);
+        } else if !(same_target && !self.grounded_lines.is_empty()) {
+            // New target / no packet: clear. Same-target retry without a fresh
+            // excerpt (e.g. ungrounded reject) keeps the prior grounded lines.
+            self.grounded_lines.clear();
+            self.grounded_display = None;
+        }
+
+        let recovery = grounded_recovery_message(path, self.grounded_display.as_deref());
         match &mut result.error {
             Some(e) => e.push_str(&recovery),
             None => result.error = Some(recovery.trim_start().to_string()),
@@ -364,6 +378,65 @@ impl RecoveryState {
             result,
             show_phase_guidance,
         }
+    }
+
+    /// True when FailedPatch is active for `path` with a non-empty grounded packet.
+    pub fn has_grounded_packet_for(&self, path: &Path) -> bool {
+        self.is_active()
+            && self.target.as_ref().is_some_and(|t| paths_equal(t, path))
+            && !self.grounded_lines.is_empty()
+    }
+
+    pub fn grounded_lines(&self) -> &[String] {
+        &self.grounded_lines
+    }
+
+    /// Pre-dispatch gate (Slice 5G): after a mismatch, the next patch on the
+    /// recovery target must cite ≥1 exact line from the grounded excerpt as
+    /// context (` `) or removal (`-`). Counts against the FailedPatch budget
+    /// here because the reject is pre-dispatch (Layer 4 would otherwise treat
+    /// it as InvalidArguments and not increment `consecutive_failures`).
+    pub fn reject_ungrounded_patch(
+        &mut self,
+        path: &Path,
+        diff: &str,
+    ) -> Option<ToolResult> {
+        if !self.has_grounded_packet_for(path) {
+            return None;
+        }
+        if patch_cites_grounded_line(diff, &self.grounded_lines) {
+            return None;
+        }
+
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.remaining_reads = self.remaining_reads.max(1);
+
+        let mut message = format!(
+            "apply_patch rejected: hunk is not grounded in the recovery excerpt for `{}`.\n\
+             Next patch MUST include at least one exact line from the excerpt below as \
+             context or a removal line (small hunk, no invented surroundings).\n",
+            path.display()
+        );
+        if let Some(display) = &self.grounded_display {
+            message.push('\n');
+            message.push_str(display);
+            message.push('\n');
+        }
+
+        let mut result = ToolResult::error(message);
+        if self.consecutive_failures >= MAX_CONSECUTIVE_PATCH_FAILURES {
+            let stop = format!(
+                "Stopped: {MAX_CONSECUTIVE_PATCH_FAILURES} consecutive apply_patch failures on {} \
+                 without a successful edit. Regenerate from a fresh read or finish with blockers.",
+                path.display()
+            );
+            if let Some(e) = &mut result.error {
+                e.push_str("\n\n");
+                e.push_str(&stop);
+            }
+            result.stop_reason = Some(StopReason::NoProgress);
+        }
+        Some(result)
     }
 
     /// Deny `write_file` when the path already exists as source code.
@@ -424,6 +497,166 @@ fn normalize(path: &Path) -> String {
         .replace('\\', "/")
         .trim_start_matches("./")
         .to_string()
+}
+
+/// Exact nearby file lines shown after a FailedPatch mismatch (Slice 5G).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroundedPatchPacket {
+    pub lines: Vec<String>,
+    pub display: String,
+}
+
+const GROUNDED_FALLBACK_LINES: usize = 24;
+
+/// Build a grounded packet from the patch-failure error (preferred) or a
+/// fresh file read fallback.
+pub fn build_grounded_patch_packet(
+    workspace_root: &Path,
+    path: &Path,
+    prior_error: Option<&str>,
+) -> Option<GroundedPatchPacket> {
+    if let Some(err) = prior_error {
+        if let Some(packet) = packet_from_error_nearby_lines(err) {
+            return Some(packet);
+        }
+    }
+    packet_from_file_fallback(workspace_root, path)
+}
+
+fn packet_from_error_nearby_lines(err: &str) -> Option<GroundedPatchPacket> {
+    let mut lines = Vec::new();
+    let mut display = String::new();
+    let mut in_nearby = false;
+    for line in err.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Actual nearby lines") {
+            in_nearby = true;
+            display.push_str(trimmed);
+            display.push('\n');
+            continue;
+        }
+        if !in_nearby {
+            continue;
+        }
+        if trimmed.is_empty()
+            || trimmed.starts_with("Regenerate")
+            || trimmed.starts_with("Expected context")
+            || trimmed.starts_with("Identifiers in the patch")
+            || trimmed.starts_with("Patch failed")
+            || trimmed.starts_with("Retry with")
+        {
+            break;
+        }
+        if let Some((num, rest)) = split_numbered_line(trimmed) {
+            let body = rest.strip_prefix(' ').unwrap_or(rest);
+            lines.push(body.to_string());
+            display.push_str(&format!("{num} | {body}\n"));
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(GroundedPatchPacket { lines, display })
+}
+
+fn split_numbered_line(line: &str) -> Option<(&str, &str)> {
+    let (num, rest) = line.split_once('|')?;
+    let num = num.trim();
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((num, rest))
+}
+
+fn packet_from_file_fallback(workspace_root: &Path, path: &Path) -> Option<GroundedPatchPacket> {
+    let content = std::fs::read_to_string(workspace_root.join(path)).ok()?;
+    let file_lines: Vec<&str> = content.lines().collect();
+    if file_lines.is_empty() {
+        return None;
+    }
+    let take = GROUNDED_FALLBACK_LINES.min(file_lines.len());
+    let mut lines = Vec::with_capacity(take);
+    let mut display = format!("Actual nearby lines 1–{take}:\n");
+    for (i, line) in file_lines.iter().take(take).enumerate() {
+        lines.push((*line).to_string());
+        display.push_str(&format!("{} | {}\n", i + 1, line));
+    }
+    Some(GroundedPatchPacket { lines, display })
+}
+
+fn grounded_recovery_message(path: &Path, display: Option<&str>) -> String {
+    let mut msg = format!(
+        "\n\nPatch failed for `{}` because the expected context did not match (or made no change).\n",
+        path.display()
+    );
+    if let Some(display) = display {
+        msg.push_str(display);
+        if !display.ends_with('\n') {
+            msg.push('\n');
+        }
+    }
+    msg.push_str(
+        "\nRetry with:\n\
+         - a small hunk;\n\
+         - exact existing context from the excerpt above;\n\
+         - no invented surrounding code.\n\
+         You may reread this file once (recovery grant), then apply_patch again.\n\
+         Next apply_patch MUST include at least one exact line from the excerpt as \
+         context or a removal. Do not use write_file to replace the whole file.",
+    );
+    msg
+}
+
+/// True when the unified diff cites ≥1 exact grounded line as context or removal.
+pub fn patch_cites_grounded_line(diff: &str, grounded: &[String]) -> bool {
+    if grounded.is_empty() {
+        return false;
+    }
+    let grounded_trimmed: Vec<&str> = grounded.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if grounded_trimmed.is_empty() {
+        return false;
+    }
+    for line in extract_patch_anchor_lines(diff) {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if grounded_trimmed.iter().any(|g| *g == t) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Context (` `) and removal (`-`) bodies from a unified diff.
+fn extract_patch_anchor_lines(patch: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if line.starts_with("---") || line.starts_with("+++") {
+            continue;
+        }
+        if !in_hunk {
+            if line.starts_with(' ') || line.starts_with('-') || line.starts_with('+') {
+                in_hunk = true;
+            } else {
+                continue;
+            }
+        }
+        if line.starts_with('+') && !line.starts_with("+++") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('-').filter(|r| !r.starts_with('-')) {
+            out.push(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix(' ') {
+            out.push(rest.to_string());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -637,5 +870,78 @@ mod tests {
         assert_eq!(s.duplicate_escalation_level(a), 0);
         assert_eq!(s.consecutive_failures(), 1);
         assert!(s.is_active());
+    }
+
+    #[test]
+    fn part5g_packet_from_error_and_grounded_retry_gate() {
+        let err = "Patch hunk did not match views.py.\n\
+                   Engine: No patches were found\n\
+                   \n\
+                   Actual nearby lines 30–33:\n\
+                   30 |     def get(self, request: Request) -> Response:\n\
+                   31 |         images = AnnotationImage.objects.filter(user=request.user).order_by(\n\
+                   32 |             \"-uploaded_at\"\n\
+                   33 |         )\n\
+                   \n\
+                   Regenerate the patch using the actual file contents.";
+        let packet = packet_from_error_nearby_lines(err).expect("packet");
+        assert!(packet.lines.iter().any(|l| l.contains("AnnotationImage.objects.filter")));
+        assert!(packet.display.contains("30 |"));
+
+        let mut s = RecoveryState::new();
+        let path = Path::new("backend/annotations/views.py");
+        let out = s.after_patch_failure_with_packet(
+            path,
+            ToolResult::error(err),
+            Some(packet),
+        );
+        assert!(out.result.error.as_deref().unwrap().contains("Retry with"));
+        assert!(out.result.error.as_deref().unwrap().contains("MUST include"));
+        assert_eq!(s.consecutive_failures(), 1);
+        assert!(s.has_grounded_packet_for(path));
+
+        // Invented surrounding / empty context — rejected and budget ++.
+        let bad = "--- a/views.py\n+++ b/views.py\n@@ -1,3 +1,3 @@\n-invented_line_not_in_excerpt()\n+prefetch_related(\"shapes\")\n";
+        let denied = s.reject_ungrounded_patch(path, bad).expect("ungrounded");
+        assert!(denied.error.as_deref().unwrap().contains("not grounded"));
+        assert_eq!(s.consecutive_failures(), 2);
+
+        // Exact line from excerpt as removal — allowed through the gate.
+        let good = "--- a/views.py\n+++ b/views.py\n@@\n-        images = AnnotationImage.objects.filter(user=request.user).order_by(\n+        images = AnnotationImage.objects.filter(user=request.user).prefetch_related(\"shapes\").order_by(\n";
+        assert!(s.reject_ungrounded_patch(path, good).is_none());
+        assert_eq!(s.consecutive_failures(), 2);
+    }
+
+    #[test]
+    fn part5g_file_fallback_packet_when_error_has_no_nearby_block() {
+        let dir = tempdir().unwrap();
+        let rel = Path::new("views.py");
+        fs::write(
+            dir.path().join(rel),
+            "line_one\nline_two\nline_three\nline_four\n",
+        )
+        .unwrap();
+        let packet = build_grounded_patch_packet(dir.path(), rel, Some("hunk mismatch only"))
+            .expect("fallback");
+        assert!(packet.lines.iter().any(|l| l == "line_one"));
+        assert!(packet.display.contains("1 | line_one"));
+    }
+
+    #[test]
+    fn part5g_third_ungrounded_reject_stops() {
+        let mut s = RecoveryState::new();
+        let path = Path::new("a.py");
+        let packet = GroundedPatchPacket {
+            lines: vec!["    x = 1".into()],
+            display: "1 |     x = 1\n".into(),
+        };
+        let _ = s.after_patch_failure_with_packet(path, ToolResult::error("fail"), Some(packet));
+        assert_eq!(s.consecutive_failures(), 1);
+        let bad = "--- a\n+++ b\n@@\n-not_the_line\n+y = 2\n";
+        assert!(s.reject_ungrounded_patch(path, bad).unwrap().stop_reason.is_none());
+        assert_eq!(s.consecutive_failures(), 2);
+        let stop = s.reject_ungrounded_patch(path, bad).unwrap();
+        assert_eq!(stop.stop_reason, Some(StopReason::NoProgress));
+        assert_eq!(s.consecutive_failures(), 3);
     }
 }
