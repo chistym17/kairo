@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::state::recovery::RecoveryState;
 use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
 use crate::tools::ToolResult;
@@ -34,8 +35,9 @@ Do not read or search further. Do not finish by asking for more tools or permiss
 
 /// Sticky reminder while Act remains open without an edit attempt.
 pub const ACT_STICKY_MESSAGE: &str = "\
-Act phase: tools are limited to update_plan, apply_patch, and finish. \
-Use the files already in context. Do not request reads or searches. \
+Act phase: tools are update_plan, apply_patch, finish, and read_file \
+(already-seen files only — re-reading them wastes a turn). \
+Do not search or request unseen files. \
 finish must name a concrete code-level blocker — never ask for tool permissions.";
 
 /// Message when a failed patch locks tools to reread → patch / finish.
@@ -89,11 +91,18 @@ pub const EXPLORE_TOOLS: &[&str] = &[
     "finish",
 ];
 
-/// Act phase: plan / patch / finish only. No reads, search, or shell.
+/// Act phase: plan / patch / finish, plus `read_file` scoped to already-seen
+/// files. No search or shell.
 ///
-/// Reads were removed after eval runs showed models thrashing on duplicate
-/// `read_file` instead of editing. Patch-recovery still grants one targeted read.
-pub const ACT_TOOLS: &[&str] = &["update_plan", "apply_patch", "finish"];
+/// `read_file` was previously removed from this list entirely after eval runs
+/// showed models thrashing on duplicate reads instead of editing. It is back
+/// in the schema (`final-design-plan.md` §5.1, §8 Slice 1): the tool no longer
+/// disappears out from under the model, but `action_policy::classify_invalid`
+/// still rejects reads of files outside `RunState.seen_files` via a bounded
+/// `ToolScope`, exactly as before minus the schema cliff. Patch-recovery
+/// separately grants one targeted read of the failed path regardless of
+/// whether it was previously seen.
+pub const ACT_TOOLS: &[&str] = &["read_file", "update_plan", "apply_patch", "finish"];
 
 /// After a failed patch: reread target → patch / finish only (slice 4).
 pub const PATCH_RECOVERY_TOOLS: &[&str] = &["read_file", "apply_patch", "finish"];
@@ -148,10 +157,6 @@ pub struct RunState {
     pub no_progress: usize,
     /// Act-mode: one justified read of an unseen file still allowed.
     pub justified_unseen_reads_left: u32,
-    /// Sticky after failed `apply_patch` until a successful mutation (slice 4).
-    pub patch_fail_recovery: bool,
-    /// Path that must be reread / re-patched while recovery is active.
-    pub patch_fail_path: Option<PathBuf>,
     /// Model turn when Finish phase began (slice 5 auto-complete).
     pub entered_finish_turn: Option<u32>,
     /// Consecutive harness denials (phase / checkpoint / duplicate / blocked).
@@ -174,8 +179,6 @@ impl RunState {
             seen_searches: HashSet::new(),
             no_progress: 0,
             justified_unseen_reads_left: 1,
-            patch_fail_recovery: false,
-            patch_fail_path: None,
             entered_finish_turn: None,
             consecutive_denials: 0,
             consecutive_invalid_actions: 0,
@@ -208,8 +211,10 @@ impl RunState {
     }
 
     /// Tool names exposed for the current phase / recovery mode.
-    pub fn effective_tools(&self) -> &'static [&'static str] {
-        if self.patch_fail_recovery {
+    ///
+    /// Recovery tool lock lives on [`RecoveryState`] (Slice 4 Part 1), not here.
+    pub fn effective_tools(&self, recovery: &RecoveryState) -> &'static [&'static str] {
+        if recovery.is_active() {
             PATCH_RECOVERY_TOOLS
         } else {
             self.phase.allowed_tools()
@@ -217,8 +222,8 @@ impl RunState {
     }
 
     /// Label for logs / deny messages (`explore` / `act` / `patch_recovery` / …).
-    pub fn tool_mode_label(&self) -> &'static str {
-        if self.patch_fail_recovery {
+    pub fn tool_mode_label(&self, recovery: &RecoveryState) -> &'static str {
+        if recovery.is_active() {
             "patch_recovery"
         } else {
             self.phase.as_str()
@@ -243,18 +248,20 @@ impl RunState {
     ///
     /// Recovery: only the failed patch path.
     /// Act / Verify: seen paths, or one justified unseen (Act only for justified).
-    pub fn allow_act_read(&mut self, path: &Path) -> Result<(), String> {
-        if self.patch_fail_recovery {
-            if self
-                .patch_fail_path
-                .as_ref()
+    pub fn allow_act_read(
+        &mut self,
+        recovery: &RecoveryState,
+        path: &Path,
+    ) -> Result<(), String> {
+        if recovery.is_active() {
+            if recovery
+                .target()
                 .is_some_and(|p| paths_equal(p, path))
             {
                 return Ok(());
             }
-            let target = self
-                .patch_fail_path
-                .as_ref()
+            let target = recovery
+                .target()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "<unknown>".to_string());
             return Err(format!(
@@ -298,15 +305,18 @@ impl RunState {
     }
 
     /// Guidance to inject into the next LLM goal (one-shot + sticky Act reminder).
-    pub fn phase_guidance_for_injection(&mut self) -> Option<String> {
+    pub fn phase_guidance_for_injection(
+        &mut self,
+        recovery: &RecoveryState,
+    ) -> Option<String> {
         if let Some(msg) = self.pending_phase_guidance.take() {
             return Some(msg);
         }
         if self.act_force_edit
             && matches!(self.phase, Phase::Act)
-            && !self.patch_fail_recovery
+            && !recovery.is_active()
         {
-            return Some(self.act_guidance_with_evidence(ACT_STICKY_MESSAGE));
+            return Some(self.act_guidance_with_evidence_and_recovery(ACT_STICKY_MESSAGE, recovery));
         }
         None
     }
@@ -331,6 +341,34 @@ impl RunState {
         out
     }
 
+    /// Sticky Act reminder including Part 5B duplicate-path restrictions.
+    pub fn act_guidance_with_evidence_and_recovery(
+        &self,
+        base: &str,
+        recovery: &RecoveryState,
+    ) -> String {
+        let mut out = self.act_guidance_with_evidence(base);
+        let blocked = recovery.duplicate_escalation_paths();
+        if blocked.is_empty() {
+            return out;
+        }
+        out.push_str("\n\nDuplicate-evidence restrictions (read_file still in schema):\n");
+        for (path, level) in blocked {
+            if level >= 2 {
+                out.push_str(&format!(
+                    "- {} — read_file DISABLED for this path\n",
+                    path.display()
+                ));
+            } else {
+                out.push_str(&format!(
+                    "- {} — duplicate/cached ranges blocked\n",
+                    path.display()
+                ));
+            }
+        }
+        out
+    }
+
     /// Clear Act "must edit" pressure after a successful workspace mutation.
     ///
     /// `update_plan` alone must not clear this — otherwise the model plans,
@@ -340,42 +378,24 @@ impl RunState {
         self.pending_phase_guidance = None;
     }
 
-    /// Lock tools to reread → patch / finish after a failed `apply_patch`.
-    ///
-    /// Returns `Some(PATCH_RECOVERY_MESSAGE)` the first time recovery engages
-    /// (or when the failed path changes).
-    pub fn enter_patch_recovery(&mut self, path: &Path) -> Option<&'static str> {
+    /// Phase-side effects when patch recovery engages: lock into Act and queue
+    /// the recovery guidance message. Recovery bookkeeping (`reason` / `target`
+    /// / failure budgets) lives on [`RecoveryState`] — call this only when
+    /// `RecoveryState::after_patch_failure` reports `show_phase_guidance`.
+    pub fn engage_patch_recovery_phase(&mut self) -> Option<&'static str> {
         let _ = self.enter_act();
-        // Recovery overrides Verify/Finish tool sets via `patch_fail_recovery`.
         if matches!(self.phase, Phase::Verify | Phase::Finish) {
             self.phase = Phase::Act;
         }
-        let same_path = self
-            .patch_fail_path
-            .as_ref()
-            .is_some_and(|p| paths_equal(p, path));
-        let already = self.patch_fail_recovery && same_path;
-        self.patch_fail_recovery = true;
-        self.patch_fail_path = Some(path.to_path_buf());
         self.entered_finish_turn = None;
         self.act_force_edit = false;
-        if already {
-            None
-        } else {
-            self.queue_phase_guidance(PATCH_RECOVERY_MESSAGE);
-            Some(PATCH_RECOVERY_MESSAGE)
-        }
-    }
-
-    /// Clear recovery after a successful mutation.
-    pub fn clear_patch_recovery(&mut self) {
-        self.patch_fail_recovery = false;
-        self.patch_fail_path = None;
+        self.queue_phase_guidance(PATCH_RECOVERY_MESSAGE);
+        Some(PATCH_RECOVERY_MESSAGE)
     }
 
     /// Enter Verify after a successful workspace mutation (slice 5).
-    pub fn enter_verify(&mut self) -> Option<&'static str> {
-        if self.patch_fail_recovery {
+    pub fn enter_verify(&mut self, recovery: &RecoveryState) -> Option<&'static str> {
+        if recovery.is_active() {
             return None;
         }
         if matches!(self.phase, Phase::Verify) {
@@ -391,10 +411,11 @@ impl RunState {
     /// Enter Finish-only tools (slice 5).
     pub fn enter_finish(
         &mut self,
+        recovery: &mut RecoveryState,
         model_turn: u32,
         verified: bool,
     ) -> Option<&'static str> {
-        self.clear_patch_recovery();
+        recovery.clear();
         let msg = if verified {
             FINISH_VERIFIED_MESSAGE
         } else {
@@ -413,20 +434,25 @@ impl RunState {
     /// React to a classified verification outcome (slice 5).
     pub fn observe_verification(
         &mut self,
+        recovery: &mut RecoveryState,
         outcome: &VerificationOutcome,
         model_turn: u32,
     ) -> Option<&'static str> {
         match outcome.status {
-            VerificationStatus::Passed => self.enter_finish(model_turn, true),
-            VerificationStatus::EnvironmentBlocked => self.enter_finish(model_turn, false),
-            VerificationStatus::Failed => {
+            VerificationStatus::Passed => self.enter_finish(recovery, model_turn, true),
+            VerificationStatus::EnvironmentBlocked | VerificationStatus::FailedUnrelated => {
+                // Non-patch failures: nudge finish unverified, do not chase baseline noise.
+                self.enter_finish(recovery, model_turn, false)
+            }
+            VerificationStatus::FailedRelevant | VerificationStatus::FailedUnknown => {
                 // Stay able to re-edit; ensure Verify tools (not Finish).
                 if matches!(self.phase, Phase::Finish | Phase::Explore) {
-                    self.enter_verify()
+                    self.enter_verify(recovery)
                 } else {
                     None
                 }
             }
+            VerificationStatus::NotAttempted => None,
         }
     }
 
@@ -444,6 +470,10 @@ impl RunState {
     ///
     /// Returns [`StopReason::NoProgress`] when consecutive harness denials hit
     /// [`NO_PROGRESS_STOP_THRESHOLD`]. Any non-denial outcome clears the streak.
+    ///
+    /// Callers may demote the returned stop for committed `DuplicateEvidence`
+    /// reads (Part 5E): the counter still increments for telemetry, but Layer 4
+    /// owns terminate for duplicate/disabled-read thrash.
     pub fn observe_denial_streak(&mut self, result: &ToolResult) -> Option<StopReason> {
         if is_denied_result(result) {
             self.consecutive_denials = self.consecutive_denials.saturating_add(1);
@@ -458,12 +488,12 @@ impl RunState {
     }
 
     /// Message appended when denial-streak stop fires.
-    pub fn no_progress_stop_message(&self) -> String {
+    pub fn no_progress_stop_message(&self, recovery: &RecoveryState) -> String {
         format!(
             "Stopped: {NO_PROGRESS_STOP_THRESHOLD} consecutive harness denials \
              (phase/checkpoint/duplicate/blocked) with no productive action. \
              Last mode: {}.",
-            self.tool_mode_label()
+            self.tool_mode_label(recovery)
         )
     }
 
@@ -733,27 +763,31 @@ mod tests {
     #[test]
     fn act_read_allows_seen_and_one_justified_unseen() {
         let mut state = RunState::new();
+        let recovery = RecoveryState::new();
         state.phase = Phase::Act;
         let known = PathBuf::from("a.rs");
         state.note_file_seen(known.clone());
-        assert!(state.allow_act_read(&known).is_ok());
+        assert!(state.allow_act_read(&recovery, &known).is_ok());
 
         let first_new = PathBuf::from("b.rs");
-        assert!(state.allow_act_read(&first_new).is_ok());
+        assert!(state.allow_act_read(&recovery, &first_new).is_ok());
         assert_eq!(state.justified_unseen_reads_left, 0);
         assert!(state.has_seen_file(&first_new));
 
         let second_new = PathBuf::from("c.rs");
-        assert!(state.allow_act_read(&second_new).is_err());
+        assert!(state.allow_act_read(&recovery, &second_new).is_err());
     }
 
     #[test]
-    fn act_tools_exclude_search_shell_and_read() {
+    fn act_tools_exclude_search_and_shell_but_allow_scoped_read() {
         assert!(!Phase::Act.allows_tool("search_code"));
         assert!(!Phase::Act.allows_tool("run_shell"));
         assert!(!Phase::Act.allows_tool("run_command"));
-        assert!(!Phase::Act.allows_tool("read_file"));
         assert!(!Phase::Act.allows_tool("locate"));
+        // read_file is visible in the schema (Slice 1) — see
+        // action_policy::classify_invalid for the seen-files scope that
+        // still rejects unseen-path reads.
+        assert!(Phase::Act.allows_tool("read_file"));
         assert!(Phase::Act.allows_tool("apply_patch"));
         assert!(Phase::Act.allows_tool("update_plan"));
         assert!(Phase::Act.allows_tool("finish"));
@@ -792,12 +826,13 @@ mod tests {
     #[test]
     fn evidence_checkpoint_fires_phase_becomes_act() {
         let mut state = RunState::new();
+        let recovery = RecoveryState::new();
         let msg = state.observe_tool_outcome(&read("fresh.rs"), &ok_result(), false, true);
         assert_eq!(msg, Some(ACT_TRANSITION_MESSAGE));
         assert_eq!(state.phase, Phase::Act);
         assert!(state.act_force_edit);
         assert!(state
-            .phase_guidance_for_injection()
+            .phase_guidance_for_injection(&recovery)
             .unwrap()
             .contains("Exploration is complete"));
     }
@@ -805,57 +840,87 @@ mod tests {
     #[test]
     fn enter_act_queues_guidance_and_forces_edit() {
         let mut state = RunState::new();
+        let recovery = RecoveryState::new();
         state.note_file_seen(PathBuf::from("Board.tsx"));
         assert!(state.enter_act());
         assert!(state.act_force_edit);
-        let g = state.phase_guidance_for_injection().unwrap();
+        let g = state.phase_guidance_for_injection(&recovery).unwrap();
         assert!(g.contains("Exploration is complete"));
         assert!(g.contains("Board.tsx"));
         // Sticky reminder on subsequent turns still lists evidence.
-        let sticky = state.phase_guidance_for_injection().unwrap();
+        let sticky = state.phase_guidance_for_injection(&recovery).unwrap();
         assert!(sticky.contains("Act phase"));
         assert!(sticky.contains("Board.tsx"));
         state.note_act_progress();
-        assert!(state.phase_guidance_for_injection().is_none());
+        assert!(state.phase_guidance_for_injection(&recovery).is_none());
+    }
+
+    #[test]
+    fn sticky_act_guidance_lists_duplicate_path_restrictions() {
+        let mut state = RunState::new();
+        let mut recovery = RecoveryState::new();
+        state.note_file_seen(PathBuf::from("Board.tsx"));
+        assert!(state.enter_act());
+        let _ = state.phase_guidance_for_injection(&recovery); // drain one-shot
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let sticky = state.phase_guidance_for_injection(&recovery).unwrap();
+        assert!(sticky.contains("Duplicate-evidence restrictions"));
+        assert!(sticky.contains("Board.tsx"));
+        assert!(sticky.contains("duplicate/cached ranges blocked"));
+        let _ = recovery.note_act_duplicate(Path::new("Board.tsx"));
+        let sticky2 = state.phase_guidance_for_injection(&recovery).unwrap();
+        assert!(sticky2.contains("DISABLED"));
     }
 
     #[test]
     fn failed_patch_enters_recovery_and_forces_act() {
         let mut state = RunState::new();
+        let mut recovery = RecoveryState::new();
         assert_eq!(state.phase, Phase::Explore);
-        let msg = state.enter_patch_recovery(Path::new("src/Board.tsx"));
+        let out = recovery.after_patch_failure(
+            Path::new("src/Board.tsx"),
+            ToolResult::error("hunk mismatch"),
+        );
+        assert!(out.show_phase_guidance);
+        let msg = state.engage_patch_recovery_phase();
         assert_eq!(msg, Some(PATCH_RECOVERY_MESSAGE));
         assert_eq!(state.phase, Phase::Act);
-        assert!(state.patch_fail_recovery);
+        assert!(recovery.is_active());
         assert_eq!(
-            state.effective_tools(),
+            state.effective_tools(&recovery),
             PATCH_RECOVERY_TOOLS
         );
-        assert!(!state.effective_tools().contains(&"update_plan"));
-        assert!(!state.effective_tools().contains(&"search_code"));
-        // Same path again: no duplicate message.
-        assert!(state
-            .enter_patch_recovery(Path::new("src/Board.tsx"))
-            .is_none());
+        assert!(!state.effective_tools(&recovery).contains(&"update_plan"));
+        assert!(!state.effective_tools(&recovery).contains(&"search_code"));
+        // Same path again: recovery stays active, no fresh phase guidance.
+        let again = recovery.after_patch_failure(
+            Path::new("src/Board.tsx"),
+            ToolResult::error("hunk mismatch 2"),
+        );
+        assert!(!again.show_phase_guidance);
     }
 
     #[test]
     fn recovery_read_allows_only_failed_path() {
         let mut state = RunState::new();
-        let _ = state.enter_patch_recovery(Path::new("a.rs"));
-        assert!(state.allow_act_read(Path::new("a.rs")).is_ok());
-        assert!(state.allow_act_read(Path::new("b.rs")).is_err());
+        let mut recovery = RecoveryState::new();
+        let _ = recovery.after_patch_failure(Path::new("a.rs"), ToolResult::error("fail"));
+        let _ = state.engage_patch_recovery_phase();
+        assert!(state.allow_act_read(&recovery, Path::new("a.rs")).is_ok());
+        assert!(state.allow_act_read(&recovery, Path::new("b.rs")).is_err());
     }
 
     #[test]
     fn successful_clear_leaves_act_without_recovery() {
         let mut state = RunState::new();
-        let _ = state.enter_patch_recovery(Path::new("a.rs"));
-        state.clear_patch_recovery();
-        assert!(!state.patch_fail_recovery);
-        assert!(state.patch_fail_path.is_none());
+        let mut recovery = RecoveryState::new();
+        let _ = recovery.after_patch_failure(Path::new("a.rs"), ToolResult::error("fail"));
+        let _ = state.engage_patch_recovery_phase();
+        recovery.note_successful_mutation();
+        assert!(!recovery.is_active());
+        assert!(recovery.target().is_none());
         assert_eq!(state.phase, Phase::Act);
-        assert_eq!(state.effective_tools(), ACT_TOOLS);
+        assert_eq!(state.effective_tools(&recovery), ACT_TOOLS);
     }
 
     fn outcome(status: VerificationStatus) -> VerificationOutcome {
@@ -865,29 +930,34 @@ mod tests {
             status,
             exit_code: Some(0),
             summary: "x".into(),
+            command: "npm test".into(),
+            scope: crate::verification::VerificationScope::ProjectUnit,
+            affected_paths: vec![],
         }
     }
 
     #[test]
     fn successful_edit_enters_verify() {
         let mut state = RunState::new();
-        let msg = state.enter_verify();
+        let recovery = RecoveryState::new();
+        let msg = state.enter_verify(&recovery);
         assert_eq!(msg, Some(VERIFY_TRANSITION_MESSAGE));
         assert_eq!(state.phase, Phase::Verify);
-        assert!(state.effective_tools().contains(&"run_shell"));
-        assert!(state.effective_tools().contains(&"apply_patch"));
-        assert!(!state.effective_tools().contains(&"search_code"));
-        assert!(!state.effective_tools().contains(&"update_plan"));
+        assert!(state.effective_tools(&recovery).contains(&"run_shell"));
+        assert!(state.effective_tools(&recovery).contains(&"apply_patch"));
+        assert!(!state.effective_tools(&recovery).contains(&"search_code"));
+        assert!(!state.effective_tools(&recovery).contains(&"update_plan"));
     }
 
     #[test]
     fn passed_verify_enters_finish_only() {
         let mut state = RunState::new();
-        let _ = state.enter_verify();
-        let msg = state.observe_verification(&outcome(VerificationStatus::Passed), 3);
+        let mut recovery = RecoveryState::new();
+        let _ = state.enter_verify(&recovery);
+        let msg = state.observe_verification(&mut recovery, &outcome(VerificationStatus::Passed), 3);
         assert_eq!(msg, Some(FINISH_VERIFIED_MESSAGE));
         assert_eq!(state.phase, Phase::Finish);
-        assert_eq!(state.effective_tools(), FINISH_TOOLS);
+        assert_eq!(state.effective_tools(&recovery), FINISH_TOOLS);
         assert_eq!(state.entered_finish_turn, Some(3));
         assert!(!state.should_auto_complete_finish(3));
         assert!(state.should_auto_complete_finish(4));
@@ -896,23 +966,29 @@ mod tests {
     #[test]
     fn env_blocked_verify_enters_finish_unverified() {
         let mut state = RunState::new();
-        let _ = state.enter_verify();
-        let msg =
-            state.observe_verification(&outcome(VerificationStatus::EnvironmentBlocked), 5);
+        let mut recovery = RecoveryState::new();
+        let _ = state.enter_verify(&recovery);
+        let msg = state.observe_verification(
+            &mut recovery,
+            &outcome(VerificationStatus::EnvironmentBlocked),
+            5,
+        );
         assert_eq!(msg, Some(FINISH_UNVERIFIED_MESSAGE));
         assert_eq!(state.phase, Phase::Finish);
-        assert_eq!(state.effective_tools(), FINISH_TOOLS);
+        assert_eq!(state.effective_tools(&recovery), FINISH_TOOLS);
     }
 
     #[test]
     fn failed_verify_stays_in_verify() {
         let mut state = RunState::new();
-        let _ = state.enter_verify();
-        let msg = state.observe_verification(&outcome(VerificationStatus::Failed), 2);
+        let mut recovery = RecoveryState::new();
+        let _ = state.enter_verify(&recovery);
+        let msg =
+            state.observe_verification(&mut recovery, &outcome(VerificationStatus::FailedUnknown), 2);
         assert!(msg.is_none());
         assert_eq!(state.phase, Phase::Verify);
-        assert!(state.effective_tools().contains(&"apply_patch"));
-        assert!(state.effective_tools().contains(&"run_shell"));
+        assert!(state.effective_tools(&recovery).contains(&"apply_patch"));
+        assert!(state.effective_tools(&recovery).contains(&"run_shell"));
     }
 
     fn denied_result(msg: &str) -> ToolResult {
@@ -955,6 +1031,23 @@ mod tests {
         assert_eq!(state.consecutive_denials, 3);
         assert!(state.observe_denial_streak(&ok_result()).is_none());
         assert_eq!(state.consecutive_denials, 0);
+    }
+
+    #[test]
+    fn part5e_duplicate_denials_still_count_for_telemetry() {
+        // Demotion of the stop is at the commit_tool_outcome call site;
+        // observe_denial_streak itself still increments and would return stop.
+        let mut state = RunState::new();
+        let denied = denied_result("Duplicate read denied: Exact content already available");
+        for i in 1..NO_PROGRESS_STOP_THRESHOLD {
+            assert!(state.observe_denial_streak(&denied).is_none());
+            assert_eq!(state.consecutive_denials, i);
+        }
+        assert_eq!(
+            state.observe_denial_streak(&denied),
+            Some(StopReason::NoProgress)
+        );
+        assert_eq!(state.consecutive_denials, NO_PROGRESS_STOP_THRESHOLD);
     }
 
     #[test]

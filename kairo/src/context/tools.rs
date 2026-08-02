@@ -81,19 +81,22 @@ mod tests {
     }
 
     #[test]
-    fn act_mode_request_excludes_search_shell_and_read() {
+    fn act_mode_request_excludes_search_and_shell_but_includes_scoped_read() {
         let tools = tools_for_phase(Phase::Act);
         let names = tool_names(&tools);
+        // read_file stays in the schema (Slice 1, final-design-plan.md §5.1):
+        // the runtime scopes which paths it may target rather than removing
+        // the tool itself. See action_policy::classify_invalid for that gate.
         assert_eq!(
             names,
             vec![
                 "apply_patch".to_string(),
                 "finish".to_string(),
+                "read_file".to_string(),
                 "update_plan".to_string(),
             ]
         );
         for banned in [
-            "read_file",
             "search_code",
             "find_files",
             "locate",
@@ -121,9 +124,14 @@ mod tests {
 
     #[test]
     fn patch_recovery_request_excludes_plan_search_and_shell() {
+        use crate::state::recovery::RecoveryState;
+        use crate::tools::ToolResult;
+
         let mut run = RunState::new();
-        let _ = run.enter_patch_recovery(Path::new("x.rs"));
-        let names = tool_names(&tools_for_allowed(run.effective_tools()));
+        let mut recovery = RecoveryState::new();
+        let _ = recovery.after_patch_failure(Path::new("x.rs"), ToolResult::error("fail"));
+        let _ = run.engage_patch_recovery_phase();
+        let names = tool_names(&tools_for_allowed(run.effective_tools(&recovery)));
         assert_eq!(
             names,
             vec![
@@ -132,7 +140,7 @@ mod tests {
                 "read_file".to_string(),
             ]
         );
-        assert_eq!(run.effective_tools(), PATCH_RECOVERY_TOOLS);
+        assert_eq!(run.effective_tools(&recovery), PATCH_RECOVERY_TOOLS);
         assert!(!names.iter().any(|n| n == "update_plan"));
         assert!(!names.iter().any(|n| n == "search_code"));
         assert!(!names.iter().any(|n| n == "run_shell"));
