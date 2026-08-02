@@ -39,6 +39,5 @@ problems.txt
 cargo publish -p kairo
 cargo install kairo --force
 design-report.md
+docs/final-design-plan.md
 
-
-Introduces the state-driven Kairo runtime: centralized action evaluation, scoped capabilities, Layer 4 recovery, bounded stall handling, focused verification assessment, safer patch normalization, and deterministic Finish behavior.
