@@ -86,9 +86,27 @@ fn verification_lines(c: &CompletionTracker) -> (String, String) {
                 ),
                 outcome.summary.clone(),
             ),
-            VerificationStatus::Failed => (
+            VerificationStatus::FailedUnrelated => (
+                format!(
+                    "{} failed_unrelated ({:?}{exit}) — edited file not implicated",
+                    outcome.check_id, outcome.kind
+                ),
+                outcome.summary.clone(),
+            ),
+            VerificationStatus::FailedRelevant => (
+                format!(
+                    "{} failed_relevant ({:?}{exit})",
+                    outcome.check_id, outcome.kind
+                ),
+                outcome.summary.clone(),
+            ),
+            VerificationStatus::FailedUnknown => (
                 format!("{} failed ({:?}{exit})", outcome.check_id, outcome.kind),
                 outcome.summary.clone(),
+            ),
+            VerificationStatus::NotAttempted => (
+                format!("{} not_attempted", outcome.check_id),
+                "none".into(),
             ),
         }
     } else {

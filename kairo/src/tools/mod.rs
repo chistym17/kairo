@@ -5,6 +5,7 @@ use crate::state::step::Action;
 use crate::state::stop_reason::StopReason;
 
 pub mod apply_patch;
+pub mod patch_normalize;
 pub mod diff;
 pub mod find_files;
 pub mod git_diff;

@@ -1,8 +1,9 @@
 pub mod log_entry;
 
 pub use log_entry::{
-    logs_dir, run_log_path, set_logs_dir_override, write_entry, write_event, write_run_summary,
-    LogEntry,
+    begin_run_log, emit_thinking_state, logs_dir, next_run_sequence, run_log_path,
+    set_logs_dir_override, write_entry, write_event, write_run_summary,
+    write_run_summary_with_assessment, LogEntry,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};

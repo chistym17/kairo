@@ -1,13 +1,25 @@
 use crate::authorization::{
     apply_decision, authorize, build_approval_request, tool_effect, ApprovalDecision,
-    ApprovalGate, AuthorizationDecision,
+    ApprovalGate, AuthorizationDecision, EditPolicy,
 };
 use crate::context::{ContextBuilder, ContextManager};
 use crate::governance::{classify_progress, GovernanceDecision};
 use crate::llm::{render_call_line, LlmClient, LlmError, LlmToolCall, ModelUsage};
-use crate::logging::{write_entry, write_event, write_run_summary, LogEntry};
+use crate::logging::{
+    begin_run_log, emit_thinking_state, write_entry, write_event, write_run_summary_with_assessment,
+    LogEntry,
+};
 use crate::session::Session;
 use crate::state::agent_state::AgentState;
+use crate::state::progress::ProgressKind;
+use crate::state::runtime_decision::{
+    apply_recovery, decide_next_state, stop_reason_from_transition, NoToolCallCause,
+    RecoveryAction, RuntimeTransition, TurnOutcome,
+};
+use crate::state::stall::{ActionFingerprint, StallKind};
+use crate::state::stall_policy::{
+    compute_candidate_decision, legacy_decision_label, log_candidate_decision, StallPolicyMode,
+};
 use crate::state::step::{Action, Step};
 use crate::state::stop_reason::StopReason;
 use crate::tools;
@@ -76,14 +88,16 @@ pub async fn run(
         0,
     );
 
+    let log_path = begin_run_log(&state.run_id);
     crate::agent_println!(
-        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n[agent] turn_intent: {} (metadata)\n",
+        "\n[agent] starting run {}\n[agent] goal: {}\n[agent] model: {}\n[agent] max_steps: {}\n[agent] edit_policy: {:?}\n[agent] turn_intent: {} (metadata)\n[agent] log_file: {}\n",
         state.run_id,
         state.goal,
         state.model_id,
         state.max_steps,
         state.authorization.edit_policy,
-        state.turn_intent.as_str()
+        state.turn_intent.as_str(),
+        log_path.display()
     );
     if step_delay_ms > 0 {
         crate::agent_println!("[agent] step_delay: {}ms (opt-in pacing)", step_delay_ms);
@@ -195,13 +209,13 @@ pub async fn run(
                     &session_messages_snapshot,
                     &state.history,
                     tool_policy.as_ref(),
-                    state.run_control.effective_tools(),
+                    state.run_control.effective_tools(&state.recovery),
                 );
             request.prefer_required_tool_choice = state.run_control.require_tool_choice;
             crate::agent_println!(
                 "[phase={}] exposed_tools=[{}]",
-                state.run_control.tool_mode_label(),
-                state.run_control.effective_tools().join(", ")
+                state.run_control.tool_mode_label(&state.recovery),
+                state.run_control.effective_tools(&state.recovery).join(", ")
             );
 
             write_event(&state.run_id, "context_stats", &bounded_stats.to_json_string(), 0);
@@ -309,7 +323,6 @@ pub async fn run(
                                  returned text {n}× instead of finish"
                             );
                             let reason = StopReason::TaskComplete;
-                            // Surface the essay as the run's closing summary in the log.
                             write_event(
                                 &state.run_id,
                                 "finish_summary",
@@ -335,6 +348,64 @@ pub async fn run(
                         );
                         continue;
                     }
+
+                    // Part 5D: Agent incomplete work → Layer 4 NonResolving recovery.
+                    // Ask / ReadOnly and other exempt modes keep the legacy soft path.
+                    if should_bound_no_tool_call(state) {
+                        let cause = NoToolCallCause::from_response_text(&text);
+                        if let Some(reason) = commit_no_tool_call(
+                            state,
+                            observer,
+                            state.model_turns,
+                            &text,
+                            cause,
+                        ) {
+                            return reason;
+                        }
+                        emit(
+                            observer,
+                            AgentEvent::Error {
+                                run_id: state.run_id.clone(),
+                                step_index: Some(state.step_count),
+                                message: "model returned text instead of tool call".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
+                    // Legacy soft path (Ask / ReadOnly): shadow stall only.
+                    let stalls_before = state.stall.consecutive_stalls;
+                    state.stall.observe_fingerprint(
+                        ActionFingerprint::text_only(&text),
+                        Some(StallKind::NonResolvingResponse),
+                    );
+                    log_stall_shadow(
+                        state,
+                        Some(StallKind::NonResolvingResponse),
+                        None,
+                        stalls_before,
+                        None,
+                    );
+                    emit_thinking_state(
+                        &state.run_id,
+                        state.step_count,
+                        state.model_turns,
+                        "(text_only)",
+                        &json!({
+                            "transition": "continue",
+                            "transition_detail": "text_only_no_tool_call_unbounded",
+                            "phase": state.run_control.phase.as_str(),
+                            "consecutive_stalls": state.stall.consecutive_stalls,
+                            "stall_kind": "NonResolvingResponse",
+                            "recovery_active": state.recovery.is_active(),
+                            "legacy_decision": "continue",
+                            "candidate_decision": "recover",
+                            "candidate_reason": "text_only_non_resolving",
+                            "exact_repeat": state.stall.is_repeat(),
+                            "coarse_repeat": state.stall.coarse_is_repeat(),
+                            "ping_pong": state.stall.is_ping_pong(),
+                        }),
+                    );
 
                     if state.governance.semantic_policy
                         && state.governance.consecutive_no_tool_turns
@@ -369,6 +440,7 @@ pub async fn run(
                     crate::agent_println!("[agent] malformed tool call: {}", msg);
                     write_event(&state.run_id, "malformed_tool_call", &msg, 0);
                     state.model_turns += 1;
+                    state.run_control.require_tool_choice = true;
                     emit(
                         observer,
                         AgentEvent::Error {
@@ -377,6 +449,14 @@ pub async fn run(
                             message: format!("malformed tool call: {}", msg),
                         },
                     );
+                    // Part 5C Part 4: commit a synthetic InvalidArguments
+                    // outcome so Layer 4 recovery + fingerprints bound the
+                    // retry loop (logs 8/9: 51× malformed update_plan).
+                    if let Some(reason) =
+                        commit_malformed_tool_call(state, observer, state.model_turns, &msg)
+                    {
+                        return reason;
+                    }
                     continue;
                 }
 
@@ -448,13 +528,13 @@ pub async fn run(
                                 &session_messages_snapshot,
                                 &state.history,
                                 tool_policy.as_ref(),
-                                state.run_control.effective_tools(),
+                                state.run_control.effective_tools(&state.recovery),
                             );
                         request.prefer_required_tool_choice = state.run_control.require_tool_choice;
                         crate::agent_println!(
                             "[phase={}] exposed_tools=[{}]",
-                            state.run_control.tool_mode_label(),
-                            state.run_control.effective_tools().join(", ")
+                            state.run_control.tool_mode_label(&state.recovery),
+                            state.run_control.effective_tools(&state.recovery).join(", ")
                         );
 
                         write_event(
@@ -699,7 +779,7 @@ async fn execute_one_tool(
     approval_gate: Option<&dyn ApprovalGate>,
     session: &mut Option<&mut Session>,
 ) -> Option<StopReason> {
-    let action = tool_call.action.clone();
+    let mut action = tool_call.action.clone();
     let tool_call_id = tool_call.tool_call_id.clone();
     let step_index = state.step_count;
 
@@ -721,9 +801,17 @@ async fn execute_one_tool(
 
     let verified_for_finish = finish_allowed(&state.history) || *verified_in_batch;
 
-    match apply_governance_preflight(state, &action, model_turn) {
-        GovernancePreflightOutcome::Proceed => {}
-        GovernancePreflightOutcome::Rejected(result) => {
+    match evaluate_action(
+        state,
+        &action,
+        model_turn,
+        require_verified_finish,
+        verified_for_finish,
+        approval_gate,
+        session,
+    ) {
+        EvaluationOutcome::Proceed => {}
+        EvaluationOutcome::Reject(result) => {
             return commit_tool_outcome(
                 state,
                 observer,
@@ -732,115 +820,46 @@ async fn execute_one_tool(
                 action,
                 tool_call_id,
                 result,
+                false, // never dispatched
             );
         }
-        GovernancePreflightOutcome::Terminate(reason) => {
-            write_summary(state, &reason);
-            return Some(reason);
-        }
-    }
-
-    if let Err(outcome) = apply_action_policy_gate(state, &action) {
-        match outcome {
-            ActionPolicyGateError::Denied(denied) => {
-                return commit_tool_outcome(
-                    state,
-                    observer,
-                    step_index,
-                    model_turn,
-                    action,
-                    tool_call_id,
-                    denied,
-                );
-            }
-            ActionPolicyGateError::Stop { reason, message } => {
-                write_event(
-                    &state.run_id,
-                    "invalid_action_stop",
-                    &message[..message.len().min(400)],
-                    0,
-                );
-                let _ = commit_tool_outcome(
-                    state,
-                    observer,
-                    step_index,
-                    model_turn,
-                    action,
-                    tool_call_id,
-                    ToolResult::error(message),
-                );
-                write_summary(state, &reason);
-                return Some(reason);
-            }
-        }
-    }
-
-    if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
-        return commit_tool_outcome(
-            state,
-            observer,
-            step_index,
-            model_turn,
-            action,
-            tool_call_id,
-            denied,
-        );
-    }
-
-    if let Err(denied) = apply_shell_mutation_gate(state, &action) {
-        return commit_tool_outcome(
-            state,
-            observer,
-            step_index,
-            model_turn,
-            action,
-            tool_call_id,
-            denied,
-        );
-    }
-
-    if let Err(denied) = resolve_tool_authorization(state, &action, approval_gate, session) {
-        return commit_tool_outcome(
-            state,
-            observer,
-            step_index,
-            model_turn,
-            action,
-            tool_call_id,
-            denied,
-        );
-    }
-
-    // Existing source files must use apply_patch — write_file rewrites break APIs.
-    if let Action::WriteFile { path, .. } = &action {
-        if let Some(denied) = state
-            .patch_recovery
-            .deny_write_existing_source(&state.workspace_root, path)
-        {
-            write_event(
-                &state.run_id,
-                "write_file_denied_existing_source",
-                &format!("{}", path.display()),
-                0,
-            );
-            return commit_tool_outcome(
+        EvaluationOutcome::RejectAndStop(result, reason) => {
+            let _ = commit_tool_outcome(
                 state,
                 observer,
                 step_index,
                 model_turn,
                 action,
                 tool_call_id,
-                denied,
+                result,
+                false, // never dispatched
             );
+            write_summary(state, &reason);
+            return Some(reason);
+        }
+        EvaluationOutcome::StopWithoutResult(reason) => {
+            write_summary(state, &reason);
+            return Some(reason);
         }
     }
 
-    let mut result = produce_tool_result(
-        state,
-        &action,
-        require_verified_finish,
-        verified_for_finish,
-    );
+    // Shape-normalize bare `@@` hunks before dispatch. Unrepairable bare
+    // hunks are InvalidArguments (dispatched=false); successful rewrite still
+    // counts as a real dispatch when mpatch runs.
+    if let Err(result) = apply_bare_hunk_normalize_gate(state, &mut action) {
+        return commit_tool_outcome(
+            state,
+            observer,
+            step_index,
+            model_turn,
+            action,
+            tool_call_id,
+            result,
+            false, // never dispatched
+        );
+    }
+
+    let mut result = produce_tool_result(state, &action, verified_for_finish);
 
     if result.success {
         if let Some(path) = mutating_path(&action) {
@@ -852,35 +871,27 @@ async fn execute_one_tool(
         }
     }
 
-    if let Action::ApplyPatch { path, .. } = &action {
+    // Failed apply_patch recovery (reread grant + failure budget) is applied in
+    // `commit_tool_outcome` via Layer 4 `Recover(FailedPatch)` — Finding 4:
+    // shape-invalid / pre-dispatch patch failures must not enter that recipe.
+    if let Action::ApplyPatch { .. } = &action {
         if result.success {
-            state.patch_recovery.note_successful_mutation();
-            state.run_control.clear_patch_recovery();
+            state.recovery.note_successful_mutation();
             state.run_control.note_act_progress();
-            if let Some(message) = state.run_control.enter_verify() {
-                log_phase_transition(state, message);
-            }
-        } else {
-            result = state.patch_recovery.after_patch_failure(path, result);
-            write_event(
-                &state.run_id,
-                "patch_recovery_granted",
-                &format!("{} (1 reread)", path.display()),
-                0,
-            );
-            if let Some(message) = state.run_control.enter_patch_recovery(path) {
+            if let Some(message) = state.run_control.enter_verify(&state.recovery) {
                 log_phase_transition(state, message);
             }
         }
     } else if result.success && matches!(action, Action::WriteFile { .. }) {
-        state.patch_recovery.note_successful_mutation();
-        state.run_control.clear_patch_recovery();
+        state.recovery.note_successful_mutation();
         state.run_control.note_act_progress();
-        if let Some(message) = state.run_control.enter_verify() {
+        if let Some(message) = state.run_control.enter_verify(&state.recovery) {
             log_phase_transition(state, message);
         }
     } else if result.success && matches!(action, Action::UpdatePlan { .. }) {
-        // Keep act_force_edit sticky — planning is not progress toward an edit.
+        // Planning is not Act edit progress, but it does clear duplicate-read
+        // path restrictions so the model can act on an updated plan.
+        state.recovery.clear_duplicate_escalation();
     } else if result.success && matches!(action, Action::Finish { .. }) {
         state.run_control.note_act_progress();
     }
@@ -916,6 +927,7 @@ async fn execute_one_tool(
         action,
         tool_call_id,
         result,
+        true, // passed evaluate → dispatched (or cache-served after evaluate)
     );
     // Persist task memory (plan / files / verification / decisions) when a session is attached.
     sync_task_to_session(state, session);
@@ -991,7 +1003,6 @@ async fn execute_readonly_group(
     // Emit start events + validate; collect spawn jobs for valid tools.
     enum PreparedOutcome {
         Early(ToolResult),
-        Invalid(ValidationError),
         Execute,
     }
 
@@ -1032,65 +1043,26 @@ async fn execute_readonly_group(
             },
         );
 
-        match apply_governance_preflight(state, &action, model_turn) {
-            GovernancePreflightOutcome::Proceed => {}
-            GovernancePreflightOutcome::Rejected(result) => {
+        // Finish never appears in a read-only batch (`is_parallel_readonly`),
+        // so the finish-verification args are always irrelevant here.
+        match evaluate_action(state, &action, model_turn, false, false, approval_gate, session) {
+            EvaluationOutcome::Proceed => {}
+            EvaluationOutcome::Reject(result) => {
                 prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(result)));
                 continue;
             }
-            GovernancePreflightOutcome::Terminate(reason) => {
+            EvaluationOutcome::RejectAndStop(result, reason) => {
+                prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(result)));
+                pending_invalid_stop = Some(reason);
+                continue;
+            }
+            EvaluationOutcome::StopWithoutResult(reason) => {
                 write_summary(state, &reason);
                 return Some(reason);
             }
         }
 
-        match apply_action_policy_gate(state, &action) {
-            Ok(()) => {}
-            Err(ActionPolicyGateError::Denied(denied)) => {
-                prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
-                continue;
-            }
-            Err(ActionPolicyGateError::Stop { reason, message }) => {
-                write_event(
-                    &state.run_id,
-                    "invalid_action_stop",
-                    &message[..message.len().min(400)],
-                    0,
-                );
-                prepared.push((
-                    step_index,
-                    action,
-                    tool_call_id,
-                    PreparedOutcome::Early(ToolResult::error(message)),
-                ));
-                pending_invalid_stop = Some(reason);
-                continue;
-            }
-        }
-
-        if let Err(denied) = apply_evidence_checkpoint_gate(state, &action) {
-            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
-            continue;
-        }
-
-        if let Err(denied) = apply_shell_mutation_gate(state, &action) {
-            prepared.push((step_index, action, tool_call_id, PreparedOutcome::Early(denied)));
-            continue;
-        }
-
-        let validation = validate_action(&action, false, false);
-        if let Some(err) = &validation {
-            write_event(&state.run_id, &err.event, &err.message, 0);
-        }
-        prepared.push((
-            step_index,
-            action,
-            tool_call_id,
-            match validation {
-                Some(e) => PreparedOutcome::Invalid(e),
-                None => PreparedOutcome::Execute,
-            },
-        ));
+        prepared.push((step_index, action, tool_call_id, PreparedOutcome::Execute));
     }
 
     // Spawn blocking work for tools that passed validation.
@@ -1099,22 +1071,15 @@ async fn execute_readonly_group(
     for (i, (step_index, action, tool_call_id, outcome)) in prepared.into_iter().enumerate() {
         match outcome {
             PreparedOutcome::Early(result) => {
-                handles.push((i, step_index, action, tool_call_id, Some(result), None, false));
-            }
-            PreparedOutcome::Invalid(e) => {
+                // Evaluate reject — never dispatched.
                 handles.push((
                     i,
                     step_index,
                     action,
                     tool_call_id,
-                    Some(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        diff: None,
-                        error: Some(e.message),
-                        stop_reason: None,
-                    }),
+                    Some(result),
                     None,
+                    false,
                     false,
                 ));
             }
@@ -1125,7 +1090,7 @@ async fn execute_readonly_group(
                     limit,
                 } = &action
                 {
-                    if state.patch_recovery.try_consume_read(path) {
+                    if state.recovery.try_consume_any_read_grant(path) {
                         state.read_cache.invalidate_path(path);
                         write_event(
                             &state.run_id,
@@ -1155,6 +1120,7 @@ async fn execute_readonly_group(
                                 Some(hit),
                                 None,
                                 true,
+                                true, // evaluate passed; cache is a post-dispatch outcome
                             ));
                             continue;
                         }
@@ -1200,6 +1166,7 @@ async fn execute_readonly_group(
                                 None,
                                 Some(handle),
                                 false,
+                                true,
                             ));
                             continue;
                         }
@@ -1216,6 +1183,7 @@ async fn execute_readonly_group(
                         Some(result),
                         None,
                         false,
+                        true,
                     ));
                     continue;
                 }
@@ -1224,14 +1192,23 @@ async fn execute_readonly_group(
                 let action_for_job = action.clone();
                 let handle =
                     tokio::task::spawn_blocking(move || tools::dispatch(&action_for_job, &root));
-                handles.push((i, step_index, action, tool_call_id, None, Some(handle), false));
+                handles.push((
+                    i,
+                    step_index,
+                    action,
+                    tool_call_id,
+                    None,
+                    Some(handle),
+                    false,
+                    true,
+                ));
             }
         }
     }
 
     // Await in original order.
     let mut outcomes = Vec::with_capacity(handles.len());
-    for (_i, step_index, action, tool_call_id, early, handle, from_cache) in handles {
+    for (_i, step_index, action, tool_call_id, early, handle, from_cache, dispatched) in handles {
         let result = if let Some(r) = early {
             r
         } else if let Some(h) = handle {
@@ -1242,10 +1219,10 @@ async fn execute_readonly_group(
         } else {
             ToolResult::error("internal error: missing parallel tool result")
         };
-        outcomes.push((step_index, action, tool_call_id, result, from_cache));
+        outcomes.push((step_index, action, tool_call_id, result, from_cache, dispatched));
     }
 
-    for (step_index, action, tool_call_id, result, from_cache) in outcomes {
+    for (step_index, action, tool_call_id, result, from_cache, dispatched) in outcomes {
         if result.success
             && matches!(action, Action::DetectProjectSnapshot { .. })
         {
@@ -1279,6 +1256,7 @@ async fn execute_readonly_group(
             action,
             tool_call_id,
             result,
+            dispatched,
         ) {
             return Some(reason);
         }
@@ -1292,120 +1270,111 @@ async fn execute_readonly_group(
     None
 }
 
+/// Dispatches an already-validated action. Callers must have already run
+/// `evaluate_action` and only invoke this on `EvaluationOutcome::Proceed` —
+/// shape, scope, authorization, and existing-source checks all happen there,
+/// not here.
 fn produce_tool_result(
     state: &mut AgentState,
     action: &Action,
-    require_verified_finish: bool,
     verified_for_finish: bool,
 ) -> ToolResult {
-    match validate_action(action, require_verified_finish, verified_for_finish) {
-        Some(ValidationError { event, message }) => {
-            write_event(&state.run_id, &event, &message, 0);
-            ToolResult {
-                success: false,
-                output: String::new(),
-                diff: None,
-                error: Some(message),
-                stop_reason: None,
+    match action {
+        Action::UpdatePlan { objective, steps } => {
+            let updated = if let Some(existing) = state.task.plan.as_mut() {
+                existing.amend_from_update(objective, steps).map(|_| ())
+            } else {
+                crate::state::AgentPlan::from_update(objective, steps).map(|plan| {
+                    state.task.plan = Some(plan);
+                })
+            };
+            match updated {
+                Ok(()) => {
+                    let output = format!(
+                        "Plan updated:\n{}",
+                        state
+                            .task
+                            .plan
+                            .as_ref()
+                            .expect("plan present after update")
+                            .render()
+                    );
+                    state.task.set_objective_if_empty(objective);
+                    state.governance.pre_edit.observe_plan(steps);
+                    ToolResult {
+                        success: true,
+                        output,
+                        diff: None,
+                        error: None,
+                        stop_reason: None,
+                    }
+                }
+                Err(message) => {
+                    write_event(&state.run_id, "invalid_tool_args", &message, 0);
+                    ToolResult {
+                        success: false,
+                        output: String::new(),
+                        diff: None,
+                        error: Some(message),
+                        stop_reason: None,
+                    }
+                }
             }
         }
-        None => match action {
-            Action::UpdatePlan { objective, steps } => {
-                let updated = if let Some(existing) = state.task.plan.as_mut() {
-                    existing.amend_from_update(objective, steps).map(|_| ())
-                } else {
-                    crate::state::AgentPlan::from_update(objective, steps).map(|plan| {
-                        state.task.plan = Some(plan);
-                    })
-                };
-                match updated {
-                    Ok(()) => {
-                        let output = format!(
-                            "Plan updated:\n{}",
-                            state
-                                .task
-                                .plan
-                                .as_ref()
-                                .expect("plan present after update")
-                                .render()
-                        );
-                        state.task.set_objective_if_empty(objective);
-                        state.governance.pre_edit.observe_plan(steps);
-                        ToolResult {
-                            success: true,
-                            output,
-                            diff: None,
-                            error: None,
-                            stop_reason: None,
-                        }
-                    }
-                    Err(message) => {
-                        write_event(&state.run_id, "invalid_tool_args", &message, 0);
-                        ToolResult {
-                            success: false,
-                            output: String::new(),
-                            diff: None,
-                            error: Some(message),
-                            stop_reason: None,
-                        }
-                    }
-                }
+        Action::DetectProjectSnapshot { path } => {
+            let result = tools::project_snapshot::execute(path, &state.workspace_root);
+            if result.success {
+                state.project_snapshot =
+                    Some(tools::project_snapshot::detect(&state.workspace_root));
             }
-            Action::DetectProjectSnapshot { path } => {
-                let result = tools::project_snapshot::execute(path, &state.workspace_root);
-                if result.success {
-                    state.project_snapshot =
-                        Some(tools::project_snapshot::detect(&state.workspace_root));
-                }
-                result
+            result
+        }
+        Action::Locate { query, path } => locate_with_state(state, query, path),
+        Action::SummarizeRepo { depth, path, focus } => {
+            summarize_repo_with_state(state, depth, path, focus.as_deref())
+        }
+        Action::Finish { summary } => {
+            let grounded = crate::state::ground_finish_summary(state, summary);
+            let stop_reason = if verified_for_finish {
+                StopReason::TaskComplete
+            } else {
+                StopReason::CompletedUnverified
+            };
+            ToolResult {
+                success: true,
+                output: grounded,
+                diff: None,
+                error: None,
+                stop_reason: Some(stop_reason),
             }
-            Action::Locate { query, path } => locate_with_state(state, query, path),
-            Action::SummarizeRepo { depth, path, focus } => {
-                summarize_repo_with_state(state, depth, path, focus.as_deref())
-            }
-            Action::Finish { summary } => {
-                let grounded = crate::state::ground_finish_summary(state, summary);
-                let stop_reason = if verified_for_finish {
-                    StopReason::TaskComplete
-                } else {
-                    StopReason::CompletedUnverified
-                };
-                ToolResult {
-                    success: true,
-                    output: grounded,
-                    diff: None,
-                    error: None,
-                    stop_reason: Some(stop_reason),
-                }
-            }
-            Action::ReadFile {
-                path,
-                offset,
-                limit,
-            } => read_file_cached(state, path, *offset, *limit),
-            Action::GitDiff { path } => {
-                let ctx = tools::git_diff::GitDiffContext {
-                    files_ever_modified: state
-                        .governance
-                        .files_ever_modified
-                        .iter()
-                        .cloned()
-                        .collect(),
-                };
-                tools::git_diff::execute(path, &state.workspace_root, Some(&ctx))
-            }
-            Action::RunShell {
-                command,
-                cwd,
-                timeout_secs,
-            } => run_shell_deduped(state, command, cwd, *timeout_secs),
-            Action::RunCommand {
-                cmd,
-                cwd,
-                timeout_secs,
-            } => run_command_deduped(state, cmd, cwd, *timeout_secs),
-            _ => tools::dispatch(action, &state.workspace_root),
-        },
+        }
+        Action::ReadFile {
+            path,
+            offset,
+            limit,
+        } => read_file_cached(state, path, *offset, *limit),
+        Action::GitDiff { path } => {
+            let ctx = tools::git_diff::GitDiffContext {
+                files_ever_modified: state
+                    .governance
+                    .files_ever_modified
+                    .iter()
+                    .cloned()
+                    .collect(),
+            };
+            tools::git_diff::execute(path, &state.workspace_root, Some(&ctx))
+        }
+        Action::RunShell {
+            command,
+            cwd,
+            timeout_secs,
+        } => run_shell_deduped(state, command, cwd, *timeout_secs),
+        Action::RunCommand {
+            cmd,
+            cwd,
+            timeout_secs,
+        } => run_command_deduped(state, cmd, cwd, *timeout_secs),
+        _ => tools::dispatch(action, &state.workspace_root),
     }
 }
 
@@ -1647,7 +1616,7 @@ fn read_file_cached(
     limit: u32,
 ) -> ToolResult {
     let step_index = state.step_count;
-    if state.patch_recovery.try_consume_read(path) {
+    if state.recovery.try_consume_any_read_grant(path) {
         state.read_cache.invalidate_path(path);
         write_event(
             &state.run_id,
@@ -1719,6 +1688,305 @@ fn read_file_cached(
     }
 }
 
+/// Part 5D: bound text-only recovery for Agent runs that still need an action.
+/// Ask / ReadOnly and post-green-verify paths are exempt.
+fn should_bound_no_tool_call(state: &AgentState) -> bool {
+    if state.completion.last_verify_success == Some(true) {
+        return false;
+    }
+    if matches!(
+        state.authorization.edit_policy,
+        EditPolicy::ReadOnly
+    ) {
+        return false;
+    }
+    true
+}
+
+fn truncate_no_tool_digest(text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return "(empty text)".to_string();
+    }
+    let mut out: String = t.chars().take(280).collect();
+    if t.chars().count() > 280 {
+        out.push('…');
+    }
+    out
+}
+
+/// Part 5D: commit a synthetic NonResolving recovery outcome for NoToolCall.
+fn commit_no_tool_call(
+    state: &mut AgentState,
+    observer: Option<&dyn AgentObserver>,
+    model_turn: u32,
+    text: &str,
+    cause: NoToolCallCause,
+) -> Option<StopReason> {
+    let digest = truncate_no_tool_digest(text);
+    let stalls_before = state.stall.consecutive_stalls;
+    state.stall.observe_fingerprint(
+        ActionFingerprint::no_tool_call_cause(cause.as_str()),
+        Some(StallKind::NonResolvingResponse),
+    );
+    log_stall_shadow(
+        state,
+        Some(StallKind::NonResolvingResponse),
+        None,
+        stalls_before,
+        None,
+    );
+
+    let mut result = ToolResult {
+        success: false,
+        output: digest.clone(),
+        diff: None,
+        error: Some(format!(
+            "No tool call ({})",
+            cause.as_str()
+        )),
+        stop_reason: None,
+    };
+
+    let recipe = RecoveryAction::NonResolving { cause };
+    let applied = apply_recovery(state, &mut result, &recipe);
+    if let Some(message) = applied.phase_guidance {
+        log_phase_transition(state, message);
+    }
+    if let Some(err) = result.error.as_deref() {
+        state.run_control.queue_phase_guidance(err);
+    }
+    state.run_control.require_tool_choice = true;
+
+    let transition = match applied
+        .stop_reason
+        .clone()
+        .or_else(|| result.stop_reason.clone())
+    {
+        Some(reason) => {
+            result.stop_reason = Some(reason.clone());
+            RuntimeTransition::Terminate(reason)
+        }
+        None => RuntimeTransition::Continue,
+    };
+
+    let turn_outcome = TurnOutcome {
+        stop_reason: result.stop_reason.clone(),
+        stall_kind: Some(StallKind::NonResolvingResponse),
+        dispatched: false,
+        tool_name: "no_tool_call".into(),
+        target_path: None,
+    };
+    let stall_policy = StallPolicyMode::from_env();
+    let candidate = compute_candidate_decision(state, &turn_outcome, &transition);
+    let legacy_label = legacy_decision_label(result.stop_reason.as_ref(), true);
+    log_candidate_decision(state, stall_policy, legacy_label, &candidate);
+
+    let step_index = state.step_count;
+    emit_thinking_state(
+        &state.run_id,
+        step_index,
+        model_turn,
+        "(text_only)",
+        &json!({
+            "transition": transition_label(&transition),
+            "transition_detail": format!("{transition:?}"),
+            "phase": state.run_control.phase.as_str(),
+            "consecutive_stalls": state.stall.consecutive_stalls,
+            "stall_kind": "NonResolvingResponse",
+            "no_tool_call_cause": cause.as_str(),
+            "dispatched": false,
+            "exact_repeat": state.stall.is_repeat(),
+            "coarse_repeat": state.stall.coarse_is_repeat(),
+            "ping_pong": state.stall.is_ping_pong(),
+            "recovery_active": state.recovery.is_active(),
+            "guidance_attempts": state.recovery.guidance_attempts(),
+            "legacy_decision": legacy_label,
+            "candidate_decision": candidate.decision,
+            "candidate_reason": candidate.reason,
+            "stall_policy": stall_policy.as_str(),
+        }),
+    );
+
+    // Synthetic step so history carries the digest + recovery guidance
+    // without re-injecting the full truncated essay.
+    let action = Action::UpdatePlan {
+        objective: format!("(no_tool_call:{})", cause.as_str()),
+        steps: digest,
+    };
+    emit(
+        observer,
+        AgentEvent::ToolCompleted {
+            run_id: state.run_id.clone(),
+            step_index,
+            tool: "no_tool_call".into(),
+            success: false,
+        },
+    );
+    let stop_reason = result.stop_reason.clone();
+    let step = Step::new(
+        state.step_count,
+        model_turn,
+        action,
+        result,
+        format!("no_tool_call_{}", cause.as_str()),
+    );
+    let entry = LogEntry::from_step(&state.run_id, &state.model_id, &step);
+    write_entry(&entry);
+    state.record_step(step);
+    emit(
+        observer,
+        AgentEvent::StepCompleted {
+            run_id: state.run_id.clone(),
+            step_index: state.step_count - 1,
+            stop_reason: stop_reason.as_ref().map(|r| format!("{:?}", r)),
+        },
+    );
+
+    if let Some(reason) = stop_reason.or_else(|| stop_reason_from_transition(transition)) {
+        crate::agent_println!("\n[agent] stopping: {:?}", reason);
+        write_summary(state, &reason);
+        return Some(reason);
+    }
+    None
+}
+
+/// Extract a tool name from a malformed-tool error when the parser included
+/// `tool \`name\``. Falls back to scanning for known tool tokens.
+fn extract_malformed_tool_name(msg: &str) -> &str {
+    if let Some(rest) = msg.strip_prefix("tool `") {
+        if let Some(end) = rest.find('`') {
+            let name = &rest[..end];
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    const KNOWN: &[&str] = &[
+        "update_plan",
+        "apply_patch",
+        "read_file",
+        "search_code",
+        "locate",
+        "find_files",
+        "write_file",
+        "run_shell",
+        "run_command",
+        "finish",
+        "list_files",
+        "git_status",
+        "git_diff",
+        "detect_project_snapshot",
+        "summarize_repo",
+    ];
+    for name in KNOWN {
+        if msg.contains(name) {
+            return name;
+        }
+    }
+    "unknown_tool"
+}
+
+/// Stable synthetic action so repeated malformed calls of the same tool share
+/// an [`ActionFingerprint`] (Part 5C Part 4).
+fn synthetic_action_for_malformed(tool: &str) -> Action {
+    use std::path::PathBuf;
+    match tool {
+        "update_plan" => Action::UpdatePlan {
+            objective: "malformed".into(),
+            steps: "malformed".into(),
+        },
+        "apply_patch" => Action::ApplyPatch {
+            path: PathBuf::from("malformed"),
+            diff: String::new(),
+        },
+        "read_file" => Action::ReadFile {
+            path: PathBuf::from("malformed"),
+            offset: 1,
+            limit: 1,
+        },
+        "write_file" => Action::WriteFile {
+            path: PathBuf::from("malformed"),
+            content: String::new(),
+        },
+        "search_code" => Action::SearchCode {
+            query: "malformed".into(),
+            path: PathBuf::from("."),
+        },
+        "locate" => Action::Locate {
+            query: "malformed".into(),
+            path: PathBuf::from("."),
+        },
+        "find_files" => Action::FindFiles {
+            pattern: "malformed".into(),
+            path: PathBuf::from("."),
+        },
+        "list_files" => Action::ListFiles {
+            path: PathBuf::from("."),
+        },
+        "run_shell" => Action::RunShell {
+            command: "malformed".into(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 1,
+        },
+        "run_command" => Action::RunCommand {
+            cmd: "malformed".into(),
+            cwd: PathBuf::from("."),
+            timeout_secs: 1,
+        },
+        "finish" => Action::Finish {
+            summary: "malformed".into(),
+        },
+        "git_status" => Action::GitStatus,
+        "git_diff" => Action::GitDiff { path: None },
+        "detect_project_snapshot" => Action::DetectProjectSnapshot {
+            path: PathBuf::from("."),
+        },
+        "summarize_repo" => Action::SummarizeRepo {
+            depth: "overview".into(),
+            path: PathBuf::from("."),
+            focus: None,
+        },
+        other => Action::UpdatePlan {
+            objective: format!("malformed:{other}"),
+            steps: "malformed".into(),
+        },
+    }
+}
+
+/// Part 5C Part 4: turn a parse-time malformed tool call into a committed
+/// `InvalidArguments` outcome so Layer 4 recovery can bound retries.
+fn commit_malformed_tool_call(
+    state: &mut AgentState,
+    observer: Option<&dyn AgentObserver>,
+    model_turn: u32,
+    msg: &str,
+) -> Option<StopReason> {
+    let tool = extract_malformed_tool_name(msg);
+    let action = synthetic_action_for_malformed(tool);
+    let brief = if msg.len() > 400 {
+        format!("{}…", &msg[..400])
+    } else {
+        msg.to_string()
+    };
+    let result = ToolResult::error(format!(
+        "Malformed tool call for `{tool}`: {brief}\n\
+         Arguments must be valid JSON matching the tool schema. \
+         Do not repeat the identical malformed call."
+    ));
+    let step_index = state.step_count;
+    commit_tool_outcome(
+        state,
+        observer,
+        step_index,
+        model_turn,
+        action,
+        format!("malformed_{tool}"),
+        result,
+        false, // never dispatched
+    )
+}
+
 fn is_duplicate_read_outcome(action: &Action, result: &ToolResult) -> bool {
     if !matches!(action, Action::ReadFile { .. }) {
         return false;
@@ -1738,7 +2006,18 @@ fn is_duplicate_read_outcome(action: &Action, result: &ToolResult) -> bool {
         .unwrap_or(false)
 }
 
+/// Part 5E: Layer 4 owns terminate for duplicate/disabled-read thrash.
+/// Legacy `consecutive_denials` may still increment for telemetry.
+fn denial_streak_stop_applies(duplicate_read: bool) -> bool {
+    !duplicate_read
+}
+
 /// Log, observe, and record a completed tool. Returns Some(stop) if the run should end.
+///
+/// `dispatched` is true when the tool passed pre-dispatch gates and was invoked
+/// (or served from cache after a successful evaluate). False for evaluate rejects.
+/// Layer 4 uses this bit so shape-invalid patches (Finding 4) select
+/// `InvalidArguments` rather than `FailedPatch`.
 fn commit_tool_outcome(
     state: &mut AgentState,
     observer: Option<&dyn AgentObserver>,
@@ -1747,6 +2026,7 @@ fn commit_tool_outcome(
     action: Action,
     tool_call_id: String,
     mut result: ToolResult,
+    dispatched: bool,
 ) -> Option<StopReason> {
     emit(
         observer,
@@ -1823,7 +2103,7 @@ fn commit_tool_outcome(
                         .note_verification_outcome(model_turn, report.outcome.clone());
                     if let Some(message) = state
                         .run_control
-                        .observe_verification(&report.outcome, model_turn)
+                        .observe_verification(&mut state.recovery, &report.outcome, model_turn)
                     {
                         log_phase_transition(state, message);
                     }
@@ -1840,9 +2120,14 @@ fn commit_tool_outcome(
                         &state.run_id,
                         "auto_post_edit_verify",
                         &format!(
-                            "check={} status={:?} summary={}",
+                            "check={} status={:?} scope={:?} assessment={} summary={}",
                             report.check.id,
                             report.outcome.status,
+                            report.outcome.scope,
+                            crate::verification::CompletionAssessment::from_outcome(Some(
+                                &report.outcome
+                            ))
+                            .as_str(),
                             report.outcome.summary.chars().take(200).collect::<String>()
                         ),
                         0,
@@ -1889,9 +2174,13 @@ fn commit_tool_outcome(
         })
         .unwrap_or(false);
 
-    state
+    let progress_kind = state
         .progress
         .observe_tool(&action, &result, duplicate_read);
+
+    let stall_kind = classify_stall(&action, &result, progress_kind, duplicate_read);
+    let stalls_before = state.stall.consecutive_stalls;
+    state.stall.observe(&action, stall_kind);
 
     if let Some(message) = state.run_control.observe_tool_outcome(
         &action,
@@ -1902,8 +2191,34 @@ fn commit_tool_outcome(
         log_phase_transition(state, message);
     }
 
-    if let Some(reason) = state.run_control.observe_denial_streak(&result) {
-        let stop_msg = state.run_control.no_progress_stop_message();
+    // Logged after stall/denial *and* Layer 4 recovery apply so
+    // `legacy_stop_source` can still see patch-recovery failure-limit text
+    // written by `apply_recovery(FailedPatch)` on this same turn.
+    // Captured *before* `observe_denial_streak` (which can set its own
+    // `Terminate` message on `result.error` below) so `legacy_stop_source`
+    // can tell apart pre-existing stops that may have already written into
+    // `result` earlier this turn — e.g. `deny_write_existing_source` —
+    // from the one this function is about to compute itself
+    // (`consecutive_denials`). Patch-recovery stops now land via
+    // `apply_recovery` *after* denial streak, and are folded into the
+    // legacy label from the post-recovery error text.
+    let pre_existing_stop_error = result.error.clone();
+    // Always count denials for telemetry comparability. Part 5E: do not let
+    // `consecutive_denials` terminate duplicate-evidence thrash — Layer 4
+    // owns that stop (including cross-target coarse ping-pong). Setting
+    // stop_reason here would also short-circuit `decide_next_state` past
+    // Recover, so demotion must happen before Layer 4.
+    let denial_streak_stop = state.run_control.observe_denial_streak(&result);
+    let denial_streak_stop =
+        if denial_streak_stop_applies(duplicate_read) {
+            denial_streak_stop
+        } else {
+            None
+        };
+    let denial_streak_stopped = denial_streak_stop.is_some();
+
+    if let Some(reason) = denial_streak_stop {
+        let stop_msg = state.run_control.no_progress_stop_message(&state.recovery);
         write_event(&state.run_id, "no_progress_stop", &stop_msg, 0);
         crate::agent_println!("\n[agent] {}", stop_msg);
         match &mut result.error {
@@ -1915,6 +2230,129 @@ fn commit_tool_outcome(
         }
         result.stop_reason = Some(reason);
     }
+
+    // Slice 4 Part 3: Layer 4 may Recover before the step is recorded so
+    // guidance lands on the logged ToolResult. FailedPatch (dispatched
+    // hunk-mismatch only) is applied here — not in execute_one_tool.
+    let turn_outcome = TurnOutcome {
+        stop_reason: result.stop_reason.clone(),
+        stall_kind,
+        dispatched,
+        tool_name: tool_name(&action).to_string(),
+        target_path: action_target_path(&action),
+    };
+    let mut recovered = false;
+    let mut transition = decide_next_state(state, &turn_outcome);
+    // Snapshot pre-apply Recover for candidate logging (Part 5A).
+    let pre_apply_transition = transition.clone();
+    if let RuntimeTransition::Recover(recipe) = pre_apply_transition.clone() {
+        recovered = true;
+        let applied = apply_recovery(state, &mut result, &recipe);
+        if let Some(message) = applied.phase_guidance {
+            log_phase_transition(state, message);
+        }
+        transition = match applied
+            .stop_reason
+            .or_else(|| result.stop_reason.clone())
+        {
+            Some(reason) => {
+                result.stop_reason = Some(reason.clone());
+                RuntimeTransition::Terminate(reason)
+            }
+            None => RuntimeTransition::Continue,
+        };
+    } else {
+        transition = pre_apply_transition.clone();
+    }
+
+    // Part 5: candidate unified decision (shadow by default). Legacy counters
+    // stay authoritative; Unified may add mixed-stall terminate only.
+    let stall_policy = StallPolicyMode::from_env();
+    let candidate = compute_candidate_decision(state, &turn_outcome, &pre_apply_transition);
+    // Recompute after apply so Part 4 terminate is visible on the candidate
+    // when layer4 became Terminate.
+    let candidate = if matches!(transition, RuntimeTransition::Terminate(_)) {
+        compute_candidate_decision(state, &turn_outcome, &transition)
+    } else {
+        candidate
+    };
+    let legacy_label = legacy_decision_label(result.stop_reason.as_ref(), recovered);
+    log_candidate_decision(state, stall_policy, legacy_label, &candidate);
+
+    if stall_policy.applies_mixed_stall_terminate()
+        && candidate.decision == "terminate"
+        && candidate.reason.starts_with("mixed_stall_terminate")
+        && result.stop_reason.is_none()
+    {
+        let stop_msg = format!(
+            "Stopped: unified stall policy (KAIRO_STALL_POLICY=unified) — {}",
+            candidate.reason
+        );
+        match &mut result.error {
+            Some(e) => {
+                e.push_str("\n\n");
+                e.push_str(&stop_msg);
+            }
+            None => result.error = Some(stop_msg),
+        }
+        result.stop_reason = Some(StopReason::NoProgress);
+        transition = RuntimeTransition::Terminate(StopReason::NoProgress);
+    }
+
+    let recovery_snap = state.recovery.snapshot();
+    emit_thinking_state(
+        &state.run_id,
+        step_index,
+        model_turn,
+        tool_name(&action),
+        &json!({
+            "transition": transition_label(&transition),
+            "transition_detail": format!("{transition:?}"),
+            "pre_apply_transition": format!("{pre_apply_transition:?}"),
+            "phase": state.run_control.phase.as_str(),
+            "consecutive_stalls": state.stall.consecutive_stalls,
+            "stall_kind": stall_kind.map(|k| format!("{k:?}")),
+            "progress_kind": format!("{progress_kind:?}"),
+            "dispatched": dispatched,
+            "exact_repeat": state.stall.is_repeat(),
+            "coarse_repeat": state.stall.coarse_is_repeat(),
+            "ping_pong": state.stall.is_ping_pong(),
+            "recovery_active": recovery_snap.active,
+            "recovery_reason": recovery_snap.reason.map(|r| format!("{r:?}")),
+            "recovery_target": recovery_snap.target.as_ref().map(|p| p.display().to_string()),
+            "recovery_consecutive_failures": recovery_snap.consecutive_failures,
+            "recovery_remaining_reads": recovery_snap.remaining_reads,
+            "guidance_attempts": state.recovery.guidance_attempts(),
+            "legacy_decision": legacy_label,
+            "candidate_decision": candidate.decision,
+            "candidate_reason": candidate.reason,
+            "stall_policy": stall_policy.as_str(),
+            "legacy_counters": {
+                "no_progress": state.run_control.no_progress,
+                "consecutive_denials": state.run_control.consecutive_denials,
+                "consecutive_invalid_actions": state.run_control.consecutive_invalid_actions,
+                "progress_consecutive_no_progress": state.progress.consecutive_no_progress,
+            },
+        }),
+    );
+
+    let legacy_stop_source = legacy_stop_source_for(
+        // Prefer post-recovery error (may include patch failure limit);
+        // fall back to pre-denial text for denied-source-writes labelling
+        // when denial did not fire.
+        result
+            .error
+            .as_deref()
+            .or(pre_existing_stop_error.as_deref()),
+        denial_streak_stopped,
+    );
+    log_stall_shadow(
+        state,
+        stall_kind,
+        Some(progress_kind),
+        stalls_before,
+        legacy_stop_source,
+    );
 
     if !read_cache_hit
         && !result_is_blocked
@@ -1963,7 +2401,11 @@ fn commit_tool_outcome(
                         .completion
                         .note_verification_outcome(model_turn, outcome.clone());
                     if let Some(message) =
-                        state.run_control.observe_verification(&outcome, model_turn)
+                        state.run_control.observe_verification(
+                            &mut state.recovery,
+                            &outcome,
+                            model_turn,
+                        )
                     {
                         log_phase_transition(state, message);
                     }
@@ -2038,7 +2480,10 @@ fn commit_tool_outcome(
         },
     );
 
-    if let Some(reason) = stop_reason {
+    // Prefer a stop stamped on the result after mid-function recovery /
+    // denial handling; fall back to the Layer 4 transition we already
+    // collapsed (Recover → Continue | Terminate).
+    if let Some(reason) = stop_reason.or_else(|| stop_reason_from_transition(transition)) {
         crate::agent_println!("\n[agent] stopping: {:?}", reason);
         write_summary(state, &reason);
         Some(reason)
@@ -2047,12 +2492,201 @@ fn commit_tool_outcome(
     }
 }
 
+/// Slice 3 shadow classification (final-design-plan.md §7.1, §8): maps one
+/// committed tool outcome onto the six `StallKind`s, so `StallState` (logged
+/// only — see `commit_tool_outcome`) can be compared against the four
+/// legacy counters it is a candidate to replace. Reuses `progress_kind`
+/// (already computed by `ProgressState::observe_tool`, which is itself the
+/// source of the legacy `consecutive_no_progress` counter) rather than
+/// re-deriving evidence/mutation/decision judgments from scratch.
+///
+/// `None` (progress — resets `consecutive_stalls`) is returned only for
+/// `Mutation`, `PlanUpdated`, `Decision`, `NewEvidence`, and
+/// `VerificationResult`. Note what this does **not** include: a bare
+/// `result.success == true` is not itself a reset condition — e.g. a
+/// successful `read_file`/`search_code` that returns content whose evidence
+/// key (path + line range + content hash / query match set) was already
+/// ingested this run still classifies as `ProgressKind::NoProgress`
+/// (`ProgressState::classify_and_ingest`), i.e. a stall here, not progress.
+///
+/// This reset boundary is **identical** to legacy `consecutive_no_progress`
+/// (`ProgressState`), since both read the same `progress_kind` value from
+/// the same call to `observe_tool`. It is deliberately **stricter** than
+/// the other two legacy counters, which is a real, expected divergence to
+/// watch for in the shadow-mode comparison rather than a bug to fix here:
+/// `consecutive_denials` (`RunState::observe_denial_streak`) resets on
+/// *any* successful dispatch, including a successful-but-empty search or a
+/// successful re-read of already-known content, because it only checks
+/// denial-style error text; `consecutive_invalid_actions`
+/// (`action_policy::validate_action`) resets on any phase-contract-valid
+/// action regardless of whether it produced new evidence. So the new
+/// counter is expected to run *higher*, not lower, than those two on
+/// exploration-heavy transcripts — that is a genuine behavior difference to
+/// surface in the comparison, not evidence the new counter is unwired.
+fn classify_stall(
+    action: &Action,
+    result: &ToolResult,
+    progress_kind: ProgressKind,
+    duplicate_read: bool,
+) -> Option<StallKind> {
+    match progress_kind {
+        ProgressKind::Mutation
+        | ProgressKind::PlanUpdated
+        | ProgressKind::Decision
+        | ProgressKind::NewEvidence
+        | ProgressKind::VerificationResult => None,
+        ProgressKind::NoProgress => Some(if duplicate_read {
+            StallKind::DuplicateEvidence
+        } else if matches!(action, Action::ApplyPatch { .. } | Action::WriteFile { .. }) {
+            StallKind::FailedMutation
+        } else if matches!(action, Action::RunCommand { .. } | Action::RunShell { .. }) {
+            StallKind::RepeatedVerification
+        } else if is_harness_denial_text(result) {
+            StallKind::ScopeViolation
+        } else if !result.success {
+            StallKind::InvalidArguments
+        } else {
+            StallKind::NonResolvingResponse
+        }),
+    }
+}
+
+/// Structured shadow-mode log record (Slice 3, final-design-plan.md §8):
+/// explicit `classification` ("stall" vs "progress") plus the `progress_kind`
+/// (or `None` for text-only turns, which never produce one) that drove it,
+/// so a reviewer can audit every reset for legitimacy — not just infer it
+/// from the before/after counter values — alongside all four legacy
+/// counters for direct comparison.
+///
+/// Logs both fingerprint interpretations side by side — `exact_*` (same
+/// call) and `coarse_*` (same target/intent, currently only distinct from
+/// exact for `read_file`) — so a reviewer can see cases like a model
+/// dodging the duplicate-read cache via shifting line ranges: `exact_repeat`
+/// false but `coarse_repeat` true. Diagnostic only; neither set of flags
+/// drives `consecutive_stalls`.
+///
+/// Also logs `PatchRecoveryState`'s own counters (`recovery.*`) and, when
+/// this turn triggered a stop, which subsystem's threshold actually fired
+/// (`legacy_stop_source`). This exists because a real corpus run showed
+/// `consecutive_stalls` resetting to 0 on a legitimate patch-recovery
+/// reread at the exact moment `PatchRecoveryState::consecutive_failures`
+/// was two-of-three toward its own independent stop — a divergence that
+/// was invisible in this log before `recovery` was added. Per design
+/// review: this is deliberately **not** fixed by making `StallState`
+/// preserve patch-failure streaks across a recovery reset — `Progress`
+/// ("is the agent generally still making progress?") and `Recovery`
+/// ("has this specific mutation target repeatedly failed?") answer
+/// different questions and must stay in their own Layer-1 fields
+/// (final-design-plan.md §4); this function only ever *reads* both, it
+/// does not let either influence the other.
+///
+/// `legacy_stop_source` covers the two stop paths observable from a
+/// `ToolResult` at this call site (`patch_recovery_failure_limit`,
+/// `denied_source_writes_limit`) plus the one this function computes
+/// itself (`consecutive_denials_limit`). Act / patch-recovery
+/// `consecutive_invalid_actions` no longer hard-stops via
+/// `EvaluationOutcome::RejectAndStop` (Part 5C Part 3); those thrash
+/// paths defer to Layer 4 recovery terminate. Verify / Finish completion
+/// fallbacks may still emit `invalid_action_stop`.
+fn log_stall_shadow(
+    state: &AgentState,
+    stall_kind: Option<StallKind>,
+    progress_kind: Option<ProgressKind>,
+    counter_before: u32,
+    legacy_stop_source: Option<&'static str>,
+) {
+    let recovery = state.recovery.snapshot();
+    let payload = json!({
+        "classification": if stall_kind.is_some() { "stall" } else { "progress" },
+        "stall_kind": stall_kind.map(|k| format!("{k:?}")),
+        "progress_kind": progress_kind.map(|k| format!("{k:?}")),
+        "counter_before": counter_before,
+        "counter_after": state.stall.consecutive_stalls,
+        "exact_repeat": state.stall.is_repeat(),
+        "exact_ping_pong": state.stall.is_ping_pong(),
+        "exact_new_failure": state.stall.is_new_failure(),
+        "coarse_repeat": state.stall.coarse_is_repeat(),
+        "coarse_ping_pong": state.stall.coarse_is_ping_pong(),
+        "coarse_new_failure": state.stall.coarse_is_new_failure(),
+        "legacy": {
+            "no_progress": state.run_control.no_progress,
+            "consecutive_denials": state.run_control.consecutive_denials,
+            "consecutive_invalid_actions": state.run_control.consecutive_invalid_actions,
+            "progress_consecutive_no_progress": state.progress.consecutive_no_progress,
+        },
+        "recovery": {
+            "active": recovery.active,
+            "reason": recovery.reason.map(|r| format!("{r:?}")),
+            "target": recovery.target.as_ref().map(|p| p.display().to_string()),
+            "consecutive_failures": recovery.consecutive_failures,
+            "remaining_reads": recovery.remaining_reads,
+            "denied_source_writes": recovery.denied_source_writes,
+        },
+        "legacy_stop_source": legacy_stop_source,
+    });
+    write_event(&state.run_id, "stall_shadow", &payload.to_string(), 0);
+}
+
+/// Identifies which authoritative subsystem's threshold produced this
+/// turn's stop, if any — see `log_stall_shadow`'s doc comment for why this
+/// exists and what it deliberately doesn't cover yet.
+fn legacy_stop_source_for(
+    pre_existing_stop_error: Option<&str>,
+    denial_streak_stopped: bool,
+) -> Option<&'static str> {
+    if let Some(err) = pre_existing_stop_error {
+        if err.contains("consecutive apply_patch failures") {
+            return Some("patch_recovery_failure_limit");
+        }
+        if err.contains("denied write_file attempts") {
+            return Some("denied_source_writes_limit");
+        }
+    }
+    if denial_streak_stopped {
+        return Some("consecutive_denials_limit");
+    }
+    None
+}
+
+/// Mirrors the denial-text markers `phase::is_denied_result` (private to
+/// that module) and the shape/authorization/existing-source rejection
+/// messages produced in `evaluate_action`'s gates. Duplicated rather than
+/// shared: unifying these into one structured `ActionFailureKind` is Slice
+/// 4/6 work (final-design-plan.md §6, §9), not this shadow-mode comparison.
+fn is_harness_denial_text(result: &ToolResult) -> bool {
+    if result.success {
+        return false;
+    }
+    let Some(err) = result.error.as_deref() else {
+        return false;
+    };
+    if err.starts_with("ACTION_NOT_AVAILABLE")
+        || err.starts_with("PHASE TRANSITION: ACT")
+        || err.starts_with("Stopped after ")
+    {
+        return true;
+    }
+    let l = err.to_ascii_lowercase();
+    l.contains("duplicate read denied")
+        || l.contains("exact content already available")
+        || l.contains("exploration checkpoint active")
+        || l.contains("is not available in")
+        || l.contains("phase_tool_denied")
+        || l.contains("authorization required")
+        || l.contains("authorization denied")
+        || l.contains("edit policy is")
+        || l.contains("must use apply_patch")
+        || l.contains("shell mutation")
+        || l.contains("blocked:")
+}
+
 fn write_summary(state: &AgentState, reason: &StopReason) {
-    write_run_summary(
+    write_run_summary_with_assessment(
         &state.run_id,
         &state.model_id,
         reason,
         &state.efficiency_snapshot(),
+        Some(state.completion.assessment().as_str()),
     );
     let totals = state.model_usage.totals();
     if let Ok(json) = serde_json::to_string(&totals) {
@@ -2091,6 +2725,15 @@ fn log_prompt_diagnostics(
 fn emit(observer: Option<&dyn AgentObserver>, event: AgentEvent) {
     if let Some(obs) = observer {
         obs.on_event(event);
+    }
+}
+
+fn transition_label(transition: &RuntimeTransition) -> &'static str {
+    match transition {
+        RuntimeTransition::Continue => "continue",
+        RuntimeTransition::Recover(_) => "recover",
+        RuntimeTransition::Complete(_) => "complete",
+        RuntimeTransition::Terminate(_) => "terminate",
     }
 }
 
@@ -2146,7 +2789,10 @@ fn goal_with_plan(state: &mut AgentState) -> String {
     // Phase guidance (Act / Verify / Finish) is always injected — it is the
     // primary control signal and must reach the model even when quiet CLI hides logs.
     let mut injected_guidance = false;
-    if let Some(guidance) = state.run_control.phase_guidance_for_injection() {
+    if let Some(guidance) = state
+        .run_control
+        .phase_guidance_for_injection(&state.recovery)
+    {
         write_event(
             &state.run_id,
             "phase_guidance",
@@ -2217,6 +2863,141 @@ fn goal_with_plan(state: &mut AgentState) -> String {
     out
 }
 
+/// Rewrite uniquely grounded bare `@@` headers before `mpatch` dispatch.
+/// Ambiguous / weak bare hunks reject here as InvalidArguments (`dispatched=false`).
+fn apply_bare_hunk_normalize_gate(
+    state: &AgentState,
+    action: &mut Action,
+) -> Result<(), ToolResult> {
+    let Action::ApplyPatch { path, diff } = action else {
+        return Ok(());
+    };
+    match crate::tools::patch_normalize::normalize_bare_hunks(
+        path,
+        diff,
+        &state.workspace_root,
+    ) {
+        Ok(None) => Ok(()),
+        Ok(Some(normalized)) => {
+            write_event(
+                &state.run_id,
+                "patch_hunk_normalized",
+                &format!("{} bare hunk(s) rewritten with numbered headers", path.display()),
+                0,
+            );
+            *diff = normalized;
+            Ok(())
+        }
+        Err(err) => {
+            let message = err.user_message();
+            write_event(
+                &state.run_id,
+                "patch_bare_hunk_rejected",
+                &message[..message.len().min(400)],
+                0,
+            );
+            Err(ToolResult::error(message))
+        }
+    }
+}
+
+/// Slice 5G: after a FailedPatch mismatch with a grounded excerpt, reject
+/// apply_patch retries that cite none of those exact lines (context/removal).
+fn apply_grounded_patch_gate(
+    state: &mut AgentState,
+    action: &Action,
+) -> Result<(), ToolResult> {
+    let Action::ApplyPatch { path, diff } = action else {
+        return Ok(());
+    };
+    if let Some(denied) = state.recovery.reject_ungrounded_patch(path, diff) {
+        write_event(
+            &state.run_id,
+            "patch_ungrounded_reject",
+            &format!(
+                "{} failures={}",
+                path.display(),
+                state.recovery.consecutive_failures()
+            ),
+            0,
+        );
+        return Err(denied);
+    }
+    Ok(())
+}
+
+/// Part 5B: after Act duplicate-evidence escalation, keep `read_file` in the
+/// schema but reject cached ranges (level ≥1) or the whole path (level ≥2).
+/// Skipped during FailedPatch / MissingEvidence grants.
+fn apply_act_duplicate_read_gate(
+    state: &mut AgentState,
+    action: &Action,
+) -> Result<(), ToolResult> {
+    let Action::ReadFile {
+        path,
+        offset,
+        limit,
+    } = action
+    else {
+        return Ok(());
+    };
+    if !matches!(state.run_control.phase, crate::state::phase::Phase::Act) {
+        return Ok(());
+    }
+    // FailedPatch recovery mode owns its own read scope.
+    if state.recovery.is_active() {
+        return Ok(());
+    }
+    if state.recovery.has_any_read_grant_for(path) {
+        return Ok(());
+    }
+
+    let level = state.recovery.duplicate_escalation_level(path);
+    if level >= 2 {
+        let message = format!(
+            "Duplicate read denied: read_file for `{}` is disabled after repeated \
+             duplicate evidence in Act. The content is already in context.\n\
+             Use apply_patch, update_plan, or finish. Do not re-read this path.",
+            path.display()
+        );
+        write_event(
+            &state.run_id,
+            "act_duplicate_path_disabled",
+            &path.display().to_string(),
+            0,
+        );
+        return Err(ToolResult::error(message));
+    }
+    if level >= 1 {
+        match state
+            .read_cache
+            .resolve(&state.workspace_root, path, *offset, *limit)
+        {
+            tools::read_cache::ReadResolve::AlreadyRead(mut denied) => {
+                let extra = format!(
+                    "\n\nFurther duplicate reads of `{}` are unavailable under Act \
+                     duplicate-evidence policy. Use existing evidence to update_plan, \
+                     apply_patch, or finish.",
+                    path.display()
+                );
+                match &mut denied.error {
+                    Some(e) => e.push_str(&extra),
+                    None => denied.error = Some(extra.trim().to_string()),
+                }
+                write_event(
+                    &state.run_id,
+                    "act_duplicate_range_blocked",
+                    &path.display().to_string(),
+                    0,
+                );
+                return Err(denied);
+            }
+            tools::read_cache::ReadResolve::Live { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 fn apply_shell_mutation_gate(
     state: &mut AgentState,
     action: &Action,
@@ -2239,6 +3020,25 @@ fn apply_shell_mutation_gate(
     Err(ToolResult::error(message))
 }
 
+/// Argument-shape validation as a gate: rejects malformed actions (bad
+/// paths, empty required fields, an unverified `finish`) before they reach
+/// authorization. Wraps `validate_action_shape`, writing the same event and
+/// building the same error `ToolResult` it always has.
+fn apply_action_shape_gate(
+    state: &mut AgentState,
+    action: &Action,
+    require_verified_finish: bool,
+    verified_for_finish: bool,
+) -> Result<(), ToolResult> {
+    match validate_action_shape(action, require_verified_finish, verified_for_finish) {
+        Some(ValidationError { event, message }) => {
+            write_event(&state.run_id, &event, &message, 0);
+            Err(ToolResult::error(message))
+        }
+        None => Ok(()),
+    }
+}
+
 enum ActionPolicyGateError {
     Denied(ToolResult),
     Stop { reason: StopReason, message: String },
@@ -2250,7 +3050,7 @@ fn apply_action_policy_gate(
 ) -> Result<(), ActionPolicyGateError> {
     use crate::state::action_policy::{denial_tool_result, validate_action, ActionDecision};
 
-    match validate_action(&mut state.run_control, action) {
+    match validate_action(&mut state.run_control, &state.recovery, action) {
         ActionDecision::Allow => Ok(()),
         ActionDecision::RejectAndRetry {
             reason,
@@ -2290,7 +3090,7 @@ fn log_phase_transition(state: &AgentState, message: &str) {
     write_event(&state.run_id, "phase_transition", message, 0);
     crate::agent_println!(
         "[agent] phase → {} — {}",
-        state.run_control.tool_mode_label(),
+        state.run_control.tool_mode_label(&state.recovery),
         message.lines().next().unwrap_or(message)
     );
 }
@@ -2301,7 +3101,7 @@ fn apply_evidence_checkpoint_gate(
 ) -> Result<(), ToolResult> {
     // Recovery reread after patch failure is not generic exploration thrash.
     if let Action::ReadFile { path, .. } = action {
-        if state.patch_recovery.has_grant_for(path) {
+        if state.recovery.has_grant_for(path) {
             return Ok(());
         }
     }
@@ -2317,6 +3117,134 @@ fn apply_evidence_checkpoint_gate(
             Err(ToolResult::error(message))
         }
     }
+}
+
+/// Consolidated result of [`evaluate_action`]'s shared pre-dispatch gate
+/// sequence (final-design-plan.md §6, Slice 2 Part 2).
+enum EvaluationOutcome {
+    /// Passed every gate in this sequence; caller may continue toward
+    /// authorization / dispatch.
+    Proceed,
+    /// Rejected; commit this `ToolResult` and the run continues.
+    Reject(ToolResult),
+    /// Rejected; commit this `ToolResult`, then stop the run with `StopReason`
+    /// (`action_policy`'s invalid-action-limit fallback).
+    RejectAndStop(ToolResult, StopReason),
+    /// Stop the run immediately with no `ToolResult` to commit for this
+    /// action (governance's hard `Terminate` — no outcome is recorded for
+    /// the action that triggered it, matching prior behavior exactly).
+    StopWithoutResult(StopReason),
+}
+
+/// The shared pre-dispatch gate sequence: governance preflight → phase/scope
+/// policy → exploration-evidence checkpoint → shell-mutation safety, in that
+/// fixed order. Both the sequential (`execute_one_tool`) and parallel
+/// read-only (`execute_readonly_group`) execution paths call this single
+/// function now instead of duplicating the sequence — Slice 2's "one
+/// `evaluate_action` entry point" hypothesis (final-design-plan.md §8).
+///
+/// Argument-shape validation (`validate_action_shape`) runs next, before
+/// authorization, so malformed actions are rejected before they can ever
+/// prompt for approval — `Validate → Authorize → Execute → Classify`
+/// (final-design-plan.md §6).
+///
+/// Authorization is included as its own explicit, ordered stage (§6 —
+/// "Authorization stays a distinct stage") rather than merged with the
+/// others: it is the only stage that can pause for a human approval
+/// decision, and it is checked after shape validation, right before the
+/// write-existing-source check, matching the sequential path's original
+/// order exactly. Both authorization and the write-existing-source check
+/// are harmless no-ops on the read-only parallel path: every read-only
+/// action classifies as `ToolEffect::ReadOnly`, which `authorize()` always
+/// allows without touching `approval_gate` or `session`, and
+/// `Action::WriteFile` never appears in a read-only batch
+/// (`is_parallel_readonly`).
+///
+/// This is now the single pre-dispatch contract: callers must invoke only
+/// `evaluate_action` and, on `Proceed`, dispatch the action directly — no
+/// separate shape, authorization, or existing-source checks remain at any
+/// call site.
+fn evaluate_action(
+    state: &mut AgentState,
+    action: &Action,
+    model_turn: u32,
+    require_verified_finish: bool,
+    verified_for_finish: bool,
+    approval_gate: Option<&dyn ApprovalGate>,
+    session: &mut Option<&mut Session>,
+) -> EvaluationOutcome {
+    match apply_governance_preflight(state, action, model_turn) {
+        GovernancePreflightOutcome::Proceed => {}
+        GovernancePreflightOutcome::Rejected(result) => return EvaluationOutcome::Reject(result),
+        GovernancePreflightOutcome::Terminate(reason) => {
+            return EvaluationOutcome::StopWithoutResult(reason);
+        }
+    }
+
+    match apply_action_policy_gate(state, action) {
+        Ok(()) => {}
+        Err(ActionPolicyGateError::Denied(denied)) => return EvaluationOutcome::Reject(denied),
+        Err(ActionPolicyGateError::Stop { reason, message }) => {
+            write_event(
+                &state.run_id,
+                "invalid_action_stop",
+                &message[..message.len().min(400)],
+                0,
+            );
+            // Stamp stop_reason so Layer 4 Terminate skips Recover recipes
+            // (e.g. InvalidArguments "fix and retry") on Finish auto-complete.
+            let mut result = ToolResult::error(message);
+            result.stop_reason = Some(reason.clone());
+            return EvaluationOutcome::RejectAndStop(result, reason);
+        }
+    }
+
+    if let Err(denied) = apply_evidence_checkpoint_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = apply_shell_mutation_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = apply_act_duplicate_read_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = apply_grounded_patch_gate(state, action) {
+        if let Some(reason) = denied.stop_reason.clone() {
+            return EvaluationOutcome::RejectAndStop(denied, reason);
+        }
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) =
+        apply_action_shape_gate(state, action, require_verified_finish, verified_for_finish)
+    {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = resolve_tool_authorization(state, action, approval_gate, session) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    // Existing source files must use apply_patch — write_file rewrites break APIs.
+    if let Action::WriteFile { path, .. } = action {
+        if let Some(denied) = state
+            .recovery
+            .deny_write_existing_source(&state.workspace_root, path)
+        {
+            write_event(
+                &state.run_id,
+                "write_file_denied_existing_source",
+                &format!("{}", path.display()),
+                0,
+            );
+            return EvaluationOutcome::Reject(denied);
+        }
+    }
+
+    EvaluationOutcome::Proceed
 }
 
 enum GovernancePreflightOutcome {
@@ -2502,7 +3430,12 @@ struct ValidationError {
     message: String,
 }
 
-fn validate_action(
+/// Argument-shape validation (path traversal, verified-finish precondition) —
+/// distinct from `action_policy::validate_action`, which checks phase/scope
+/// policy. These were both named `validate_action` (in different files);
+/// renamed here to remove that collision ahead of Slice 2's consolidation
+/// into one `evaluate_action` entry point (final-design-plan.md §6, §8).
+fn validate_action_shape(
     action: &crate::state::step::Action,
     require_verified_finish: bool,
     verified_for_finish: bool,
@@ -2717,6 +3650,21 @@ fn mutating_path(action: &crate::state::step::Action) -> Option<String> {
     }
 }
 
+fn action_target_path(action: &Action) -> Option<std::path::PathBuf> {
+    match action {
+        Action::ReadFile { path, .. }
+        | Action::WriteFile { path, .. }
+        | Action::ApplyPatch { path, .. }
+        | Action::ListFiles { path }
+        | Action::SearchCode { path, .. }
+        | Action::Locate { path, .. }
+        | Action::FindFiles { path, .. }
+        | Action::DetectProjectSnapshot { path } => Some(path.clone()),
+        Action::GitDiff { path } => path.clone(),
+        _ => None,
+    }
+}
+
 fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
     match err {
         LlmError::ApiError(msg) => {
@@ -2742,6 +3690,9 @@ fn handle_fatal_llm_error(state: &AgentState, err: LlmError) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorization::EditPolicy;
+    use crate::state::phase::Phase;
+    use crate::state::runtime_decision::NoToolCallCause;
     use std::path::PathBuf;
 
     #[test]
@@ -2797,5 +3748,134 @@ mod tests {
         assert!(!is_parallel_readonly(&Action::Finish {
             summary: "done".into(),
         }));
+    }
+
+    #[test]
+    fn extract_malformed_tool_name_prefers_tool_backticks() {
+        assert_eq!(
+            extract_malformed_tool_name(
+                "tool `update_plan`: arguments is not valid JSON: expected `,` or `}`"
+            ),
+            "update_plan"
+        );
+        assert_eq!(
+            extract_malformed_tool_name("arguments is not valid JSON — update_plan raw"),
+            "update_plan"
+        );
+    }
+
+    #[test]
+    fn part4_repeated_malformed_update_plan_terminates_via_layer4() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        assert!(state.run_control.enter_act());
+        let msg = "tool `update_plan`: arguments is not valid JSON: expected `,` or `}` — raw: {\"steps\": [ ] Explore}";
+        for i in 1..=3 {
+            let stop = commit_malformed_tool_call(&mut state, None, i, msg);
+            if i < 3 {
+                assert!(stop.is_none(), "i={i}");
+            } else {
+                assert_eq!(stop, Some(StopReason::NoProgress));
+            }
+        }
+        // Must have recorded steps so the model would see failures in history.
+        assert!(state.step_count >= 3);
+    }
+
+    #[test]
+    fn act_duplicate_read_gate_restricts_cached_then_disables_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("seen.rs");
+        std::fs::write(&file, "fn main() {}\n".repeat(20)).unwrap();
+
+        let mut state = AgentState::new("goal", dir.path().to_path_buf(), "test-model", 10);
+        state.run_control.phase = Phase::Act;
+        let path = PathBuf::from("seen.rs");
+        state.run_control.note_file_seen(path.clone());
+        state
+            .read_cache
+            .store_range(dir.path(), &path, 1, 20, 1);
+
+        let action = Action::ReadFile {
+            path: path.clone(),
+            offset: 1,
+            limit: 20,
+        };
+
+        // Level 0: gate is a no-op.
+        assert!(apply_act_duplicate_read_gate(&mut state, &action).is_ok());
+
+        let _ = state.recovery.note_act_duplicate(&path);
+        assert_eq!(state.recovery.duplicate_escalation_level(&path), 1);
+        let err = apply_act_duplicate_read_gate(&mut state, &action).unwrap_err();
+        assert!(
+            err.error
+                .as_deref()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("duplicate read denied")
+        );
+
+        let _ = state.recovery.note_act_duplicate(&path);
+        assert!(state.recovery.is_act_duplicate_path_disabled(&path));
+        let err2 = apply_act_duplicate_read_gate(&mut state, &action).unwrap_err();
+        assert!(
+            err2.error
+                .as_deref()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("duplicate read denied")
+        );
+        assert!(err2.error.as_deref().unwrap().contains("disabled"));
+    }
+
+    #[test]
+    fn part5d_commit_no_tool_call_bounds_and_sets_tool_choice() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        assert!(state.run_control.enter_act());
+        assert!(should_bound_no_tool_call(&state));
+
+        let text = "[truncated: max_tokens reached with no tool call] long analysis of move_task";
+        let stop1 = commit_no_tool_call(
+            &mut state,
+            None,
+            1,
+            text,
+            NoToolCallCause::MaxTokens,
+        );
+        assert!(stop1.is_none());
+        assert!(state.run_control.require_tool_choice);
+        assert!(state.step_count >= 1);
+        let err = state.history.last().unwrap().result.error.clone().unwrap();
+        assert!(err.contains("allowed_next_actions:"));
+        assert!(err.contains("truncated") || err.contains("max_tokens"));
+
+        let _ = commit_no_tool_call(
+            &mut state,
+            None,
+            2,
+            "different essay about the same bug",
+            NoToolCallCause::MaxTokens,
+        );
+        let stop3 = commit_no_tool_call(
+            &mut state,
+            None,
+            3,
+            "yet another truncated essay",
+            NoToolCallCause::MaxTokens,
+        );
+        assert_eq!(stop3, Some(StopReason::NoProgress));
+    }
+
+    #[test]
+    fn part5d_ask_readonly_does_not_bound_no_tool_call() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        state.authorization.edit_policy = EditPolicy::ReadOnly;
+        assert!(!should_bound_no_tool_call(&state));
+    }
+
+    #[test]
+    fn part5e_denial_streak_stop_demoted_for_duplicate_reads_only() {
+        assert!(!denial_streak_stop_applies(true));
+        assert!(denial_streak_stop_applies(false));
     }
 }
