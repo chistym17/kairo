@@ -22,6 +22,11 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
         return Ok(0);
     }
 
+    if matches!(cli.command, Command::Tui) {
+        crate::tui::run().context("tui")?;
+        return Ok(0);
+    }
+
     // Product CLI: quiet harness debug by default; --verbose / KAIRO_VERBOSE restores it.
     logging::configure_cli_quiet(cli.verbose);
 
