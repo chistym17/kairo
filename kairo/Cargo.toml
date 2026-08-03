@@ -1,9 +1,9 @@
 [package]
 name = "kairo"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 default-run = "kairo"
-description = "Kairo — local coding agent that asks, plans, edits, and verifies in your repo"
+description = "Kairo v2 — local coding agent that asks, plans, edits, and verifies in your repo"
 license = "MIT"
 repository = "https://github.com/chistym17/agent-harness"
 homepage = "https://kairo.so"
@@ -13,12 +13,15 @@ keywords = ["kairo", "agent", "llm", "coding", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = [
     "/.env",
+    "/.env.*",
     "/logs/",
     "/sessions/",
     "/benchmarks/",
+    "/target/",
     "/EVAL_FIXTURE.md",
     "/CACHE_VERIFY.md",
     "/imporv.md",
+    "/TODO-UX.md",
 ]
 
 [lib]
