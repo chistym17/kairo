@@ -41,3 +41,10 @@ cargo install kairo --force
 design-report.md
 docs/final-design-plan.md
 
+VerdictAI
+run-verdict-issue.sh
+AnimalHack
+run-animal-issue.sh
+codeforces-clone
+run-codeforces-issue.sh
+docs/evals

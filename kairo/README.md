@@ -1,6 +1,13 @@
 # Kairo
 
-Local coding agent ([kairo.so](https://kairo.so)). Point it at a repo, **ask** read-only questions, or run **agent** mode to plan, edit (with approval), and verify — from the terminal or a localhost UI.
+Local coding agent ([kairo.so](https://kairo.so)) — **v2**.
+
+Point it at a repo, **ask** read-only questions, or run **agent** mode to plan, edit (with approval), and verify — from the terminal or a localhost UI.
+
+**Best at:** scoped bugfixes and repo Q&A.  
+**Not:** unattended production Autopilot. Default edit policy is **confirm** — review diffs before you merge. Use `--edit-policy auto` only in trusted repos or CI you control.
+
+**Recommended model (eval-backed):** DeepSeek [`deepseek-v4-flash`](https://platform.deepseek.com) (`LLM_PROVIDER=deepseek`).
 
 ## Five minutes to first run
 
@@ -39,11 +46,11 @@ cp kairo/.env.example kairo/.env
 
 | Provider | Env |
 |----------|-----|
+| [DeepSeek](https://platform.deepseek.com) (recommended) | `LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY=…` |
 | [Groq](https://console.groq.com) | `LLM_PROVIDER=groq` + `GROQ_API_KEY=…` |
-| [DeepSeek](https://platform.deepseek.com) | `LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY=…` |
 | [AgentRouter](https://agentrouter.org/console/token) | `LLM_PROVIDER=agentrouter` + `AGENTROUTER_API_KEY=…` |
 
-Optional: `MODEL_ID`. Priority: env / `.env` → user `config.toml` → defaults.
+Optional: `MODEL_ID` (DeepSeek default: `deepseek-v4-flash`). Priority: env / `.env` → user `config.toml` → defaults.
 Never commit secrets.
 
 ### 3. Run
@@ -52,9 +59,10 @@ From your project (workspace is auto-detected from the nearest `.git` root):
 
 ```bash
 cd /path/to/your/repo
-kairo                              # interactive agent
+kairo                              # interactive agent (confirm before first edit)
 kairo ask "Where is authentication handled?"
-kairo agent --edit-policy auto --task "Fix the failing tests"
+kairo agent --edit-policy confirm --task "Fix the failing tests"
+kairo agent --edit-policy auto --task "…"   # no approval prompts — power users / CI only
 kairo serve --port 8787            # → http://127.0.0.1:8787
 kairo config                       # change provider / model / API key
 kairo health                       # check config and workspace readiness
@@ -88,6 +96,12 @@ Branch: main
 
 Approvals (terminal): **Enter** / `t` = approve for task · `a` = once · `r` = reject.
 
+The agent can run shell commands **inside the workspace**. Do not aim it at secret-only trees or untrusted checkouts without watching the session.
+
+### Verification honesty
+
+After an edit, Kairo may run project checks (lint / test / build). If tools are missing or the environment blocks them, the run can finish as **`CompletedUnverified`** or show an environment-blocked check. That means **the edit landed; local verify still needs you** — not that production tests passed.
+
 Machine-readable events:
 
 ```bash
@@ -106,6 +120,12 @@ use kairo::api::{AgentConfig, AgentEvent, AgentMode, AgentSession, EditPolicy};
 cargo run -p kairo --example basic_agent -- --ask /path/to/repo "…"
 ```
 
+## Known limitations (short)
+
+- Strong on **scoped** fixes; weaker on multi-file / new-file work and “found the file but never edited” thrash.
+- Verify may be **blocked** if `npm`/`pytest`/etc. are missing — that is not a silent green build.
+- Full list: [Known limitations](https://github.com/chistym17/agent-harness/blob/main/docs/KNOWN_LIMITATIONS.md)
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -116,8 +136,12 @@ cargo run -p kairo --example basic_agent -- --ask /path/to/repo "…"
 | `.env` ignored | Env overrides user config; `dotenv` loads cwd `.env` — or rely on `config.toml` |
 | Edits blocked in oneshot + confirm | Use interactive/`serve`, or `--edit-policy auto` |
 | Port in use | `serve --port 8790` |
+| Stopped with no edit / thrash | Narrow the task or name the file; see known limitations above |
 
 ## More
 
+- Changelog: [`CHANGELOG.md`](CHANGELOG.md)
+- Known limitations: [docs on GitHub](https://github.com/chistym17/agent-harness/blob/main/docs/KNOWN_LIMITATIONS.md)
+- Release checklist: [docs on GitHub](https://github.com/chistym17/agent-harness/blob/main/docs/RELEASE_CHECKLIST.md)
 - Site: [kairo.so](https://kairo.so)
 - Source: [github.com/chistym17/agent-harness](https://github.com/chistym17/agent-harness)
