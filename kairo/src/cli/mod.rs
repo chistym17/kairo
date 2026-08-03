@@ -1,6 +1,6 @@
 //! Product CLI for `kairo`.
 //!
-//! Subcommands: `ask`, `agent`, `serve`, `config`, `health`. Bare `kairo` starts
+//! Subcommands: `ask`, `agent`, `config`, `health`. Bare `kairo` starts
 //! interactive agent mode and auto-detects the workspace from the nearest `.git` root.
 
 mod args;
@@ -22,7 +22,6 @@ Usage:
   kairo                              # interactive agent in this repo
   kairo ask [\"question\"]
   kairo agent [--edit-policy confirm|auto|readonly] [--task \"…\" | \"…\"]
-  kairo serve [--port 8787]
   kairo config                       # view / edit provider, model, API key
   kairo health                       # check local readiness
 
@@ -43,7 +42,6 @@ Options:
   --task <text>          One-shot task (otherwise interactive)
   --session <id>         Resume a persisted session
   --new-session          Persist a new session (default for interactive)
-  --port <n>             serve only — listen on 127.0.0.1:<n> (default 8787)
   -v, --verbose          Show harness debug lines ([agent], [prompt], …)
                          Also: KAIRO_VERBOSE=1
   -h, --help             Show this help
@@ -59,7 +57,6 @@ Examples:
   kairo ask \"Where is auth handled?\"
   kairo agent --edit-policy auto --task \"Fix the failing tests\"
   kairo agent --verbose --task \"debug this\"
-  kairo serve --port 8787
   kairo config
   kairo health
 "

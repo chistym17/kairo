@@ -31,8 +31,6 @@ impl OutputFormat {
 pub enum Command {
     Ask,
     Agent,
-    /// Local web UI (`kairo serve`).
-    Serve,
     /// Edit `~/.config/kairo/config.toml` interactively.
     Config,
     /// Check local configuration and workspace readiness.
@@ -56,8 +54,6 @@ pub struct CliArgs {
     pub output: OutputFormat,
     pub task: Option<String>,
     pub session: SessionArg,
-    /// HTTP port for `serve` (default 8787).
-    pub port: u16,
     /// Show harness debug lines (`[agent]`, `[prompt]`, …).
     pub verbose: bool,
 }
@@ -73,7 +69,6 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
             output: OutputFormat::Text,
             task: None,
             session: SessionArg::New,
-            port: 8787,
             verbose: false,
         }));
     }
@@ -87,14 +82,13 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
     let (command, rest) = match first {
         "ask" => (Command::Ask, &args[1..]),
         "agent" => (Command::Agent, &args[1..]),
-        "serve" => (Command::Serve, &args[1..]),
         "config" => (Command::Config, &args[1..]),
         "health" => (Command::Health, &args[1..]),
         // Flags without a subcommand → agent (e.g. `kairo --edit-policy auto`).
         flag if flag.starts_with('-') => (Command::Agent, args),
         other => {
             return Err(format!(
-                "unknown subcommand '{other}'. Use: ask | agent | serve | config | health\n\
+                "unknown subcommand '{other}'. Use: ask | agent | config | health\n\
                  Or run bare `kairo` for interactive agent mode.\n\
                  Try: kairo --help"
             ));
@@ -121,7 +115,6 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
             output: OutputFormat::Text,
             task: None,
             session: SessionArg::Ephemeral,
-            port: 8787,
             verbose: false,
         }));
     }
@@ -132,7 +125,6 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
     let mut task: Option<String> = None;
     let mut session = SessionArg::Ephemeral;
     let mut session_explicit = false;
-    let mut port: u16 = 8787;
     let mut verbose = false;
     let mut positional: Vec<String> = Vec::new();
 
@@ -187,18 +179,6 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
                 session_explicit = true;
                 i += 1;
             }
-            "--port" => {
-                let raw = rest
-                    .get(i + 1)
-                    .ok_or_else(|| "--port requires a number".to_string())?;
-                port = raw
-                    .parse::<u16>()
-                    .map_err(|_| format!("invalid --port '{raw}'"))?;
-                if port == 0 {
-                    return Err("--port must be 1–65535".into());
-                }
-                i += 2;
-            }
             "--verbose" | "-v" => {
                 verbose = true;
                 i += 1;
@@ -229,7 +209,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
     }
 
     // Interactive sessions persist by default so /exit can resume later.
-    if task.is_none() && !session_explicit && !matches!(command, Command::Serve) {
+    if task.is_none() && !session_explicit {
         session = SessionArg::New;
     }
 
@@ -240,7 +220,6 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         output,
         task,
         session,
-        port,
         verbose,
     }))
 }
@@ -249,7 +228,7 @@ impl CliArgs {
     pub fn mode(&self) -> AgentMode {
         match self.command {
             Command::Ask => AgentMode::Ask,
-            Command::Agent | Command::Serve | Command::Config | Command::Health => AgentMode::Agent,
+            Command::Agent | Command::Config | Command::Health => AgentMode::Agent,
         }
     }
 }
@@ -326,22 +305,6 @@ mod tests {
         assert_eq!(cli.output, OutputFormat::Jsonl);
         assert_eq!(cli.task.as_deref(), Some("fix tests"));
         assert_eq!(cli.session, SessionArg::Ephemeral);
-        assert_eq!(cli.port, 8787);
-    }
-
-    #[test]
-    fn serve_accepts_port() {
-        let cli = parse_args(&args(&[
-            "serve",
-            "--workspace",
-            "/tmp/repo",
-            "--port",
-            "9000",
-        ]))
-        .unwrap()
-        .unwrap();
-        assert_eq!(cli.command, Command::Serve);
-        assert_eq!(cli.port, 9000);
     }
 
     #[test]
