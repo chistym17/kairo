@@ -1,6 +1,7 @@
 //! Application state for the full-screen TUI.
 
 use crate::tui::demo;
+use crate::tui::feed::RunUiState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // Welcome / Sessions screens land in a later part.
@@ -28,6 +29,7 @@ impl SidebarTab {
         }
     }
 
+    #[allow(dead_code)]
     pub fn shortcut(self) -> &'static str {
         match self {
             Self::Plan => "Ctrl+P",
@@ -94,7 +96,6 @@ pub struct ConversationState {
 #[derive(Debug, Clone)]
 pub struct PlanStepView {
     pub text: String,
-    /// done | active | todo
     pub status: PlanStepStatus,
 }
 
@@ -136,7 +137,7 @@ pub struct SidebarState {
 pub struct ComposerState {
     pub text: String,
     pub placeholder: String,
-    /// Visible height in rows (grows 3..=8 later; fixed for Part 1).
+    /// Visible height in rows (grows 3..=8 later; fixed for now).
     pub height: u16,
 }
 
@@ -155,11 +156,89 @@ pub struct App {
     pub composer: ComposerState,
     pub status: StatusState,
     pub terminal_size: (u16, u16),
+    pub run: RunUiState,
 }
 
 impl App {
+    /// Static demo chrome (layout preview / tests).
     pub fn demo() -> Self {
         demo::sample_app()
+    }
+
+    /// Empty live session ready for agent events.
+    pub fn live_session(
+        model: &str,
+        workspace_display: &str,
+        mode_label: &str,
+        policy_label: &str,
+        session_id: &str,
+    ) -> Self {
+        let mode = match mode_label.to_ascii_lowercase().as_str() {
+            "ask" => AgentModeUi::Ask,
+            "plan" => AgentModeUi::Plan,
+            _ => AgentModeUi::Agent,
+        };
+        let short_ws = workspace_display
+            .rsplit('/')
+            .next()
+            .unwrap_or(workspace_display)
+            .trim_start_matches('~')
+            .trim_start_matches('/')
+            .to_string();
+        let short_ws = if short_ws.is_empty() {
+            workspace_display.to_string()
+        } else {
+            short_ws
+        };
+        let short_id = if session_id.len() > 8 {
+            format!("{}…", &session_id[..8])
+        } else {
+            session_id.to_string()
+        };
+
+        App {
+            screen: Screen::Session,
+            header: HeaderState {
+                brand: "KAIRO".into(),
+                mode,
+                model: model.to_string(),
+                workspace: workspace_display.to_string(),
+                edit_policy: policy_label.to_string(),
+            },
+            conversation: ConversationState {
+                items: vec![TimelineItem::Assistant(
+                    "Session ready. Type a task and press Enter.".into(),
+                )],
+                scroll: 0,
+            },
+            sidebar: SidebarState {
+                tab: SidebarTab::Plan,
+                plan_done: 0,
+                plan_total: 0,
+                plan_steps: Vec::new(),
+                changes: Vec::new(),
+                session: SessionInfo {
+                    mode: mode.as_str().to_string(),
+                    policy: policy_label.to_string(),
+                    model: model.to_string(),
+                    workspace: short_ws,
+                    session_id: short_id,
+                    tokens: "—".into(),
+                    elapsed: "—".into(),
+                },
+            },
+            composer: ComposerState {
+                text: String::new(),
+                placeholder: "Ask Kairo to explain, change, review, or test…".into(),
+                height: 5,
+            },
+            status: StatusState {
+                hint: "Enter send   Tab mode   Ctrl+P plan   Ctrl+D diff   Ctrl+I context   q quit"
+                    .into(),
+            },
+            terminal_size: (120, 40),
+            run: RunUiState::default(),
+        }
     }
 
     pub fn set_sidebar_tab(&mut self, tab: SidebarTab) {
@@ -167,13 +246,8 @@ impl App {
     }
 
     pub fn cycle_mode(&mut self) {
+        // Visual-only for now; live AgentMode is fixed for the open session.
         self.header.mode = self.header.mode.next();
         self.sidebar.session.mode = self.header.mode.as_str().to_string();
-        self.status.hint = format!(
-            "Tab mode   {} plan   {} diff   {} context   q quit",
-            SidebarTab::Plan.shortcut(),
-            SidebarTab::Changes.shortcut(),
-            SidebarTab::Context.shortcut(),
-        );
     }
 }

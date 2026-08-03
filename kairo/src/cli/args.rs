@@ -35,7 +35,7 @@ pub enum Command {
     Config,
     /// Check local configuration and workspace readiness.
     Health,
-    /// Full-screen Ratatui shell (Part 1: static responsive layout).
+    /// Full-screen Ratatui shell (live agent events; `--demo` for static chrome).
     Tui,
 }
 
@@ -58,6 +58,8 @@ pub struct CliArgs {
     pub session: SessionArg,
     /// Show harness debug lines (`[agent]`, `[prompt]`, …).
     pub verbose: bool,
+    /// `kairo tui --demo` — static layout shell without opening an agent.
+    pub tui_demo: bool,
 }
 
 /// Parse `argv` (without the program name). Returns `None` when help was printed.
@@ -72,6 +74,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
             task: None,
             session: SessionArg::New,
             verbose: false,
+            tui_demo: false,
         }));
     }
 
@@ -98,17 +101,16 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         }
     };
 
-    if matches!(command, Command::Config | Command::Health | Command::Tui) {
+    if matches!(command, Command::Config | Command::Health) {
         if rest.iter().any(|a| matches!(a.as_str(), "-h" | "--help")) {
             print_usage();
             return Ok(None);
         }
         if !rest.is_empty() {
-            let name = match command {
-                Command::Config => "config",
-                Command::Health => "health",
-                Command::Tui => "tui",
-                _ => "command",
+            let name = if matches!(command, Command::Config) {
+                "config"
+            } else {
+                "health"
             };
             return Err(format!("{name} takes no arguments"));
         }
@@ -120,7 +122,12 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
             task: None,
             session: SessionArg::Ephemeral,
             verbose: false,
+            tui_demo: false,
         }));
+    }
+
+    if matches!(command, Command::Tui) {
+        return parse_tui_args(rest);
     }
 
     let mut workspace: Option<PathBuf> = None;
@@ -225,6 +232,65 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         task,
         session,
         verbose,
+        tui_demo: false,
+    }))
+}
+
+fn parse_tui_args(rest: &[String]) -> Result<Option<CliArgs>, String> {
+    let mut workspace: Option<PathBuf> = None;
+    let mut edit_policy: Option<EditPolicy> = None;
+    let mut verbose = false;
+    let mut tui_demo = false;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                return Ok(None);
+            }
+            "--demo" => {
+                tui_demo = true;
+                i += 1;
+            }
+            "--workspace" => {
+                let path = rest
+                    .get(i + 1)
+                    .ok_or_else(|| "--workspace requires a path".to_string())?;
+                workspace = Some(PathBuf::from(path));
+                i += 2;
+            }
+            "--edit-policy" => {
+                let raw = rest
+                    .get(i + 1)
+                    .ok_or_else(|| "--edit-policy requires confirm|auto|readonly".to_string())?;
+                edit_policy = Some(EditPolicy::parse(raw).ok_or_else(|| {
+                    format!("invalid --edit-policy '{raw}' (use confirm|auto|readonly)")
+                })?);
+                i += 2;
+            }
+            "--verbose" | "-v" => {
+                verbose = true;
+                i += 1;
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("unknown tui flag {flag}"));
+            }
+            other => {
+                return Err(format!("tui does not take positional arguments (got '{other}')"));
+            }
+        }
+    }
+
+    Ok(Some(CliArgs {
+        command: Command::Tui,
+        workspace,
+        edit_policy,
+        output: OutputFormat::Text,
+        task: None,
+        session: SessionArg::New,
+        verbose,
+        tui_demo,
     }))
 }
 
@@ -333,12 +399,20 @@ mod tests {
     fn tui_subcommand() {
         let cli = parse_args(&args(&["tui"])).unwrap().unwrap();
         assert_eq!(cli.command, Command::Tui);
+        assert!(!cli.tui_demo);
     }
 
     #[test]
-    fn tui_rejects_extra_args() {
-        let err = parse_args(&args(&["tui", "--workspace", "/tmp"])).unwrap_err();
-        assert!(err.contains("no arguments"));
+    fn tui_demo_flag() {
+        let cli = parse_args(&args(&["tui", "--demo"])).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Tui);
+        assert!(cli.tui_demo);
+    }
+
+    #[test]
+    fn tui_rejects_unknown_flag() {
+        let err = parse_args(&args(&["tui", "--task", "x"])).unwrap_err();
+        assert!(err.contains("unknown tui flag") || err.contains("positional"));
     }
 
     #[test]

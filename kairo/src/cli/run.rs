@@ -23,7 +23,14 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
     }
 
     if matches!(cli.command, Command::Tui) {
-        crate::tui::run().context("tui")?;
+        crate::tui::run_with_options(crate::tui::TuiOptions {
+            demo: cli.tui_demo,
+            workspace: cli.workspace.clone(),
+            edit_policy: cli.edit_policy,
+            verbose: cli.verbose,
+        })
+        .await
+        .context("tui")?;
         return Ok(0);
     }
 
