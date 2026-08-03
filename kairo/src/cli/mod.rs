@@ -22,6 +22,7 @@ Usage:
   kairo                              # interactive agent in this repo
   kairo ask [\"question\"]
   kairo agent [--edit-policy confirm|auto|readonly] [--task \"…\" | \"…\"]
+  kairo tui                          # full-screen TUI shell (layout preview)
   kairo config                       # view / edit provider, model, API key
   kairo health                       # check local readiness
 

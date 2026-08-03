@@ -35,6 +35,8 @@ pub enum Command {
     Config,
     /// Check local configuration and workspace readiness.
     Health,
+    /// Full-screen Ratatui shell (Part 1: static responsive layout).
+    Tui,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,27 +86,29 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         "agent" => (Command::Agent, &args[1..]),
         "config" => (Command::Config, &args[1..]),
         "health" => (Command::Health, &args[1..]),
+        "tui" => (Command::Tui, &args[1..]),
         // Flags without a subcommand → agent (e.g. `kairo --edit-policy auto`).
         flag if flag.starts_with('-') => (Command::Agent, args),
         other => {
             return Err(format!(
-                "unknown subcommand '{other}'. Use: ask | agent | config | health\n\
+                "unknown subcommand '{other}'. Use: ask | agent | config | health | tui\n\
                  Or run bare `kairo` for interactive agent mode.\n\
                  Try: kairo --help"
             ));
         }
     };
 
-    if matches!(command, Command::Config | Command::Health) {
+    if matches!(command, Command::Config | Command::Health | Command::Tui) {
         if rest.iter().any(|a| matches!(a.as_str(), "-h" | "--help")) {
             print_usage();
             return Ok(None);
         }
         if !rest.is_empty() {
-            let name = if matches!(command, Command::Config) {
-                "config"
-            } else {
-                "health"
+            let name = match command {
+                Command::Config => "config",
+                Command::Health => "health",
+                Command::Tui => "tui",
+                _ => "command",
             };
             return Err(format!("{name} takes no arguments"));
         }
@@ -228,7 +232,7 @@ impl CliArgs {
     pub fn mode(&self) -> AgentMode {
         match self.command {
             Command::Ask => AgentMode::Ask,
-            Command::Agent | Command::Config | Command::Health => AgentMode::Agent,
+            Command::Agent | Command::Config | Command::Health | Command::Tui => AgentMode::Agent,
         }
     }
 }
@@ -323,6 +327,18 @@ mod tests {
     fn health_subcommand() {
         let cli = parse_args(&args(&["health"])).unwrap().unwrap();
         assert_eq!(cli.command, Command::Health);
+    }
+
+    #[test]
+    fn tui_subcommand() {
+        let cli = parse_args(&args(&["tui"])).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Tui);
+    }
+
+    #[test]
+    fn tui_rejects_extra_args() {
+        let err = parse_args(&args(&["tui", "--workspace", "/tmp"])).unwrap_err();
+        assert!(err.contains("no arguments"));
     }
 
     #[test]
