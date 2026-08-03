@@ -27,7 +27,6 @@ cd /path/to/some/git/repo
 kairo ask "Give a one-paragraph overview of this repo."
 # interactive: confirm one harmless edit, or reject it
 kairo agent --edit-policy confirm --task "Add a TODO comment in README only if appropriate — otherwise explain why not."
-kairo serve --port 8787   # open UI, Ask mode once, quit
 ```
 
 ## Publish

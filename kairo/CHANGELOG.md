@@ -12,7 +12,8 @@ Product release of the Layer-4 runtime redesign. Same install path (`cargo insta
 - Safer patch path: bare-hunk normalization when uniquely grounded; invalid syntax ≠ workspace FailedPatch
 - Finish-phase auto-complete (no InvalidArguments thrash after the run is already complete)
 - Richer verification outcome labels without fake `TaskComplete`
-- Ask / agent / serve UX unchanged in spirit: **confirm** remains the default edit policy
+- Ask / agent UX unchanged in spirit: **confirm** remains the default edit policy
+- Local web UI (`kairo serve`) removed — CLI only
 
 ### Positioning
 

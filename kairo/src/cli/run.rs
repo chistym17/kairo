@@ -22,10 +22,6 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    if matches!(cli.command, Command::Serve) {
-        return run_serve(cli).await;
-    }
-
     // Product CLI: quiet harness debug by default; --verbose / KAIRO_VERBOSE restores it.
     logging::configure_cli_quiet(cli.verbose);
 
@@ -80,28 +76,6 @@ pub async fn run(cli: CliArgs) -> Result<i32> {
 
     session.shutdown().context("failed to shut down session")?;
     Ok(code)
-}
-
-async fn run_serve(cli: CliArgs) -> Result<i32> {
-    let interactive_setup = io::stdin().is_terminal();
-    user_config::ensure_configured(interactive_setup)
-        .context("provider setup")?;
-
-    let workspace = resolve_workspace(cli.workspace.clone())?;
-    print_workspace_banner(&workspace, false);
-    let mode = AgentMode::Agent;
-    let edit_policy = cli
-        .edit_policy
-        .unwrap_or(EditPolicy::Confirm);
-
-    crate::server::serve(crate::server::ServeOptions::new(
-        workspace,
-        mode,
-        edit_policy,
-        cli.port,
-    ))
-    .await?;
-    Ok(0)
 }
 
 async fn run_oneshot(

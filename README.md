@@ -2,7 +2,7 @@
 
 Local coding agent ([kairo.so](https://kairo.so)) — **v2**.
 
-Point it at a repo, **ask** read-only questions, or run **agent** mode to plan, edit (with approval), and verify — from the terminal or a localhost UI.
+Point it at a repo, **ask** read-only questions, or run **agent** mode to plan, edit (with approval), and verify — from the terminal.
 
 **Best at:** scoped bugfixes and repo Q&A.  
 **Not:** unattended production Autopilot. Default edit policy is **confirm** — review diffs before you merge. Use `--edit-policy auto` only in trusted repos or CI you control.
@@ -63,7 +63,6 @@ kairo                              # interactive agent (confirm before first edi
 kairo ask "Where is authentication handled?"
 kairo agent --edit-policy confirm --task "Fix the failing tests"
 kairo agent --edit-policy auto --task "…"   # no approval prompts — power users / CI only
-kairo serve --port 8787            # → http://127.0.0.1:8787
 kairo config                       # change provider / model / API key
 kairo health                       # check config and workspace readiness
 ```
@@ -83,7 +82,6 @@ Branch: main
 2. **Ask:** `What's in this repo? Give a short overview.`
 3. **Ask:** `Why might the tests be failing?` (no edits)
 4. **Agent:** `Fix the failing tests.` — approve the first edit with **Enter** / `t`
-5. **Serve:** open the UI, toggle Ask ↔ Agent, send the same prompts
 
 ## Modes and safety
 
@@ -92,7 +90,6 @@ Branch: main
 | `kairo` / `agent` | `confirm` | Pause before the first workspace edit |
 | `ask` | always `readonly` | Explore and answer; cannot write |
 | `agent --edit-policy auto` | `auto` | Apply edits without prompting |
-| `serve` | `confirm` (overridable) | Same engine; approvals in the browser |
 
 Approvals (terminal): **Enter** / `t` = approve for task · `a` = once · `r` = reject.
 
@@ -128,8 +125,7 @@ cargo run -p kairo --example basic_agent -- --ask /path/to/repo "…"
 | `workspace does not exist` | Path must be an existing directory |
 | Missing API key | Run `kairo` once for the setup wizard, or set `*_API_KEY` / edit `~/.config/kairo/config.toml` |
 | `.env` ignored | Env overrides user config; `dotenv` loads cwd `.env` — or rely on `config.toml` |
-| Edits blocked in oneshot + confirm | Use interactive/`serve`, or `--edit-policy auto` |
-| Port in use | `serve --port 8790` |
+| Edits blocked in oneshot + confirm | Use interactive mode, or `--edit-policy auto` |
 | Stopped with no edit / thrash | Narrow the task or name the file; see [known limitations](docs/KNOWN_LIMITATIONS.md) |
 
 ## More

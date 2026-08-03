@@ -9,7 +9,7 @@ use crate::authorization::{
 };
 use crate::state::stop_reason::StopReason;
 
-/// Everything a caller (CLI, web UI, script) needs to follow a run.
+/// Everything a caller (CLI, script) needs to follow a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
