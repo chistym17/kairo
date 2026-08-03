@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, PlanStepStatus, SidebarTab, TimelineItem};
+use super::feed::{self, spinner_glyph};
 use super::layout::{self, WidthMode};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -119,6 +120,22 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // Live activity (milestones + spinner) — updates in place while the agent runs.
+    if app.run.busy || !app.run.milestones.is_empty() || app.run.current.is_some() {
+        lines.push(Line::from(Span::styled(
+            "Activity",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for row in &app.run.milestones {
+            lines.push(Line::from(row.clone()));
+        }
+        if let Some(current) = &app.run.current {
+            let spin = spinner_glyph(app.run.spinner_frame);
+            lines.push(Line::from(format!("{spin} {current}")));
+        }
+        lines.push(Line::from(""));
+    }
+
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -177,6 +194,13 @@ fn tab_line(active: SidebarTab, mode: WidthMode) -> Line<'static> {
 }
 
 fn render_plan_lines(app: &App) -> Vec<Line<'static>> {
+    if app.sidebar.plan_steps.is_empty() {
+        return vec![
+            Line::from("PLAN"),
+            Line::from(""),
+            Line::from("No plan yet — it appears when the agent drafts one."),
+        ];
+    }
     let mut lines = vec![Line::from(format!(
         "PLAN  {}/{}",
         app.sidebar.plan_done, app.sidebar.plan_total
@@ -242,11 +266,21 @@ fn render_narrow_plan_strip(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" Input ");
+    let title = if app.run.busy {
+        " Input (busy — Esc cancel) "
+    } else {
+        " Input "
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let (text, style) = if app.composer.text.is_empty() {
+    let (text, style) = if app.run.busy {
+        (
+            "Agent is working…",
+            Style::default().add_modifier(Modifier::DIM),
+        )
+    } else if app.composer.text.is_empty() {
         (
             app.composer.placeholder.as_str(),
             Style::default().add_modifier(Modifier::DIM),
@@ -260,13 +294,14 @@ fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
         inner,
     );
 
-    // Place cursor at end of typed text (approx: first row, col = len).
-    if !app.composer.text.is_empty() {
-        let x = inner.x.saturating_add(app.composer.text.len() as u16);
-        let x = x.min(inner.x.saturating_add(inner.width.saturating_sub(1)));
-        frame.set_cursor_position((x, inner.y));
-    } else {
-        frame.set_cursor_position((inner.x, inner.y));
+    if !app.run.busy {
+        if !app.composer.text.is_empty() {
+            let x = inner.x.saturating_add(app.composer.text.len() as u16);
+            let x = x.min(inner.x.saturating_add(inner.width.saturating_sub(1)));
+            frame.set_cursor_position((x, inner.y));
+        } else {
+            frame.set_cursor_position((inner.x, inner.y));
+        }
     }
 }
 
@@ -276,7 +311,17 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
         WidthMode::Medium => "medium",
         WidthMode::Narrow => "narrow",
     };
-    let text = format!(" {}  ·  layout:{mode_label} ", app.status.hint);
+    let live = if app.run.busy {
+        if let Some(started) = app.run.started_at {
+            let ms = started.elapsed().as_millis() as u64;
+            format!(" · {}", feed::format_duration_ms(ms))
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    let text = format!(" {}  ·  layout:{mode_label}{live} ", app.status.hint);
     frame.render_widget(
         Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM)),
         area,

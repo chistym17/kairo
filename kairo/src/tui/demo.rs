@@ -4,6 +4,7 @@ use super::app::{
     AgentModeUi, App, ChangeEntry, ComposerState, ConversationState, HeaderState, PlanStepStatus,
     PlanStepView, Screen, SessionInfo, SidebarState, SidebarTab, StatusState, TimelineItem,
 };
+use super::feed::RunUiState;
 
 pub fn sample_app() -> App {
     App {
@@ -86,5 +87,17 @@ pub fn sample_app() -> App {
             hint: "Tab mode   Ctrl+P plan   Ctrl+D diff   Ctrl+I context   q quit".into(),
         },
         terminal_size: (120, 40),
+        run: RunUiState {
+            busy: true,
+            current: Some("Applying patch to src/lib/api.ts".into()),
+            milestones: vec![
+                "✓ Read frontend/src/lib/api.ts".into(),
+                "✓ Read backend/tasks/views.py".into(),
+            ],
+            verification: Vec::new(),
+            pending_approval: None,
+            spinner_frame: 0,
+            started_at: None,
+        },
     }
 }
