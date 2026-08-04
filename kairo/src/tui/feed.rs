@@ -272,7 +272,7 @@ pub fn refresh_status_hint(app: &mut App) {
             .current
             .as_deref()
             .unwrap_or("working…");
-        app.status.hint = format!("Esc cancel   ·   {activity}");
+        app.status.hint = format!("Esc cancel   PgUp/PgDn scroll   ·   {activity}");
         return;
     }
     if app.sidebar.tab == crate::tui::app::SidebarTab::Changes

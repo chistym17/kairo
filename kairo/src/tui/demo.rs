@@ -42,6 +42,9 @@ pub fn sample_app() -> App {
                 },
             ],
             scroll: 0,
+            follow_tail: true,
+            last_rows: 0,
+            last_viewport: 0,
         },
         sidebar: SidebarState {
             tab: SidebarTab::Plan,

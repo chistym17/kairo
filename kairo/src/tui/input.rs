@@ -70,6 +70,24 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             Action::Continue
         }
 
+        // Conversation scroll (works while the agent is busy).
+        (KeyModifiers::NONE, KeyCode::PageUp) => {
+            app.scroll_conversation(-10);
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::PageDown) => {
+            app.scroll_conversation(10);
+            Action::Continue
+        }
+        (KeyModifiers::CONTROL, KeyCode::Up) => {
+            app.scroll_conversation(-1);
+            Action::Continue
+        }
+        (KeyModifiers::CONTROL, KeyCode::Down) => {
+            app.scroll_conversation(1);
+            Action::Continue
+        }
+
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
             app.set_sidebar_tab(SidebarTab::Plan);
             Action::Continue

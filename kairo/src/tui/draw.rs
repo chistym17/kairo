@@ -70,31 +70,34 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), inner);
 }
 
-fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
+fn render_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border())
         .title(Span::styled(" Conversation ", theme::muted()));
     let inner = theme::pad(block.inner(area), 1, 1);
     frame.render_widget(block, area);
+    // Wipe stale cells so stdout corruption / long wraps cannot bleed across frames.
+    frame.render_widget(Clear, inner);
 
+    let width = inner.width.max(1) as usize;
     let mut lines: Vec<Line> = Vec::new();
     for item in &app.conversation.items {
         match item {
             TimelineItem::User(text) => {
                 lines.push(Line::from(Span::styled("You", theme::accent_bold())));
-                push_wrapped(&mut lines, text, theme::body());
+                push_wrapped(&mut lines, text, theme::body(), width);
                 lines.push(Line::from(""));
             }
             TimelineItem::Assistant(text) => {
                 lines.push(Line::from(Span::styled("Kairo", theme::accent_bold())));
-                push_wrapped(&mut lines, text, theme::body());
+                push_wrapped(&mut lines, text, theme::body(), width);
                 lines.push(Line::from(""));
             }
             TimelineItem::Activity { title, lines: body } => {
                 lines.push(Line::from(Span::styled(title.clone(), theme::accent_bold())));
                 for row in body {
-                    lines.push(Line::from(Span::styled(row.clone(), theme::muted())));
+                    push_wrapped(&mut lines, row, theme::muted(), width);
                 }
                 lines.push(Line::from(""));
             }
@@ -110,20 +113,14 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                     theme::accent_bold(),
                 )));
                 lines.push(Line::from(Span::styled("│", theme::muted())));
-                lines.push(Line::from(vec![
-                    Span::styled("│ ", theme::muted()),
-                    Span::styled(summary.clone(), theme::body()),
-                ]));
+                push_prefixed(&mut lines, "│ ", summary, theme::body(), width);
                 lines.push(Line::from(Span::styled("│", theme::muted())));
                 lines.push(Line::from(vec![
                     Span::styled("│ ", theme::muted()),
                     Span::styled("Changed", theme::accent()),
                 ]));
                 for c in changed {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", theme::muted()),
-                        Span::styled(c.clone(), theme::body()),
-                    ]));
+                    push_prefixed(&mut lines, "│ ", c, theme::body(), width);
                 }
                 lines.push(Line::from(Span::styled("│", theme::muted())));
                 lines.push(Line::from(vec![
@@ -131,16 +128,10 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled("Verification", theme::accent()),
                 ]));
                 for v in verification {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", theme::muted()),
-                        Span::styled(v.clone(), theme::body()),
-                    ]));
+                    push_prefixed(&mut lines, "│ ", v, theme::body(), width);
                 }
                 lines.push(Line::from(Span::styled("│", theme::muted())));
-                lines.push(Line::from(vec![
-                    Span::styled("│ ", theme::muted()),
-                    Span::styled(footer.clone(), theme::muted()),
-                ]));
+                push_prefixed(&mut lines, "│ ", footer, theme::muted(), width);
                 lines.push(Line::from(Span::styled("╰─", theme::accent())));
                 lines.push(Line::from(""));
             }
@@ -150,29 +141,111 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
     if app.run.busy || !app.run.milestones.is_empty() || app.run.current.is_some() {
         lines.push(Line::from(Span::styled("Activity", theme::accent_bold())));
         for row in &app.run.milestones {
-            lines.push(Line::from(Span::styled(row.clone(), theme::muted())));
+            push_wrapped(&mut lines, row, theme::muted(), width);
         }
         if let Some(current) = &app.run.current {
             let spin = spinner_glyph(app.run.spinner_frame);
-            lines.push(Line::from(Span::styled(
-                format!("{spin} {current}"),
+            push_wrapped(
+                &mut lines,
+                &format!("{spin} {current}"),
                 theme::accent(),
-            )));
+                width,
+            );
         }
         lines.push(Line::from(""));
     }
 
+    let total = lines.len() as u16;
+    let viewport = inner.height;
+    let max_scroll = total.saturating_sub(viewport);
+    app.conversation.last_rows = total;
+    app.conversation.last_viewport = viewport;
+    if app.conversation.follow_tail {
+        app.conversation.scroll = max_scroll;
+    } else {
+        app.conversation.scroll = app.conversation.scroll.min(max_scroll);
+    }
+
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.conversation.scroll, 0)),
+        // Hard-wrapped above; disable soft-wrap so row counts match scroll math.
+        Paragraph::new(lines).scroll((app.conversation.scroll, 0)),
         inner,
     );
 }
 
-fn push_wrapped(lines: &mut Vec<Line>, text: &str, style: Style) {
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+    use ratatui::style::Style;
+
+    #[test]
+    fn hard_wrap_breaks_long_lines() {
+        let mut lines = Vec::new();
+        push_wrapped(
+            &mut lines,
+            "one two three four five six seven",
+            Style::default(),
+            10,
+        );
+        assert!(lines.len() > 1);
+        for line in &lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.chars().count() <= 10, "line too long: {text:?}");
+        }
+    }
+
+    #[test]
+    fn hard_wrap_preserves_newlines() {
+        let mut lines = Vec::new();
+        push_wrapped(&mut lines, "hello\nworld", Style::default(), 40);
+        assert_eq!(lines.len(), 2);
+    }
+}
+
+/// Split on newlines and hard-wrap each paragraph to `width` columns (char-based).
+fn push_wrapped(lines: &mut Vec<Line>, text: &str, style: Style, width: usize) {
+    let width = width.max(1);
     for paragraph in text.split('\n') {
-        lines.push(Line::from(Span::styled(paragraph.to_string(), style)));
+        if paragraph.is_empty() {
+            lines.push(Line::from(Span::styled(String::new(), style)));
+            continue;
+        }
+        let chars: Vec<char> = paragraph.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let mut end = (i + width).min(chars.len());
+            if end < chars.len() {
+                if let Some(rel) = chars[i..end].iter().rposition(|c| *c == ' ') {
+                    if rel > 0 {
+                        end = i + rel;
+                    }
+                }
+            }
+            let chunk: String = chars[i..end].iter().collect();
+            lines.push(Line::from(Span::styled(chunk.trim_end().to_string(), style)));
+            i = end;
+            while i < chars.len() && chars[i] == ' ' {
+                i += 1;
+            }
+        }
+    }
+}
+
+fn push_prefixed(lines: &mut Vec<Line>, prefix: &str, text: &str, style: Style, width: usize) {
+    let prefix_cols = prefix.chars().count();
+    let body_width = width.saturating_sub(prefix_cols).max(1);
+    let mut body_lines: Vec<Line> = Vec::new();
+    push_wrapped(&mut body_lines, text, style, body_width);
+    for body in body_lines {
+        let content = body
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), theme::muted()),
+            Span::styled(content, style),
+        ]));
     }
 }
 
@@ -516,6 +589,7 @@ fn render_help_modal(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("Shift+Enter   Newline", theme::body())),
         Line::from(Span::styled("Esc           Cancel / close", theme::body())),
         Line::from(Span::styled("Ctrl+P/D/I    Plan / Changes / Context", theme::body())),
+        Line::from(Span::styled("PgUp/PgDn     Scroll conversation", theme::body())),
         Line::from(Span::styled("Ctrl+L        Clear conversation", theme::body())),
         Line::from(Span::styled("a / t / r     Approve once / task / reject", theme::body())),
         Line::from(Span::styled("d             Diff (from approval)", theme::body())),

@@ -60,7 +60,10 @@ pub async fn run_with_options(opts: TuiOptions) -> Result<()> {
         bail!("kairo tui requires an interactive terminal");
     }
 
+    // TUI owns the alternate screen — never println to stdout (even with --verbose).
+    // Diagnostics still land in the run JSONL log.
     logging::configure_cli_quiet(opts.verbose);
+    logging::set_quiet(true);
     user_config::ensure_configured(true).context("provider setup")?;
 
     let workspace = detect_workspace(opts.workspace).context("failed to detect workspace")?;
@@ -351,6 +354,7 @@ async fn run_live_loop(
                     refresh_status_hint(app);
                 }
                 Action::Send(line) => {
+                    app.conversation.follow_tail = true;
                     app.conversation
                         .items
                         .push(TimelineItem::User(line.clone()));
