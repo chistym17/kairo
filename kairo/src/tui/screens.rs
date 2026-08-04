@@ -10,6 +10,8 @@ use crate::session::SessionSummary;
 pub struct WelcomeState {
     pub workspace_display: String,
     pub provider: String,
+    /// Machine id used for curated model lists / config writes (`deepseek`, …).
+    pub provider_id: String,
     pub model: String,
     pub edit_policy: String,
     pub message: Option<String>,
@@ -19,12 +21,14 @@ impl WelcomeState {
     pub fn new(
         workspace_display: impl Into<String>,
         provider: impl Into<String>,
+        provider_id: impl Into<String>,
         model: impl Into<String>,
         edit_policy: impl Into<String>,
     ) -> Self {
         Self {
             workspace_display: workspace_display.into(),
             provider: provider.into(),
+            provider_id: provider_id.into(),
             model: model.into(),
             edit_policy: edit_policy.into(),
             message: None,

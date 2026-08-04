@@ -386,6 +386,7 @@ mod tests {
                     summary: "apply_patch src/lib/api.ts".into(),
                     reason: "needs approval".into(),
                     paths: vec![PathBuf::from("src/lib/api.ts")],
+                    preview: Some("-due_date\n+date\n".into()),
                 },
             },
         );

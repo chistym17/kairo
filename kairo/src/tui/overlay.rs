@@ -7,6 +7,24 @@ pub enum Overlay {
     Approval(ApprovalView),
     Diff(DiffView),
     Help,
+    ModelPicker(ModelPickerView),
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelPickerView {
+    pub provider_id: String,
+    pub models: Vec<String>,
+    pub selected: usize,
+}
+
+impl ModelPickerView {
+    pub fn move_sel(&mut self, delta: i32) {
+        if self.models.is_empty() {
+            return;
+        }
+        let len = self.models.len() as i32;
+        self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -54,10 +72,17 @@ impl DiffView {
             .first()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(unknown path)".into());
+
+        if let Some(preview) = request.preview.as_deref().filter(|s| !s.trim().is_empty()) {
+            let mut view = Self::from_text(format!("Diff: {path}"), preview);
+            view.return_to_approval = Some(request.clone());
+            return view;
+        }
+
         let mut lines = vec![
             DiffLine {
                 kind: DiffLineKind::Meta,
-                text: "Proposed change (patch body not available before approval)".into(),
+                text: "Proposed change (no patch preview available)".into(),
             },
             DiffLine {
                 kind: DiffLineKind::Meta,

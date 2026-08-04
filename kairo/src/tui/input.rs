@@ -168,6 +168,10 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
 }
 
 fn handle_welcome_key(key: KeyEvent, app: &mut App) -> Action {
+    if matches!(app.overlay, Some(Overlay::ModelPicker(_))) {
+        return handle_model_picker_key(key, app);
+    }
+
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c'))
         | (KeyModifiers::NONE, KeyCode::Char('q'))
@@ -175,11 +179,43 @@ fn handle_welcome_key(key: KeyEvent, app: &mut App) -> Action {
         (KeyModifiers::NONE, KeyCode::Enter) => Action::StartNewSession,
         (KeyModifiers::NONE, KeyCode::Char('s')) => Action::OpenSessions,
         (KeyModifiers::NONE, KeyCode::Char('m')) => {
-            app.welcome.message = Some(format!(
-                "Model is `{}` via {}. Change it with `kairo config`.",
-                app.welcome.model, app.welcome.provider
-            ));
+            app.open_model_picker();
             Action::Continue
+        }
+        _ => Action::Continue,
+    }
+}
+
+fn handle_model_picker_key(key: KeyEvent, app: &mut App) -> Action {
+    match (key.modifiers, key.code) {
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            app.overlay = None;
+            app.status.hint =
+                "Enter start · s sessions · m change model · q quit".into();
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
+            if let Some(Overlay::ModelPicker(p)) = app.overlay.as_mut() {
+                p.move_sel(-1);
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::Char('j')) => {
+            if let Some(Overlay::ModelPicker(p)) = app.overlay.as_mut() {
+                p.move_sel(1);
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Enter) => match app.apply_selected_model() {
+            Ok(()) => Action::Continue,
+            Err(e) => {
+                app.welcome.message = Some(format!("Could not save model: {e}"));
+                app.overlay = None;
+                Action::Continue
+            }
+        },
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+            Action::Quit
         }
         _ => Action::Continue,
     }
@@ -219,10 +255,12 @@ fn handle_overlay_key(key: KeyEvent, app: &mut App) -> Action {
         Some(Overlay::Approval(_)) => "approval",
         Some(Overlay::Diff(_)) => "diff",
         Some(Overlay::Help) => "help",
+        Some(Overlay::ModelPicker(_)) => "model",
         None => return Action::Continue,
     };
 
     match kind {
+        "model" => handle_model_picker_key(key, app),
         "approval" => match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Char('a')) => Action::ApproveOnce,
             (KeyModifiers::NONE, KeyCode::Char('t')) => Action::ApproveForTask,

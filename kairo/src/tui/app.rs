@@ -259,6 +259,7 @@ impl App {
             welcome: WelcomeState::new(
                 workspace_display,
                 "—",
+                "deepseek",
                 model,
                 policy_label,
             ),
@@ -269,17 +270,24 @@ impl App {
     pub fn with_welcome(
         mut self,
         provider: &str,
+        provider_id: &str,
         model: &str,
         workspace_display: &str,
         edit_policy: &str,
     ) -> Self {
         self.screen = Screen::Welcome;
-        self.welcome = WelcomeState::new(workspace_display, provider, model, edit_policy);
+        self.welcome = WelcomeState::new(
+            workspace_display,
+            provider,
+            provider_id,
+            model,
+            edit_policy,
+        );
         self.header.model = model.to_string();
         self.header.workspace = workspace_display.to_string();
         self.header.edit_policy = edit_policy.to_string();
         self.status.hint =
-            "Enter start · s sessions · m model info · q quit".into();
+            "Enter start · s sessions · m change model · q quit".into();
         self
     }
 
@@ -295,7 +303,73 @@ impl App {
         self.screen = Screen::Welcome;
         self.overlay = None;
         self.status.hint =
-            "Enter start · s sessions · m model info · q quit".into();
+            "Enter start · s sessions · m change model · q quit".into();
+    }
+
+    pub fn open_model_picker(&mut self) {
+        let provider_id = self.welcome.provider_id.clone();
+        let mut models: Vec<String> = crate::user_config::curated_models(&provider_id)
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        if !models.iter().any(|m| m == &self.welcome.model) {
+            models.insert(0, self.welcome.model.clone());
+        }
+        let selected = models
+            .iter()
+            .position(|m| m == &self.welcome.model)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::ModelPicker(crate::tui::overlay::ModelPickerView {
+            provider_id,
+            models,
+            selected,
+        }));
+        self.status.hint = "↑↓ select model · Enter save · Esc cancel".into();
+    }
+
+    pub fn apply_selected_model(&mut self) -> Result<(), String> {
+        let Some(Overlay::ModelPicker(picker)) = self.overlay.as_ref() else {
+            return Ok(());
+        };
+        let model = picker
+            .models
+            .get(picker.selected)
+            .cloned()
+            .ok_or_else(|| "no model selected".to_string())?;
+        let provider_id = picker.provider_id.clone();
+
+        let mut cfg = crate::user_config::load()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| crate::user_config::UserConfig {
+                provider: provider_id.clone(),
+                api_key: String::new(),
+                model: model.clone(),
+            });
+        // Keep existing key; update model (+ provider id if missing).
+        if cfg.provider.trim().is_empty() {
+            cfg.provider = provider_id;
+        }
+        cfg.model = model.clone();
+        if cfg.api_key.trim().is_empty() {
+            // Prefer env key so save() succeeds when config was env-only.
+            let env_key = crate::user_config::key_env_var(&cfg.provider);
+            if let Ok(v) = std::env::var(env_key) {
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    cfg.api_key = v;
+                }
+            }
+        }
+        crate::user_config::save(&cfg).map_err(|e| e.to_string())?;
+
+        self.welcome.model = model.clone();
+        self.header.model = model.clone();
+        self.sidebar.session.model = model.clone();
+        self.welcome.message = Some(format!("Model set to `{model}` for the next session."));
+        self.overlay = None;
+        self.status.hint =
+            "Enter start · s sessions · m change model · q quit".into();
+        Ok(())
     }
 
     pub fn enter_session_screen(&mut self) {
@@ -431,7 +505,20 @@ impl App {
             .first()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let mut view = if !path.is_empty() {
+
+        // Prefer the proposed patch preview; fall back to git diff, then metadata.
+        let mut view = if let Some(preview) = request
+            .preview
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let title = if path.is_empty() {
+                "Proposed diff".into()
+            } else {
+                format!("Diff: {path}")
+            };
+            DiffView::from_text(title, preview)
+        } else if !path.is_empty() {
             if let Some(body) = crate::tui::overlay::load_git_diff(&self.workspace_path, &path) {
                 DiffView::from_text(format!("Diff: {path}"), &body)
             } else {
@@ -455,7 +542,7 @@ impl App {
             Some(Overlay::Approval(_)) => {
                 self.overlay = None;
             }
-            Some(Overlay::Help) | None => {}
+            Some(Overlay::Help) | Some(Overlay::ModelPicker(_)) | None => {}
         }
         crate::tui::feed::refresh_status_hint(self);
     }
