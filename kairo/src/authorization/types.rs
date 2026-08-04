@@ -82,6 +82,9 @@ pub struct ApprovalRequest {
     pub reason: String,
     /// Reserved for revision-tied expiry; unused in v1.
     pub expires_at_revision: Option<String>,
+    /// Proposed patch / file body for UI preview (truncated when large).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,27 +187,28 @@ fn is_package_install_shell(command: &str) -> bool {
 }
 
 pub fn build_approval_request(action: &Action, effect: ToolEffect) -> ApprovalRequest {
-    let (summary, proposed_scope) = match action {
-        Action::WriteFile { path, .. } => (
+    let (summary, proposed_scope, preview) = match action {
+        Action::WriteFile { path, content } => (
             format!("write_file {}", path.display()),
             Scope::Paths(vec![path.clone()]),
+            Some(truncate_preview(&format_write_preview(content), 8_000)),
         ),
-        Action::ApplyPatch { path, .. } => (
+        Action::ApplyPatch { path, diff } => (
             format!("apply_patch {}", path.display()),
             Scope::Paths(vec![path.clone()]),
+            Some(truncate_preview(diff, 12_000)),
         ),
         Action::RunCommand { cmd, cwd, .. } => (
             format!("run_command in {}: {cmd}", cwd.display()),
             Scope::Unspecified,
+            None,
         ),
         Action::RunShell { command, cwd, .. } => (
             format!("run_shell in {}: {command}", cwd.display()),
             Scope::Unspecified,
+            None,
         ),
-        other => (
-            format!("{other:?}"),
-            Scope::Unspecified,
-        ),
+        other => (format!("{other:?}"), Scope::Unspecified, None),
     };
 
     let reason = match effect {
@@ -228,7 +232,30 @@ pub fn build_approval_request(action: &Action, effect: ToolEffect) -> ApprovalRe
         proposed_scope,
         reason,
         expires_at_revision: None,
+        preview,
     }
+}
+
+fn format_write_preview(content: &str) -> String {
+    let mut out = String::from("--- /dev/null\n+++ proposed write\n");
+    for line in content.lines() {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !content.ends_with('\n') && !content.is_empty() {
+        // already newline-terminated per line loop for content.lines(); ok
+    }
+    out
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push_str("\n… [preview truncated]");
+    out
 }
 
 /// Decide whether `effect` may proceed under the current policy / grants.
@@ -256,6 +283,7 @@ pub fn authorize(effect: ToolEffect, auth: &AuthorizationState) -> Authorization
                         reason: "ConfirmBeforeFirstEdit: workspace mutation needs approval"
                             .to_string(),
                         expires_at_revision: None,
+                        preview: None,
                     })
                 }
             }
@@ -272,6 +300,7 @@ pub fn authorize(effect: ToolEffect, auth: &AuthorizationState) -> Authorization
                         _ => "external side effect needs separate approval".to_string(),
                     },
                     expires_at_revision: None,
+                    preview: None,
                 })
             }
         },
@@ -312,6 +341,15 @@ mod tests {
             cwd: PathBuf::from("."),
             timeout_secs: 30,
         }
+    }
+
+    #[test]
+    fn build_approval_includes_patch_preview() {
+        let req = build_approval_request(&patch_action(), ToolEffect::WorkspaceMutation);
+        assert!(req.summary.contains("apply_patch"));
+        let preview = req.preview.expect("preview");
+        assert!(preview.contains("-x"));
+        assert!(preview.contains("+y"));
     }
 
     #[test]

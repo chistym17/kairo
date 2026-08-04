@@ -10,6 +10,7 @@ pub mod loop_engine;
 pub mod repo_intel;
 pub mod state;
 pub mod tools;
+pub mod tui;
 pub mod verification;
 
 pub mod benchmark;

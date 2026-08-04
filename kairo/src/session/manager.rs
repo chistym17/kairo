@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use super::session::{Session, SessionSettings};
-use super::storage::{self, default_sessions_dir};
+use super::storage::{self, default_sessions_dir, SessionSummary};
 
 /// Creates, loads, and saves sessions on disk.
 pub struct SessionManager {
@@ -46,6 +46,11 @@ impl SessionManager {
 
     pub fn exists(&self, session_id: &str) -> bool {
         storage::exists(&self.sessions_dir, session_id)
+    }
+
+    /// Newest-first summaries for the session browser.
+    pub fn list(&self) -> Result<Vec<SessionSummary>> {
+        storage::list(&self.sessions_dir)
     }
 
     pub fn update<F>(&self, session_id: &str, mut f: F) -> Result<Session>
