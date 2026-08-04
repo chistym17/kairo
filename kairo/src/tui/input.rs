@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, SidebarTab};
+use super::app::{App, Screen, SidebarTab};
 use super::overlay::Overlay;
 
 pub enum Action {
@@ -15,11 +15,25 @@ pub enum Action {
     Reject,
     /// Cooperative cancel of the in-flight run.
     CancelRun,
+    /// Leave the active session and return to Welcome.
+    LeaveSession,
+    /// Open a new agent session from Welcome / Sessions.
+    StartNewSession,
+    /// Resume the selected session from the browser.
+    ResumeSelected,
+    /// Open the sessions browser.
+    OpenSessions,
 }
 
 pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
     if key.kind != crossterm::event::KeyEventKind::Press {
         return Action::Continue;
+    }
+
+    match app.screen {
+        Screen::Welcome => return handle_welcome_key(key, app),
+        Screen::Sessions => return handle_sessions_key(key, app),
+        Screen::Session => {}
     }
 
     // Modal overlays capture keys first.
@@ -30,7 +44,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
         (KeyModifiers::NONE, KeyCode::Char('q')) if app.composer.is_empty() && !app.run.busy => {
-            Action::Quit
+            Action::LeaveSession
         }
 
         (KeyModifiers::NONE, KeyCode::Char('?')) => {
@@ -45,7 +59,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
                 app.composer.clear();
                 Action::Continue
             } else {
-                Action::Quit
+                Action::LeaveSession
             }
         }
 
@@ -71,10 +85,8 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             Action::Continue
         }
 
-        // Editing is locked while the agent runs (unless opening help — handled above).
         _ if app.run.busy => Action::Continue,
 
-        // Changes tab: navigate / open diff when composer is empty.
         (KeyModifiers::NONE, KeyCode::Up)
             if app.sidebar.tab == SidebarTab::Changes && app.composer.is_empty() =>
         {
@@ -151,6 +163,53 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             Action::Continue
         }
 
+        _ => Action::Continue,
+    }
+}
+
+fn handle_welcome_key(key: KeyEvent, app: &mut App) -> Action {
+    match (key.modifiers, key.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c'))
+        | (KeyModifiers::NONE, KeyCode::Char('q'))
+        | (KeyModifiers::NONE, KeyCode::Esc) => Action::Quit,
+        (KeyModifiers::NONE, KeyCode::Enter) => Action::StartNewSession,
+        (KeyModifiers::NONE, KeyCode::Char('s')) => Action::OpenSessions,
+        (KeyModifiers::NONE, KeyCode::Char('m')) => {
+            app.welcome.message = Some(format!(
+                "Model is `{}` via {}. Change it with `kairo config`.",
+                app.welcome.model, app.welcome.provider
+            ));
+            Action::Continue
+        }
+        _ => Action::Continue,
+    }
+}
+
+fn handle_sessions_key(key: KeyEvent, app: &mut App) -> Action {
+    match (key.modifiers, key.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+            Action::Quit
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            app.show_welcome();
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Char('n')) => Action::StartNewSession,
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            if app.sessions.entries.is_empty() {
+                Action::StartNewSession
+            } else {
+                Action::ResumeSelected
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
+            app.sessions.move_sel(-1);
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::Char('j')) => {
+            app.sessions.move_sel(1);
+            Action::Continue
+        }
         _ => Action::Continue,
     }
 }

@@ -6,9 +6,9 @@ use crate::api::ApprovalRequest;
 use crate::tui::demo;
 use crate::tui::feed::RunUiState;
 use crate::tui::overlay::{ApprovalView, DiffView, Overlay};
+use crate::tui::screens::{SessionBrowserState, WelcomeState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Welcome / Sessions screens land in a later part.
 pub enum Screen {
     Welcome,
     Session,
@@ -162,7 +162,6 @@ pub struct StatusState {
 
 #[derive(Debug, Clone)]
 pub struct App {
-    #[allow(dead_code)] // Multi-screen navigation lands in a later part.
     pub screen: Screen,
     pub header: HeaderState,
     pub conversation: ConversationState,
@@ -174,6 +173,8 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Absolute workspace path (for git diff lookups).
     pub workspace_path: PathBuf,
+    pub welcome: WelcomeState,
+    pub sessions: SessionBrowserState,
 }
 
 impl App {
@@ -255,7 +256,116 @@ impl App {
             run: RunUiState::default(),
             overlay: None,
             workspace_path,
+            welcome: WelcomeState::new(
+                workspace_display,
+                "—",
+                model,
+                policy_label,
+            ),
+            sessions: SessionBrowserState::from_list(Vec::new(), None),
         }
+    }
+
+    pub fn with_welcome(
+        mut self,
+        provider: &str,
+        model: &str,
+        workspace_display: &str,
+        edit_policy: &str,
+    ) -> Self {
+        self.screen = Screen::Welcome;
+        self.welcome = WelcomeState::new(workspace_display, provider, model, edit_policy);
+        self.header.model = model.to_string();
+        self.header.workspace = workspace_display.to_string();
+        self.header.edit_policy = edit_policy.to_string();
+        self.status.hint =
+            "Enter start · s sessions · m model info · q quit".into();
+        self
+    }
+
+    pub fn show_sessions(&mut self, entries: Vec<crate::session::SessionSummary>) {
+        self.sessions =
+            SessionBrowserState::from_list(entries, Some(self.workspace_path.clone()));
+        self.screen = Screen::Sessions;
+        self.status.hint =
+            "↑↓ select · Enter resume · n new session · Esc back · q quit".into();
+    }
+
+    pub fn show_welcome(&mut self) {
+        self.screen = Screen::Welcome;
+        self.overlay = None;
+        self.status.hint =
+            "Enter start · s sessions · m model info · q quit".into();
+    }
+
+    pub fn enter_session_screen(&mut self) {
+        self.screen = Screen::Session;
+        self.overlay = None;
+        crate::tui::feed::refresh_status_hint(self);
+    }
+
+    /// Load prior messages / plan / files into the conversation panels.
+    pub fn hydrate_from_persisted(&mut self, session: &crate::session::Session) {
+        self.conversation.items.clear();
+        for msg in &session.messages {
+            match msg {
+                crate::session::Message::User { content } => {
+                    self.conversation
+                        .items
+                        .push(TimelineItem::User(content.clone()));
+                }
+                crate::session::Message::Assistant { content } => {
+                    // Skip noisy session-update notes in the timeline.
+                    if content.starts_with("Session update:") {
+                        continue;
+                    }
+                    self.conversation
+                        .items
+                        .push(TimelineItem::Assistant(content.clone()));
+                }
+                _ => {}
+            }
+        }
+        if self.conversation.items.is_empty() {
+            self.conversation.items.push(TimelineItem::Assistant(
+                "Resumed session. Type a task and press Enter.".into(),
+            ));
+        }
+
+        if let Some(plan) = &session.task.plan {
+            let mut views = Vec::new();
+            let mut done = 0usize;
+            let mut marked_active = false;
+            for step in &plan.steps {
+                let status = if step.done {
+                    done += 1;
+                    PlanStepStatus::Done
+                } else if !marked_active {
+                    marked_active = true;
+                    PlanStepStatus::Active
+                } else {
+                    PlanStepStatus::Todo
+                };
+                views.push(PlanStepView {
+                    text: step.text.clone(),
+                    status,
+                });
+            }
+            self.sidebar.plan_steps = views;
+            self.sidebar.plan_done = done;
+            self.sidebar.plan_total = plan.steps.len();
+        }
+
+        self.sidebar.changes = session
+            .task
+            .modified_files
+            .iter()
+            .map(|p| ChangeEntry {
+                path: p.display().to_string(),
+                stats: "changed".into(),
+            })
+            .collect();
+        self.sidebar.selected_change = 0;
     }
 
     pub fn set_sidebar_tab(&mut self, tab: SidebarTab) {

@@ -5,6 +5,7 @@ use super::app::{
     PlanStepView, Screen, SessionInfo, SidebarState, SidebarTab, StatusState, TimelineItem,
 };
 use super::feed::RunUiState;
+use super::screens::{SessionBrowserState, WelcomeState};
 
 pub fn sample_app() -> App {
     App {
@@ -99,5 +100,12 @@ pub fn sample_app() -> App {
         },
         overlay: None,
         workspace_path: std::path::PathBuf::from("."),
+        welcome: WelcomeState::new(
+            "~/projects/annotaa",
+            "DeepSeek",
+            "deepseek-v4-flash",
+            "Confirm edits",
+        ),
+        sessions: SessionBrowserState::from_list(Vec::new(), None),
     }
 }
