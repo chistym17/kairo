@@ -6,13 +6,26 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, PlanStepStatus, SidebarTab, TimelineItem};
+use super::app::{App, PlanStepStatus, Screen, SidebarTab, TimelineItem};
 use super::feed::{self, spinner_glyph};
 use super::layout::{self, WidthMode};
 use super::overlay::{DiffLineKind, Overlay};
+use super::screens::{self, relative_time};
 use super::theme;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    match app.screen {
+        Screen::Welcome => {
+            render_welcome(frame, frame.area(), app);
+            return;
+        }
+        Screen::Sessions => {
+            render_sessions(frame, frame.area(), app);
+            return;
+        }
+        Screen::Session => {}
+    }
+
     // Grow/shrink the composer from content before computing layout.
     let width_guess = frame.area().width.saturating_mul(72) / 100;
     // Account for borders + horizontal padding inside the composer.
@@ -517,6 +530,132 @@ fn render_help_modal(frame: &mut Frame, area: Rect) {
     let inner = theme::pad(block.inner(popup), 1, 1);
     frame.render_widget(block, popup);
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_welcome(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border());
+    let inner = theme::pad(block.inner(area), 2, 1);
+    frame.render_widget(block, area);
+
+    let w = &app.welcome;
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled("KAIRO", theme::accent_bold())),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Coding agent for your terminal",
+            theme::muted(),
+        )),
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Workspace  ", theme::muted()),
+            Span::styled(w.workspace_display.clone(), theme::body()),
+        ]),
+        Line::from(vec![
+            Span::styled("Provider   ", theme::muted()),
+            Span::styled(w.provider.clone(), theme::body()),
+        ]),
+        Line::from(vec![
+            Span::styled("Model      ", theme::muted()),
+            Span::styled(w.model.clone(), theme::body()),
+        ]),
+        Line::from(vec![
+            Span::styled("Policy     ", theme::muted()),
+            Span::styled(w.edit_policy.clone(), theme::body()),
+        ]),
+        Line::from(""),
+    ];
+    if let Some(msg) = &w.message {
+        lines.push(Line::from(Span::styled(msg.clone(), theme::accent())));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "[Enter] Start agent        [s] Sessions        [m] Model info        [q] Quit",
+        theme::muted(),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Left),
+        inner,
+    );
+}
+
+fn render_sessions(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border_focus())
+        .title(Span::styled(" Sessions ", theme::accent_bold()))
+        .title_bottom(Span::styled(
+            " ↑↓ select · Enter resume · n new · Esc back ",
+            theme::muted(),
+        ));
+    let inner = theme::pad(block.inner(area), 1, 1);
+    frame.render_widget(block, area);
+
+    if app.sessions.entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "No saved sessions for this workspace yet.\nPress n or Esc, then Enter to start one.",
+                theme::muted(),
+            )),
+            inner,
+        );
+        return;
+    }
+
+    let groups = screens::group_sessions(&app.sessions.entries);
+    let mut lines: Vec<Line> = Vec::new();
+    for group in &groups {
+        lines.push(Line::from(Span::styled(
+            group.label.clone(),
+            theme::accent_bold(),
+        )));
+        for &idx in &group.indices {
+            let entry = &app.sessions.entries[idx];
+            let selected = idx == app.sessions.selected;
+            let marker = if selected { ">" } else { " " };
+            let style = if selected {
+                theme::accent_bold()
+            } else {
+                theme::body()
+            };
+            let meta = format!(
+                "{} · {} file{} · {}",
+                entry.status,
+                entry.file_count,
+                if entry.file_count == 1 { "" } else { "s" },
+                relative_time(&entry.updated_at),
+            );
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker} {:<42}", truncate_pad(&entry.title, 42)), style),
+                Span::styled(format!("  {meta}"), theme::muted()),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.sessions.scroll, 0)),
+        inner,
+    );
+}
+
+fn truncate_pad(s: &str, width: usize) -> String {
+    let mut chars: Vec<char> = s.chars().collect();
+    if chars.len() > width {
+        chars.truncate(width.saturating_sub(1));
+        chars.push('…');
+    }
+    let mut out: String = chars.into_iter().collect();
+    while out.chars().count() < width {
+        out.push(' ');
+    }
+    out
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

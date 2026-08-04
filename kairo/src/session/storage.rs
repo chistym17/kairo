@@ -72,6 +72,105 @@ pub fn exists(base: &Path, session_id: &str) -> bool {
     session_file_path(base, session_id).is_file()
 }
 
+/// Lightweight row for session browsers (does not keep full message history).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: String,
+    pub workspace_root: PathBuf,
+    pub updated_at: String,
+    pub created_at: String,
+    pub status: String,
+    pub file_count: usize,
+    pub model_id: String,
+}
+
+/// List persisted sessions, newest `updated_at` first. Skips corrupt entries.
+pub fn list(base: &Path) -> Result<Vec<SessionSummary>> {
+    if !base.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(base)
+        .with_context(|| format!("failed to read sessions dir {}", base.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if !exists(base, &id) {
+            continue;
+        }
+        match load(base, &id) {
+            Ok(session) => out.push(summary_from_session(&session)),
+            Err(_) => continue,
+        }
+    }
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(out)
+}
+
+pub fn summary_from_session(session: &Session) -> SessionSummary {
+    let title = session
+        .task
+        .objective
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            session.messages.iter().find_map(|m| match m {
+                crate::session::Message::User { content } => {
+                    let t = content.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(truncate_title(t, 56))
+                    }
+                }
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| "New session".into());
+
+    let file_count = session.task.modified_files.len();
+    let verified = session.task.verification.iter().any(|v| {
+        matches!(
+            v.status,
+            crate::verification::VerificationStatus::Passed
+        )
+    });
+    let status = if verified {
+        "Verified".into()
+    } else if file_count > 0 {
+        "Changed".into()
+    } else if session.messages.is_empty() {
+        "Empty".into()
+    } else {
+        "Saved".into()
+    };
+
+    SessionSummary {
+        id: session.id.clone(),
+        title,
+        workspace_root: session.workspace_root.clone(),
+        updated_at: session.updated_at.clone(),
+        created_at: session.created_at.clone(),
+        status,
+        file_count,
+        model_id: session.settings.model_id.clone(),
+    }
+}
+
+fn truncate_title(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        out.push('…');
+    }
+    out.replace('\n', " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +213,24 @@ mod tests {
 
         let loaded = load(base.path(), &session.id).unwrap();
         assert_eq!(loaded.schema_version, crate::session::SESSION_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn list_returns_newest_first() {
+        let base = tempfile::tempdir().unwrap();
+        let mut older = Session::new("/tmp/a", SessionSettings::default());
+        older.add_user_message("old task");
+        older.updated_at = "2020-01-01T00:00:00Z".into();
+        save(base.path(), &older).unwrap();
+
+        let mut newer = Session::new("/tmp/a", SessionSettings::default());
+        newer.add_user_message("new task");
+        newer.updated_at = "2024-06-01T00:00:00Z".into();
+        save(base.path(), &newer).unwrap();
+
+        let listed = list(base.path()).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, newer.id);
+        assert!(listed[0].title.contains("new task"));
     }
 }
