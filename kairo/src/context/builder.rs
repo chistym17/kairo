@@ -30,6 +30,10 @@ impl ContextBuilder {
         self
     }
 
+    pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
+        self.system_prompt = prompt.into();
+    }
+
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
     }

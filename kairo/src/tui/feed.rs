@@ -284,8 +284,7 @@ pub fn refresh_status_hint(app: &mut App) {
         return;
     }
     app.status.hint =
-        "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · ? help · q quit"
-            .into();
+        "Enter send · Tab Ask/Agent · Shift+Enter newline · Esc cancel · ? help · q quit".into();
 }
 
 fn truncate(s: &str, max: usize) -> String {

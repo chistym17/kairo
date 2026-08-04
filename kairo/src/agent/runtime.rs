@@ -84,6 +84,11 @@ impl AgentRuntime {
         self
     }
 
+    /// Swap the base system prompt (e.g. Ask ↔ Agent mid-session).
+    pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
+        self.context_builder.set_system_prompt(prompt);
+    }
+
     pub async fn run(
         &self,
         goal: impl Into<String>,

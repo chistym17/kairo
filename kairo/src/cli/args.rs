@@ -62,12 +62,59 @@ pub struct CliArgs {
     pub tui_demo: bool,
 }
 
+/// How bare `kairo` presents itself. Explicit subcommands always win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiMode {
+    /// Full-screen Ratatui interface.
+    Tui,
+    /// Classic scrolling terminal REPL.
+    Terminal,
+}
+
+impl UiMode {
+    /// From `KAIRO_UI`. Default: TUI.
+    ///
+    /// Common values (case-insensitive):
+    /// - `tui` → full-screen UI
+    /// - `terminal` → classic scrolling CLI
+    ///
+    /// Also accepted: `full` / `ui` → tui; `repl` / `cli` / `text` / `agent` → terminal.
+    pub fn from_env() -> Self {
+        Self::parse_env(std::env::var("KAIRO_UI").ok().as_deref())
+    }
+
+    pub fn parse_env(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Self::Tui,
+            Some(v) => match v.to_ascii_lowercase().as_str() {
+                "tui" | "full" | "ui" => Self::Tui,
+                "terminal" | "repl" | "cli" | "text" | "agent" => Self::Terminal,
+                _ => Self::Tui,
+            },
+        }
+    }
+
+    pub fn as_command(self) -> Command {
+        match self {
+            Self::Tui => Command::Tui,
+            Self::Terminal => Command::Agent,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tui => "tui",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
 /// Parse `argv` (without the program name). Returns `None` when help was printed.
 pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
-    // Bare `kairo` → full-screen TUI; use `kairo agent` for the classic REPL.
+    // Bare `kairo` → KAIRO_UI (default tui). Explicit `agent` / `tui` always win.
     if args.is_empty() {
         return Ok(Some(CliArgs {
-            command: Command::Tui,
+            command: UiMode::from_env().as_command(),
             workspace: None,
             edit_policy: None,
             output: OutputFormat::Text,
@@ -95,7 +142,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         other => {
             return Err(format!(
                 "unknown subcommand '{other}'. Use: ask | agent | config | health | tui\n\
-                 Or run bare `kairo` for the full-screen TUI.\n\
+                 Bare `kairo` uses KAIRO_UI (tui|terminal; default tui).\n\
                  Try: kairo --help"
             ));
         }
@@ -312,11 +359,38 @@ mod tests {
     }
 
     #[test]
-    fn bare_invocation_is_tui() {
-        let cli = parse_args(&[]).unwrap().unwrap();
+    fn bare_invocation_defaults_to_tui() {
+        // Don't depend on the process env for the default path — unit-test parse_env.
+        assert_eq!(UiMode::parse_env(None), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("")), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("tui")).as_command(), Command::Tui);
+    }
+
+    #[test]
+    fn kairo_ui_env_values() {
+        assert_eq!(UiMode::parse_env(Some("terminal")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("TERMINAL")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("repl")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("CLI")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("text")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("agent")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("full")), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("ui")), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("nope")), UiMode::Tui); // unknown → tui
+        assert_eq!(UiMode::Terminal.as_command(), Command::Agent);
+        assert_eq!(UiMode::Terminal.as_str(), "terminal");
+    }
+
+    #[test]
+    fn explicit_agent_subcommand_ignores_ui_preference() {
+        let cli = parse_args(&args(&["agent"])).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Agent);
+    }
+
+    #[test]
+    fn explicit_tui_subcommand() {
+        let cli = parse_args(&args(&["tui"])).unwrap().unwrap();
         assert_eq!(cli.command, Command::Tui);
-        assert!(!cli.tui_demo);
-        assert!(cli.workspace.is_none());
     }
 
     #[test]

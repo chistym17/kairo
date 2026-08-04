@@ -290,7 +290,8 @@ fn run_demo_loop(
                 | Action::Reject
                 | Action::StartNewSession
                 | Action::ResumeSelected
-                | Action::OpenSessions => {
+                | Action::OpenSessions
+                | Action::CycleMode => {
                     feed::refresh_status_hint(app);
                 }
             },
@@ -332,6 +333,21 @@ async fn run_live_loop(
                 Action::CancelRun => {
                     session.request_stop();
                     app.run.set_current("Cancel requested…".into());
+                    refresh_status_hint(app);
+                }
+                Action::CycleMode => {
+                    app.cycle_mode();
+                    if let Err(e) = session.set_mode(app.api_mode()) {
+                        app.conversation.items.push(TimelineItem::Assistant(format!(
+                            "Could not switch mode: {e:#}"
+                        )));
+                    } else {
+                        let label = app.header.mode.as_str();
+                        app.conversation.items.push(TimelineItem::Assistant(format!(
+                            "Switched to {label} mode ({}).",
+                            app.header.edit_policy
+                        )));
+                    }
                     refresh_status_hint(app);
                 }
                 Action::Send(line) => {

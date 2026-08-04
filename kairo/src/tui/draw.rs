@@ -511,7 +511,7 @@ fn render_help_modal(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
 
     let lines = vec![
-        Line::from(Span::styled("/new          New session", theme::body())),
+        Line::from(Span::styled("Tab           Ask ↔ Agent mode", theme::body())),
         Line::from(Span::styled("Enter         Send task", theme::body())),
         Line::from(Span::styled("Shift+Enter   Newline", theme::body())),
         Line::from(Span::styled("Esc           Cancel / close", theme::body())),
