@@ -26,8 +26,10 @@ use super::events::{
 /// decisions, verification history — persists across [`AgentSession::send`] calls.
 pub struct AgentSession {
     session_id: String,
-    mode: AgentMode,
-    edit_policy: EditPolicy,
+    mode: Mutex<AgentMode>,
+    edit_policy: Mutex<EditPolicy>,
+    /// Policy restored when leaving Ask for Agent (usually Confirm).
+    agent_edit_policy: Mutex<EditPolicy>,
     workspace: PathBuf,
     commands: Sender<Command>,
     decisions: Sender<DecisionMessage>,
@@ -38,6 +40,11 @@ pub struct AgentSession {
 
 enum Command {
     Send(String),
+    SetMode {
+        mode: AgentMode,
+        edit_policy: EditPolicy,
+        system_prompt: String,
+    },
     Shutdown,
 }
 
@@ -144,8 +151,12 @@ impl AgentSession {
 
         Ok(Self {
             session_id,
-            mode: config.mode,
-            edit_policy: config.edit_policy,
+            mode: Mutex::new(config.mode),
+            edit_policy: Mutex::new(config.edit_policy),
+            agent_edit_policy: Mutex::new(match config.mode {
+                AgentMode::Ask => EditPolicy::Confirm,
+                AgentMode::Agent => config.edit_policy,
+            }),
             workspace: config.workspace,
             commands: command_tx,
             decisions: decision_tx,
@@ -160,15 +171,45 @@ impl AgentSession {
     }
 
     pub fn mode(&self) -> AgentMode {
-        self.mode
+        *self.mode.lock().expect("mode mutex poisoned")
     }
 
     pub fn edit_policy(&self) -> EditPolicy {
-        self.edit_policy
+        *self.edit_policy.lock().expect("edit_policy mutex poisoned")
     }
 
     pub fn workspace(&self) -> &std::path::Path {
         &self.workspace
+    }
+
+    /// Switch Ask ↔ Agent for subsequent turns.
+    ///
+    /// Ask forces read-only. Agent restores the preferred agent edit policy.
+    pub fn set_mode(&self, mode: AgentMode) -> Result<()> {
+        let agent_policy = *self
+            .agent_edit_policy
+            .lock()
+            .expect("agent_edit_policy mutex poisoned");
+        let edit_policy = match mode {
+            AgentMode::Ask => EditPolicy::ReadOnly,
+            AgentMode::Agent => agent_policy,
+        };
+        let system_prompt = match mode {
+            AgentMode::Ask => crate::context::ask_system_prompt(),
+            AgentMode::Agent => crate::context::default_system_prompt(),
+        };
+
+        self.commands
+            .send(Command::SetMode {
+                mode,
+                edit_policy,
+                system_prompt,
+            })
+            .map_err(|_| anyhow!("session is no longer running"))?;
+
+        *self.mode.lock().expect("mode mutex poisoned") = mode;
+        *self.edit_policy.lock().expect("edit_policy mutex poisoned") = edit_policy;
+        Ok(())
     }
 
     /// Take the event stream. Available once per session (single consumer).
@@ -285,6 +326,15 @@ impl Worker {
         while let Ok(command) = commands.recv() {
             match command {
                 Command::Send(message) => runtime.block_on(self.run_task(message)),
+                Command::SetMode {
+                    mode,
+                    edit_policy,
+                    system_prompt,
+                } => {
+                    self.mode = mode;
+                    self.runtime.set_system_prompt(system_prompt);
+                    self.session.set_edit_policy(edit_policy.into());
+                }
                 Command::Shutdown => break,
             }
         }

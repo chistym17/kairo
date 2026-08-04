@@ -15,6 +15,8 @@ pub enum Action {
     Reject,
     /// Cooperative cancel of the in-flight run.
     CancelRun,
+    /// Toggle Ask ↔ Agent on the live session.
+    CycleMode,
     /// Leave the active session and return to Welcome.
     LeaveSession,
     /// Open a new agent session from Welcome / Sessions.
@@ -81,8 +83,11 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             Action::Continue
         }
         (KeyModifiers::NONE, KeyCode::Tab) => {
-            app.cycle_mode();
-            Action::Continue
+            if app.run.busy {
+                Action::Continue
+            } else {
+                Action::CycleMode
+            }
         }
 
         _ if app.run.busy => Action::Continue,

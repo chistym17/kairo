@@ -59,11 +59,11 @@ impl AgentModeUi {
         }
     }
 
-    pub fn next(self) -> Self {
+    /// Toggle the live backend modes (Ask ↔ Agent). Plan is not a separate runtime mode.
+    pub fn toggle_ask_agent(self) -> Self {
         match self {
-            Self::Ask => Self::Plan,
-            Self::Plan => Self::Agent,
-            Self::Agent => Self::Ask,
+            Self::Ask => Self::Agent,
+            Self::Plan | Self::Agent => Self::Ask,
         }
     }
 }
@@ -447,9 +447,25 @@ impl App {
     }
 
     pub fn cycle_mode(&mut self) {
-        // Visual-only for now; live AgentMode is fixed for the open session.
-        self.header.mode = self.header.mode.next();
+        self.header.mode = self.header.mode.toggle_ask_agent();
         self.sidebar.session.mode = self.header.mode.as_str().to_string();
+        match self.header.mode {
+            AgentModeUi::Ask => {
+                self.header.edit_policy = "Read-only".into();
+                self.sidebar.session.policy = "Read-only".into();
+            }
+            AgentModeUi::Agent | AgentModeUi::Plan => {
+                self.header.edit_policy = "Confirm edits".into();
+                self.sidebar.session.policy = "Confirm".into();
+            }
+        }
+    }
+
+    pub fn api_mode(&self) -> crate::api::AgentMode {
+        match self.header.mode {
+            AgentModeUi::Ask => crate::api::AgentMode::Ask,
+            AgentModeUi::Plan | AgentModeUi::Agent => crate::api::AgentMode::Agent,
+        }
     }
 
     /// Clear the conversation timeline (keeps sidebar / session metadata).
