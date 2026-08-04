@@ -147,8 +147,10 @@ pub fn begin_run_log(run_id: &str) -> PathBuf {
         paths.insert(run_id.to_string(), path.clone());
     }
 
-    // Always visible — quiet CLI still needs to know where the ordered log is.
-    println!("[agent] log #{seq} → {}", path.display());
+    // Quiet / TUI: keep stdout clean (alternate screen). Path is still in the JSONL header.
+    if !crate::logging::is_quiet() {
+        println!("[agent] log #{seq} → {}", path.display());
+    }
 
     let started = serde_json::json!({
         "record_type": "run_started",
@@ -287,10 +289,9 @@ pub fn write_event(run_id: &str, event_type: &str, detail: &str, duration_ms: u6
     append_json_line(&log_path, &event);
 }
 
-/// Print + persist a full Layer-4 / stall / recovery thinking snapshot.
+/// Persist a full Layer-4 / stall / recovery thinking snapshot.
 ///
-/// Printed unconditionally (not gated by quiet) so corpus verification can
-/// follow transitions without `--verbose`.
+/// Prints to stdout only when not quiet (classic CLI / verbose). Always written to the run JSONL.
 pub fn emit_thinking_state(
     run_id: &str,
     step_index: u32,
@@ -331,14 +332,16 @@ pub fn emit_thinking_state(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    println!("[transition] step={step_index} turn={model_turn} tool={tool} → {transition}");
-    println!(
-        "[state] phase={phase} stalls={stalls} kind={stall_kind} recovery_active={recovery} \
-         legacy={legacy} candidate={candidate} ({candidate_reason})"
-    );
-    if let Some(detail) = payload.get("transition_detail").and_then(|v| v.as_str()) {
-        if !detail.is_empty() {
-            println!("[transition.detail] {detail}");
+    if !crate::logging::is_quiet() {
+        println!("[transition] step={step_index} turn={model_turn} tool={tool} → {transition}");
+        println!(
+            "[state] phase={phase} stalls={stalls} kind={stall_kind} recovery_active={recovery} \
+             legacy={legacy} candidate={candidate} ({candidate_reason})"
+        );
+        if let Some(detail) = payload.get("transition_detail").and_then(|v| v.as_str()) {
+            if !detail.is_empty() {
+                println!("[transition.detail] {detail}");
+            }
         }
     }
 

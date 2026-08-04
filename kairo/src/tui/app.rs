@@ -95,6 +95,12 @@ pub enum TimelineItem {
 pub struct ConversationState {
     pub items: Vec<TimelineItem>,
     pub scroll: u16,
+    /// When true, keep the latest conversation lines visible.
+    pub follow_tail: bool,
+    /// Last painted content height (wrapped rows) — used for scroll clamping.
+    pub last_rows: u16,
+    /// Last painted viewport height.
+    pub last_viewport: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +235,9 @@ impl App {
                     "Session ready. Type a task and press Enter.".into(),
                 )],
                 scroll: 0,
+                follow_tail: true,
+                last_rows: 0,
+                last_viewport: 0,
             },
             sidebar: SidebarState {
                 tab: SidebarTab::Plan,
@@ -472,9 +481,22 @@ impl App {
     pub fn clear_conversation(&mut self) {
         self.conversation.items.clear();
         self.conversation.scroll = 0;
+        self.conversation.follow_tail = true;
+        self.conversation.last_rows = 0;
+        self.conversation.last_viewport = 0;
         self.run.milestones.clear();
         self.run.current = None;
         self.run.verification.clear();
+    }
+
+    /// Scroll the conversation by `delta` rows (negative = up). Disables follow-tail until
+    /// the viewport is at the bottom again.
+    pub fn scroll_conversation(&mut self, delta: i32) {
+        let viewport = self.conversation.last_viewport.max(1);
+        let max = self.conversation.last_rows.saturating_sub(viewport);
+        let next = (self.conversation.scroll as i32 + delta).clamp(0, max as i32) as u16;
+        self.conversation.scroll = next;
+        self.conversation.follow_tail = next >= max;
     }
 
     pub fn show_approval(&mut self, request: ApprovalRequest) {
