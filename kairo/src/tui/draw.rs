@@ -9,6 +9,7 @@ use ratatui::Frame;
 use super::app::{App, PlanStepStatus, SidebarTab, TimelineItem};
 use super::feed::{self, spinner_glyph};
 use super::layout::{self, WidthMode};
+use super::overlay::{DiffLineKind, Overlay};
 use super::theme;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -32,6 +33,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_composer(frame, shell.composer, app);
     render_status(frame, shell.status, app, shell.width_mode);
+
+    if app.overlay.is_some() {
+        render_overlay(frame, area, app);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -241,18 +246,28 @@ fn render_changes_lines(app: &App) -> Vec<Line<'static>> {
             theme::muted(),
         )));
     } else {
-        for change in &app.sidebar.changes {
+        for (i, change) in app.sidebar.changes.iter().enumerate() {
+            let selected = i == app.sidebar.selected_change;
+            let marker = if selected { ">" } else { " " };
+            let style = if selected {
+                theme::accent_bold()
+            } else {
+                theme::body()
+            };
             lines.push(Line::from(Span::styled(
-                format!("M {}", change.path),
-                theme::body(),
+                format!("{marker} M {}", change.path),
+                style,
             )));
             lines.push(Line::from(Span::styled(
-                format!("  {}", change.stats),
+                format!("    {}", change.stats),
                 theme::muted(),
             )));
             lines.push(Line::from(""));
         }
-        lines.push(Line::from(Span::styled("Enter  View diff", theme::muted())));
+        lines.push(Line::from(Span::styled(
+            "Enter  View diff",
+            theme::muted(),
+        )));
     }
     lines
 }
@@ -382,7 +397,128 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
     frame.render_widget(Paragraph::new(text).style(theme::muted_dim()), area);
 }
 
-#[allow(dead_code)]
+fn render_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    match app.overlay.as_ref() {
+        Some(Overlay::Approval(view)) => render_approval_modal(frame, area, view),
+        Some(Overlay::Diff(view)) => render_diff_modal(frame, area, view),
+        Some(Overlay::Help) => render_help_modal(frame, area),
+        None => {}
+    }
+}
+
+fn render_approval_modal(frame: &mut Frame, area: Rect, view: &super::overlay::ApprovalView) {
+    let popup = centered_rect(62, 55, area);
+    frame.render_widget(Clear, popup);
+
+    let req = &view.request;
+    let kind = match req.kind {
+        crate::api::ApprovalKind::FileEdit => "file edit",
+        crate::api::ApprovalKind::Destructive => "destructive",
+        crate::api::ApprovalKind::ExternalEffect => "external effect",
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled("Kairo wants to modify:", theme::body())),
+        Line::from(""),
+        Line::from(Span::styled(format!("  {}", req.summary), theme::accent_bold())),
+        Line::from(Span::styled(format!("  ({kind})"), theme::muted())),
+        Line::from(""),
+    ];
+    if !req.reason.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", req.reason),
+            theme::muted(),
+        )));
+        lines.push(Line::from(""));
+    }
+    for path in &req.paths {
+        lines.push(Line::from(Span::styled(
+            format!("  M {}", path.display()),
+            theme::body(),
+        )));
+    }
+    if req.paths.is_empty() {
+        lines.push(Line::from(Span::styled("  (no paths listed)", theme::muted())));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("[a] Approve once", theme::accent())));
+    lines.push(Line::from(Span::styled("[t] Approve for task", theme::accent())));
+    lines.push(Line::from(Span::styled("[d] View diff", theme::body())));
+    lines.push(Line::from(Span::styled("[r] Reject", theme::muted())));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border_focus())
+        .title(Span::styled(" Approve changes ", theme::accent_bold()));
+    let inner = theme::pad(block.inner(popup), 1, 1);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_diff_modal(frame: &mut Frame, area: Rect, view: &super::overlay::DiffView) {
+    let popup = centered_rect(90, 80, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border_focus())
+        .title(Span::styled(
+            format!(" {} ", view.title),
+            theme::accent_bold(),
+        ))
+        .title_bottom(Span::styled(" ↑↓ scroll   Esc close ", theme::muted()));
+    let inner = theme::pad(block.inner(popup), 1, 0);
+    frame.render_widget(block, popup);
+
+    let lines: Vec<Line> = view
+        .lines
+        .iter()
+        .map(|line| {
+            let style = match line.kind {
+                DiffLineKind::Add => theme::accent(),
+                DiffLineKind::Delete => theme::muted(),
+                DiffLineKind::Meta => theme::muted_dim(),
+                DiffLineKind::Context => theme::body(),
+            };
+            Line::from(Span::styled(line.text.clone(), style))
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((view.scroll, 0)),
+        inner,
+    );
+}
+
+fn render_help_modal(frame: &mut Frame, area: Rect) {
+    let popup = centered_rect(50, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let lines = vec![
+        Line::from(Span::styled("/new          New session", theme::body())),
+        Line::from(Span::styled("Enter         Send task", theme::body())),
+        Line::from(Span::styled("Shift+Enter   Newline", theme::body())),
+        Line::from(Span::styled("Esc           Cancel / close", theme::body())),
+        Line::from(Span::styled("Ctrl+P/D/I    Plan / Changes / Context", theme::body())),
+        Line::from(Span::styled("Ctrl+L        Clear conversation", theme::body())),
+        Line::from(Span::styled("a / t / r     Approve once / task / reject", theme::body())),
+        Line::from(Span::styled("d             Diff (from approval)", theme::body())),
+        Line::from(Span::styled("?             This help", theme::body())),
+        Line::from(""),
+        Line::from(Span::styled("Esc close", theme::muted())),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border_focus())
+        .title(Span::styled(" Commands ", theme::accent_bold()));
+    let inner = theme::pad(block.inner(popup), 1, 1);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup = Layout::default()
         .direction(Direction::Vertical)
@@ -400,9 +536,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup[1])[1]
-}
-
-#[allow(dead_code)]
-fn render_clear(frame: &mut Frame, area: Rect) {
-    frame.render_widget(Clear, area);
 }

@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, SidebarTab};
+use super::overlay::Overlay;
 
 pub enum Action {
     Quit,
@@ -21,23 +22,20 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
         return Action::Continue;
     }
 
-    // Approval decisions take priority while a gate is open.
-    if app.run.pending_approval.is_some() {
-        match (key.modifiers, key.code) {
-            (KeyModifiers::NONE, KeyCode::Char('a')) => return Action::ApproveOnce,
-            (KeyModifiers::NONE, KeyCode::Char('t')) => return Action::ApproveForTask,
-            (KeyModifiers::NONE, KeyCode::Char('r')) => return Action::Reject,
-            (KeyModifiers::CONTROL, KeyCode::Char('c'))
-            | (KeyModifiers::NONE, KeyCode::Char('q')) => return Action::Quit,
-            (KeyModifiers::NONE, KeyCode::Esc) => return Action::Reject,
-            _ => {}
-        }
+    // Modal overlays capture keys first.
+    if app.overlay.is_some() {
+        return handle_overlay_key(key, app);
     }
 
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
         (KeyModifiers::NONE, KeyCode::Char('q')) if app.composer.is_empty() && !app.run.busy => {
             Action::Quit
+        }
+
+        (KeyModifiers::NONE, KeyCode::Char('?')) => {
+            app.overlay = Some(Overlay::Help);
+            Action::Continue
         }
 
         (KeyModifiers::NONE, KeyCode::Esc) => {
@@ -73,14 +71,35 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             Action::Continue
         }
 
-        // Editing is locked while the agent runs.
+        // Editing is locked while the agent runs (unless opening help — handled above).
         _ if app.run.busy => Action::Continue,
+
+        // Changes tab: navigate / open diff when composer is empty.
+        (KeyModifiers::NONE, KeyCode::Up)
+            if app.sidebar.tab == SidebarTab::Changes && app.composer.is_empty() =>
+        {
+            app.select_change_delta(-1);
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Down)
+            if app.sidebar.tab == SidebarTab::Changes && app.composer.is_empty() =>
+        {
+            app.select_change_delta(1);
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Enter)
+            if app.sidebar.tab == SidebarTab::Changes
+                && app.composer.is_empty()
+                && !app.sidebar.changes.is_empty() =>
+        {
+            app.open_diff_for_selected_change();
+            Action::Continue
+        }
 
         (KeyModifiers::SHIFT, KeyCode::Enter) | (KeyModifiers::ALT, KeyCode::Enter) => {
             app.composer.insert_newline();
             Action::Continue
         }
-        // Some terminals send Ctrl+J for newline.
         (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
             app.composer.insert_newline();
             Action::Continue
@@ -90,8 +109,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             None => Action::Continue,
         },
 
-        (KeyModifiers::NONE, KeyCode::Backspace)
-        | (KeyModifiers::NONE, KeyCode::Delete) => {
+        (KeyModifiers::NONE, KeyCode::Backspace) | (KeyModifiers::NONE, KeyCode::Delete) => {
             if key.code == KeyCode::Delete {
                 app.composer.delete_forward();
             } else {
@@ -125,7 +143,6 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
         }
 
         (KeyModifiers::NONE, KeyCode::Char(c)) if !c.is_control() => {
-            // Bare `q` quits only when empty (handled above); otherwise type it.
             app.composer.insert_char(c);
             Action::Continue
         }
@@ -134,6 +151,75 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             Action::Continue
         }
 
+        _ => Action::Continue,
+    }
+}
+
+fn handle_overlay_key(key: KeyEvent, app: &mut App) -> Action {
+    let kind = match app.overlay.as_ref() {
+        Some(Overlay::Approval(_)) => "approval",
+        Some(Overlay::Diff(_)) => "diff",
+        Some(Overlay::Help) => "help",
+        None => return Action::Continue,
+    };
+
+    match kind {
+        "approval" => match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Char('a')) => Action::ApproveOnce,
+            (KeyModifiers::NONE, KeyCode::Char('t')) => Action::ApproveForTask,
+            (KeyModifiers::NONE, KeyCode::Char('r')) | (KeyModifiers::NONE, KeyCode::Esc) => {
+                Action::Reject
+            }
+            (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                app.open_diff_for_approval();
+                Action::Continue
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('c'))
+            | (KeyModifiers::NONE, KeyCode::Char('q')) => Action::Quit,
+            _ => Action::Continue,
+        },
+        "diff" => match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Esc) => {
+                app.close_overlay();
+                Action::Continue
+            }
+            (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
+                if let Some(Overlay::Diff(view)) = app.overlay.as_mut() {
+                    view.scroll_by(-1, 20);
+                }
+                Action::Continue
+            }
+            (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::Char('j')) => {
+                if let Some(Overlay::Diff(view)) = app.overlay.as_mut() {
+                    view.scroll_by(1, 20);
+                }
+                Action::Continue
+            }
+            (KeyModifiers::NONE, KeyCode::PageUp) => {
+                if let Some(Overlay::Diff(view)) = app.overlay.as_mut() {
+                    view.scroll_by(-10, 20);
+                }
+                Action::Continue
+            }
+            (KeyModifiers::NONE, KeyCode::PageDown) => {
+                if let Some(Overlay::Diff(view)) = app.overlay.as_mut() {
+                    view.scroll_by(10, 20);
+                }
+                Action::Continue
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
+            _ => Action::Continue,
+        },
+        "help" => match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Esc)
+            | (KeyModifiers::NONE, KeyCode::Char('?'))
+            | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+                app.overlay = None;
+                Action::Continue
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
+            _ => Action::Continue,
+        },
         _ => Action::Continue,
     }
 }

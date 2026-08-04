@@ -1,7 +1,11 @@
 //! Application state for the full-screen TUI.
 
+use std::path::PathBuf;
+
+use crate::api::ApprovalRequest;
 use crate::tui::demo;
 use crate::tui::feed::RunUiState;
+use crate::tui::overlay::{ApprovalView, DiffView, Overlay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // Welcome / Sessions screens land in a later part.
@@ -130,6 +134,8 @@ pub struct SidebarState {
     pub plan_total: usize,
     pub plan_steps: Vec<PlanStepView>,
     pub changes: Vec<ChangeEntry>,
+    /// Selected row in the Changes tab.
+    pub selected_change: usize,
     pub session: SessionInfo,
 }
 
@@ -165,6 +171,9 @@ pub struct App {
     pub status: StatusState,
     pub terminal_size: (u16, u16),
     pub run: RunUiState,
+    pub overlay: Option<Overlay>,
+    /// Absolute workspace path (for git diff lookups).
+    pub workspace_path: PathBuf,
 }
 
 impl App {
@@ -180,6 +189,7 @@ impl App {
         mode_label: &str,
         policy_label: &str,
         session_id: &str,
+        workspace_path: PathBuf,
     ) -> Self {
         let mode = match mode_label.to_ascii_lowercase().as_str() {
             "ask" => AgentModeUi::Ask,
@@ -225,6 +235,7 @@ impl App {
                 plan_total: 0,
                 plan_steps: Vec::new(),
                 changes: Vec::new(),
+                selected_change: 0,
                 session: SessionInfo {
                     mode: mode.as_str().to_string(),
                     policy: policy_label.to_string(),
@@ -242,6 +253,8 @@ impl App {
             },
             terminal_size: (120, 40),
             run: RunUiState::default(),
+            overlay: None,
+            workspace_path,
         }
     }
 
@@ -262,5 +275,88 @@ impl App {
         self.run.milestones.clear();
         self.run.current = None;
         self.run.verification.clear();
+    }
+
+    pub fn show_approval(&mut self, request: ApprovalRequest) {
+        self.run.pending_approval = Some(request.clone());
+        self.overlay = Some(Overlay::Approval(ApprovalView { request }));
+        crate::tui::feed::refresh_status_hint(self);
+    }
+
+    pub fn clear_approval_overlay(&mut self) {
+        self.run.pending_approval = None;
+        match self.overlay.take() {
+            Some(Overlay::Approval(_)) => {}
+            Some(Overlay::Diff(view)) if view.return_to_approval.is_some() => {}
+            other => self.overlay = other,
+        }
+    }
+
+    pub fn open_diff_for_selected_change(&mut self) {
+        let Some(entry) = self.sidebar.changes.get(self.sidebar.selected_change) else {
+            return;
+        };
+        let path = entry.path.clone();
+        let body = crate::tui::overlay::load_git_diff(&self.workspace_path, &path)
+            .unwrap_or_else(|| {
+                format!(
+                    "No git diff for `{path}` yet.\n\
+                     The file is listed as changed; open again after the edit lands,\n\
+                     or approve a pending edit to apply it."
+                )
+            });
+        self.overlay = Some(Overlay::Diff(DiffView::from_text(
+            format!("Diff: {path}"),
+            &body,
+        )));
+        crate::tui::feed::refresh_status_hint(self);
+    }
+
+    pub fn open_diff_for_approval(&mut self) {
+        let Some(request) = self.run.pending_approval.clone() else {
+            return;
+        };
+        let path = request
+            .paths
+            .first()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let mut view = if !path.is_empty() {
+            if let Some(body) = crate::tui::overlay::load_git_diff(&self.workspace_path, &path) {
+                DiffView::from_text(format!("Diff: {path}"), &body)
+            } else {
+                DiffView::from_approval_fallback(&request)
+            }
+        } else {
+            DiffView::from_approval_fallback(&request)
+        };
+        view.return_to_approval = Some(request);
+        self.overlay = Some(Overlay::Diff(view));
+        crate::tui::feed::refresh_status_hint(self);
+    }
+
+    pub fn close_overlay(&mut self) {
+        match self.overlay.take() {
+            Some(Overlay::Diff(view)) => {
+                if let Some(request) = view.return_to_approval {
+                    self.overlay = Some(Overlay::Approval(ApprovalView { request }));
+                }
+            }
+            Some(Overlay::Approval(_)) => {
+                self.overlay = None;
+            }
+            Some(Overlay::Help) | None => {}
+        }
+        crate::tui::feed::refresh_status_hint(self);
+    }
+
+    pub fn select_change_delta(&mut self, delta: i32) {
+        if self.sidebar.changes.is_empty() {
+            return;
+        }
+        let len = self.sidebar.changes.len() as i32;
+        let cur = self.sidebar.selected_change as i32;
+        let next = (cur + delta).rem_euclid(len);
+        self.sidebar.selected_change = next as usize;
     }
 }

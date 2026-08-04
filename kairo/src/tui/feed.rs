@@ -101,7 +101,7 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             app.run.clear_current();
         }
         AgentEvent::ApprovalRequired { request } => {
-            app.run.pending_approval = Some(request.clone());
+            app.show_approval(request.clone());
             app.run.set_current(format!("Waiting for approval: {}", request.summary));
             refresh_status_hint(app);
         }
@@ -121,6 +121,9 @@ fn finish_run(app: &mut App, result: &RunResult) {
     app.run.busy = false;
     app.run.clear_current();
     app.run.pending_approval = None;
+    if matches!(app.overlay, Some(crate::tui::overlay::Overlay::Approval(_))) {
+        app.overlay = None;
+    }
 
     for path in &result.changed_files {
         upsert_change(app, path);
@@ -212,6 +215,9 @@ fn upsert_change(app: &mut App, path: &Path) {
         path: display,
         stats: "changed".into(),
     });
+    if app.sidebar.selected_change >= app.sidebar.changes.len() {
+        app.sidebar.selected_change = app.sidebar.changes.len().saturating_sub(1);
+    }
 }
 
 fn mode_from_str(mode: &str) -> Option<super::app::AgentModeUi> {
@@ -245,10 +251,18 @@ pub fn format_duration_ms(ms: u64) -> String {
 }
 
 pub fn refresh_status_hint(app: &mut App) {
+    if matches!(app.overlay, Some(crate::tui::overlay::Overlay::Diff(_))) {
+        app.status.hint = "↑↓ scroll   Esc close".into();
+        return;
+    }
+    if matches!(app.overlay, Some(crate::tui::overlay::Overlay::Help)) {
+        app.status.hint = "Esc close help".into();
+        return;
+    }
     if let Some(req) = &app.run.pending_approval {
         app.status.hint = format!(
-            "Approval: {}   [a] once  [t] for task  [r] reject",
-            truncate(&req.summary, 40)
+            "Approval: {}   [a] once  [t] task  [d] diff  [r] reject",
+            truncate(&req.summary, 36)
         );
         return;
     }
@@ -261,8 +275,17 @@ pub fn refresh_status_hint(app: &mut App) {
         app.status.hint = format!("Esc cancel   ·   {activity}");
         return;
     }
+    if app.sidebar.tab == crate::tui::app::SidebarTab::Changes
+        && !app.sidebar.changes.is_empty()
+        && app.composer.is_empty()
+    {
+        app.status.hint =
+            "Enter view diff · ↑↓ select file · Ctrl+P plan · ? help · q quit".into();
+        return;
+    }
     app.status.hint =
-        "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit".into();
+        "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · ? help · q quit"
+            .into();
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -344,7 +367,30 @@ mod tests {
             "Agent",
             "Confirm",
             "sess1",
+            PathBuf::from("/tmp/proj"),
         )
+    }
+
+    #[test]
+    fn approval_opens_overlay() {
+        use crate::api::{ApprovalKind, ApprovalRequest};
+        use crate::tui::overlay::Overlay;
+
+        let mut app = empty_app();
+        apply_event(
+            &mut app,
+            &AgentEvent::ApprovalRequired {
+                request: ApprovalRequest {
+                    id: "ap1".into(),
+                    kind: ApprovalKind::FileEdit,
+                    summary: "apply_patch src/lib/api.ts".into(),
+                    reason: "needs approval".into(),
+                    paths: vec![PathBuf::from("src/lib/api.ts")],
+                },
+            },
+        );
+        assert!(app.run.pending_approval.is_some());
+        assert!(matches!(app.overlay, Some(Overlay::Approval(_))));
     }
 
     #[test]

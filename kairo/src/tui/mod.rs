@@ -11,6 +11,7 @@ mod draw;
 mod feed;
 mod input;
 mod layout;
+mod overlay;
 mod theme;
 
 use std::io::{self, stdout, IsTerminal};
@@ -87,6 +88,7 @@ pub async fn run_with_options(opts: TuiOptions) -> Result<()> {
         "Agent",
         policy_label,
         session.session_id(),
+        workspace.clone(),
     );
 
     let mut terminal = setup()?;
@@ -125,7 +127,9 @@ fn run_demo_loop(
                 Action::Continue
                 | Action::ApproveOnce
                 | Action::ApproveForTask
-                | Action::Reject => {}
+                | Action::Reject => {
+                    feed::refresh_status_hint(app);
+                }
             },
             Event::Resize(width, height) => {
                 app.terminal_size = (width, height);
@@ -173,6 +177,7 @@ async fn run_live_loop(
                         .items
                         .push(TimelineItem::User(line.clone()));
                     app.run.begin();
+                    app.overlay = None;
                     refresh_status_hint(app);
                     if let Err(e) = session.send(line).await {
                         app.run.busy = false;
@@ -186,6 +191,7 @@ async fn run_live_loop(
                 Action::ApproveOnce => {
                     if let Some(req) = app.run.pending_approval.take() {
                         let _ = session.approve(&req.id).await;
+                        app.clear_approval_overlay();
                         app.run.clear_current();
                         refresh_status_hint(app);
                     }
@@ -193,6 +199,7 @@ async fn run_live_loop(
                 Action::ApproveForTask => {
                     if let Some(req) = app.run.pending_approval.take() {
                         let _ = session.approve_for_task(&req.id).await;
+                        app.clear_approval_overlay();
                         app.run.clear_current();
                         refresh_status_hint(app);
                     }
@@ -200,6 +207,7 @@ async fn run_live_loop(
                 Action::Reject => {
                     if let Some(req) = app.run.pending_approval.take() {
                         let _ = session.reject(&req.id).await;
+                        app.clear_approval_overlay();
                         app.run.clear_current();
                         refresh_status_hint(app);
                     }
