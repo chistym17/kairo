@@ -35,6 +35,8 @@ pub enum Command {
     Config,
     /// Check local configuration and workspace readiness.
     Health,
+    /// Full-screen Ratatui shell (live agent events; `--demo` for static chrome).
+    Tui,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,20 +58,70 @@ pub struct CliArgs {
     pub session: SessionArg,
     /// Show harness debug lines (`[agent]`, `[prompt]`, …).
     pub verbose: bool,
+    /// `kairo tui --demo` — static layout shell without opening an agent.
+    pub tui_demo: bool,
+}
+
+/// How bare `kairo` presents itself. Explicit subcommands always win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiMode {
+    /// Full-screen Ratatui interface.
+    Tui,
+    /// Classic scrolling terminal REPL.
+    Terminal,
+}
+
+impl UiMode {
+    /// From `KAIRO_UI`. Default: TUI.
+    ///
+    /// Common values (case-insensitive):
+    /// - `tui` → full-screen UI
+    /// - `terminal` → classic scrolling CLI
+    ///
+    /// Also accepted: `full` / `ui` → tui; `repl` / `cli` / `text` / `agent` → terminal.
+    pub fn from_env() -> Self {
+        Self::parse_env(std::env::var("KAIRO_UI").ok().as_deref())
+    }
+
+    pub fn parse_env(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Self::Tui,
+            Some(v) => match v.to_ascii_lowercase().as_str() {
+                "tui" | "full" | "ui" => Self::Tui,
+                "terminal" | "repl" | "cli" | "text" | "agent" => Self::Terminal,
+                _ => Self::Tui,
+            },
+        }
+    }
+
+    pub fn as_command(self) -> Command {
+        match self {
+            Self::Tui => Command::Tui,
+            Self::Terminal => Command::Agent,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tui => "tui",
+            Self::Terminal => "terminal",
+        }
+    }
 }
 
 /// Parse `argv` (without the program name). Returns `None` when help was printed.
 pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
-    // Bare `kairo` → interactive agent; workspace is auto-detected at run time.
+    // Bare `kairo` → KAIRO_UI (default tui). Explicit `agent` / `tui` always win.
     if args.is_empty() {
         return Ok(Some(CliArgs {
-            command: Command::Agent,
+            command: UiMode::from_env().as_command(),
             workspace: None,
             edit_policy: None,
             output: OutputFormat::Text,
             task: None,
             session: SessionArg::New,
             verbose: false,
+            tui_demo: false,
         }));
     }
 
@@ -84,12 +136,13 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         "agent" => (Command::Agent, &args[1..]),
         "config" => (Command::Config, &args[1..]),
         "health" => (Command::Health, &args[1..]),
+        "tui" => (Command::Tui, &args[1..]),
         // Flags without a subcommand → agent (e.g. `kairo --edit-policy auto`).
         flag if flag.starts_with('-') => (Command::Agent, args),
         other => {
             return Err(format!(
-                "unknown subcommand '{other}'. Use: ask | agent | config | health\n\
-                 Or run bare `kairo` for interactive agent mode.\n\
+                "unknown subcommand '{other}'. Use: ask | agent | config | health | tui\n\
+                 Bare `kairo` uses KAIRO_UI (tui|terminal; default tui).\n\
                  Try: kairo --help"
             ));
         }
@@ -116,7 +169,12 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
             task: None,
             session: SessionArg::Ephemeral,
             verbose: false,
+            tui_demo: false,
         }));
+    }
+
+    if matches!(command, Command::Tui) {
+        return parse_tui_args(rest);
     }
 
     let mut workspace: Option<PathBuf> = None;
@@ -221,6 +279,65 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         task,
         session,
         verbose,
+        tui_demo: false,
+    }))
+}
+
+fn parse_tui_args(rest: &[String]) -> Result<Option<CliArgs>, String> {
+    let mut workspace: Option<PathBuf> = None;
+    let mut edit_policy: Option<EditPolicy> = None;
+    let mut verbose = false;
+    let mut tui_demo = false;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                return Ok(None);
+            }
+            "--demo" => {
+                tui_demo = true;
+                i += 1;
+            }
+            "--workspace" => {
+                let path = rest
+                    .get(i + 1)
+                    .ok_or_else(|| "--workspace requires a path".to_string())?;
+                workspace = Some(PathBuf::from(path));
+                i += 2;
+            }
+            "--edit-policy" => {
+                let raw = rest
+                    .get(i + 1)
+                    .ok_or_else(|| "--edit-policy requires confirm|auto|readonly".to_string())?;
+                edit_policy = Some(EditPolicy::parse(raw).ok_or_else(|| {
+                    format!("invalid --edit-policy '{raw}' (use confirm|auto|readonly)")
+                })?);
+                i += 2;
+            }
+            "--verbose" | "-v" => {
+                verbose = true;
+                i += 1;
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("unknown tui flag {flag}"));
+            }
+            other => {
+                return Err(format!("tui does not take positional arguments (got '{other}')"));
+            }
+        }
+    }
+
+    Ok(Some(CliArgs {
+        command: Command::Tui,
+        workspace,
+        edit_policy,
+        output: OutputFormat::Text,
+        task: None,
+        session: SessionArg::New,
+        verbose,
+        tui_demo,
     }))
 }
 
@@ -228,7 +345,7 @@ impl CliArgs {
     pub fn mode(&self) -> AgentMode {
         match self.command {
             Command::Ask => AgentMode::Ask,
-            Command::Agent | Command::Config | Command::Health => AgentMode::Agent,
+            Command::Agent | Command::Config | Command::Health | Command::Tui => AgentMode::Agent,
         }
     }
 }
@@ -242,12 +359,38 @@ mod tests {
     }
 
     #[test]
-    fn bare_invocation_is_interactive_agent() {
-        let cli = parse_args(&[]).unwrap().unwrap();
+    fn bare_invocation_defaults_to_tui() {
+        // Don't depend on the process env for the default path — unit-test parse_env.
+        assert_eq!(UiMode::parse_env(None), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("")), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("tui")).as_command(), Command::Tui);
+    }
+
+    #[test]
+    fn kairo_ui_env_values() {
+        assert_eq!(UiMode::parse_env(Some("terminal")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("TERMINAL")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("repl")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("CLI")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("text")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("agent")), UiMode::Terminal);
+        assert_eq!(UiMode::parse_env(Some("full")), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("ui")), UiMode::Tui);
+        assert_eq!(UiMode::parse_env(Some("nope")), UiMode::Tui); // unknown → tui
+        assert_eq!(UiMode::Terminal.as_command(), Command::Agent);
+        assert_eq!(UiMode::Terminal.as_str(), "terminal");
+    }
+
+    #[test]
+    fn explicit_agent_subcommand_ignores_ui_preference() {
+        let cli = parse_args(&args(&["agent"])).unwrap().unwrap();
         assert_eq!(cli.command, Command::Agent);
-        assert!(cli.task.is_none());
-        assert_eq!(cli.session, SessionArg::New);
-        assert!(cli.workspace.is_none());
+    }
+
+    #[test]
+    fn explicit_tui_subcommand() {
+        let cli = parse_args(&args(&["tui"])).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Tui);
     }
 
     #[test]
@@ -323,6 +466,26 @@ mod tests {
     fn health_subcommand() {
         let cli = parse_args(&args(&["health"])).unwrap().unwrap();
         assert_eq!(cli.command, Command::Health);
+    }
+
+    #[test]
+    fn tui_subcommand() {
+        let cli = parse_args(&args(&["tui"])).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Tui);
+        assert!(!cli.tui_demo);
+    }
+
+    #[test]
+    fn tui_demo_flag() {
+        let cli = parse_args(&args(&["tui", "--demo"])).unwrap().unwrap();
+        assert_eq!(cli.command, Command::Tui);
+        assert!(cli.tui_demo);
+    }
+
+    #[test]
+    fn tui_rejects_unknown_flag() {
+        let err = parse_args(&args(&["tui", "--task", "x"])).unwrap_err();
+        assert!(err.contains("unknown tui flag") || err.contains("positional"));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Product CLI for `kairo`.
 //!
-//! Subcommands: `ask`, `agent`, `config`, `health`. Bare `kairo` starts
-//! interactive agent mode and auto-detects the workspace from the nearest `.git` root.
+//! Subcommands: `ask`, `agent`, `config`, `health`, `tui`. Bare `kairo` picks
+//! TUI or the classic REPL from `KAIRO_UI` (default: tui) and auto-detects the
+//! workspace from the nearest `.git` root.
 
 mod args;
 mod health;
@@ -9,7 +10,7 @@ mod output;
 mod run;
 mod workspace;
 
-pub use args::{parse_args, CliArgs, Command, OutputFormat, SessionArg};
+pub use args::{parse_args, CliArgs, Command, OutputFormat, SessionArg, UiMode};
 pub use run::{main_from_env, run};
 pub use workspace::{current_branch, detect_workspace, display_path};
 
@@ -19,11 +20,18 @@ pub fn print_usage() {
 kairo — Kairo coding agent
 
 Usage:
-  kairo                              # interactive agent in this repo
+  kairo                              # KAIRO_UI (default: full-screen TUI)
   kairo ask [\"question\"]
   kairo agent [--edit-policy confirm|auto|readonly] [--task \"…\" | \"…\"]
+  kairo tui                          # force full-screen TUI
+  kairo tui --demo                   # layout preview without opening a session
   kairo config                       # view / edit provider, model, API key
   kairo health                       # check local readiness
+
+UI (bare `kairo` only; subcommands always win):
+  KAIRO_UI=tui                       # full-screen interface (default)
+  KAIRO_UI=terminal                  # classic scrolling terminal
+  Aliases: full/ui → tui; repl/cli/text → terminal
 
 Workspace (auto-detected; --workspace optional):
   1. --workspace <path>

@@ -76,6 +76,9 @@ pub struct ApprovalRequest {
     pub reason: String,
     /// Paths the action would touch, when known.
     pub paths: Vec<PathBuf>,
+    /// Proposed unified diff / write preview when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +227,7 @@ pub(crate) fn map_approval_request(request: &InternalApprovalRequest) -> Approva
             Scope::Paths(paths) => paths.clone(),
             Scope::Unspecified => Vec::new(),
         },
+        preview: request.preview.clone(),
     }
 }
 
@@ -356,15 +360,18 @@ mod tests {
             proposed_scope: Scope::Paths(vec![PathBuf::from("src/store.js")]),
             reason: "needs approval".into(),
             expires_at_revision: None,
+            preview: Some("-old\n+new\n".into()),
         };
         let public = map_approval_request(&internal);
         assert_eq!(public.id, "abc");
         assert_eq!(public.kind, ApprovalKind::FileEdit);
         assert_eq!(public.paths, vec![PathBuf::from("src/store.js")]);
+        assert_eq!(public.preview.as_deref(), Some("-old\n+new\n"));
 
         let external = InternalApprovalRequest {
             effect: ToolEffect::ExternalSideEffect,
             proposed_scope: Scope::Unspecified,
+            preview: None,
             ..internal
         };
         let public = map_approval_request(&external);
