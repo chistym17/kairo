@@ -19,10 +19,10 @@ pub fn print_usage() {
 kairo — Kairo coding agent
 
 Usage:
-  kairo                              # interactive agent in this repo
+  kairo                              # full-screen TUI (welcome → agent)
   kairo ask [\"question\"]
   kairo agent [--edit-policy confirm|auto|readonly] [--task \"…\" | \"…\"]
-  kairo tui                          # full-screen TUI (welcome → agent)
+  kairo tui                          # same as bare `kairo`
   kairo tui --demo                   # layout preview without opening a session
   kairo config                       # view / edit provider, model, API key
   kairo health                       # check local readiness

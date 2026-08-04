@@ -103,6 +103,7 @@ pub fn sample_app() -> App {
         welcome: WelcomeState::new(
             "~/projects/annotaa",
             "DeepSeek",
+            "deepseek",
             "deepseek-v4-flash",
             "Confirm edits",
         ),

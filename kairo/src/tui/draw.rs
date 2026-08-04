@@ -415,6 +415,7 @@ fn render_overlay(frame: &mut Frame, area: Rect, app: &App) {
         Some(Overlay::Approval(view)) => render_approval_modal(frame, area, view),
         Some(Overlay::Diff(view)) => render_diff_modal(frame, area, view),
         Some(Overlay::Help) => render_help_modal(frame, area),
+        Some(Overlay::ModelPicker(view)) => render_model_picker(frame, area, view),
         None => {}
     }
 }
@@ -573,7 +574,7 @@ fn render_welcome(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
-        "[Enter] Start agent        [s] Sessions        [m] Model info        [q] Quit",
+        "[Enter] Start agent        [s] Sessions        [m] Change model        [q] Quit",
         theme::muted(),
     )));
 
@@ -581,6 +582,49 @@ fn render_welcome(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines).alignment(Alignment::Left),
         inner,
     );
+
+    if let Some(Overlay::ModelPicker(view)) = app.overlay.as_ref() {
+        render_model_picker(frame, area, view);
+    }
+}
+
+fn render_model_picker(frame: &mut Frame, area: Rect, view: &super::overlay::ModelPickerView) {
+    let popup = centered_rect(48, 50, area);
+    frame.render_widget(Clear, popup);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Provider: {}", view.provider_id),
+            theme::muted(),
+        )),
+        Line::from(""),
+    ];
+    for (i, model) in view.models.iter().enumerate() {
+        let selected = i == view.selected;
+        let marker = if selected { ">" } else { " " };
+        let style = if selected {
+            theme::accent_bold()
+        } else {
+            theme::body()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {model}"),
+            style,
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter save · Esc cancel",
+        theme::muted(),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border_focus())
+        .title(Span::styled(" Change model ", theme::accent_bold()));
+    let inner = theme::pad(block.inner(popup), 1, 1);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_sessions(frame: &mut Frame, area: Rect, app: &App) {

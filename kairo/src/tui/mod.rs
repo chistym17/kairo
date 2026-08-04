@@ -71,7 +71,7 @@ pub async fn run_with_options(opts: TuiOptions) -> Result<()> {
         EditPolicy::ReadOnly => "Read-only",
     };
 
-    let (provider, model) = resolve_provider_model();
+    let (provider, provider_id, model) = resolve_provider_model();
     let mut app = App::live_session(
         &model,
         &display_path(&workspace),
@@ -82,6 +82,7 @@ pub async fn run_with_options(opts: TuiOptions) -> Result<()> {
     )
     .with_welcome(
         &provider,
+        &provider_id,
         &model,
         &display_path(&workspace),
         policy_label,
@@ -93,18 +94,22 @@ pub async fn run_with_options(opts: TuiOptions) -> Result<()> {
     result
 }
 
-fn resolve_provider_model() -> (String, String) {
+fn resolve_provider_model() -> (String, String, String) {
     match user_config::load() {
         Ok(Some(cfg)) => (
             user_config::provider_label(&cfg.provider).to_string(),
+            cfg.provider.to_ascii_lowercase(),
             cfg.model,
         ),
         _ => {
-            let provider = std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "deepseek".into());
+            let provider_id = std::env::var("LLM_PROVIDER")
+                .unwrap_or_else(|_| "deepseek".into())
+                .to_ascii_lowercase();
             let model = std::env::var("MODEL_ID")
-                .unwrap_or_else(|_| user_config::default_model(&provider).to_string());
+                .unwrap_or_else(|_| user_config::default_model(&provider_id).to_string());
             (
-                user_config::provider_label(&provider).to_string(),
+                user_config::provider_label(&provider_id).to_string(),
+                provider_id,
                 model,
             )
         }

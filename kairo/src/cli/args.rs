@@ -64,10 +64,10 @@ pub struct CliArgs {
 
 /// Parse `argv` (without the program name). Returns `None` when help was printed.
 pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
-    // Bare `kairo` → interactive agent; workspace is auto-detected at run time.
+    // Bare `kairo` → full-screen TUI; use `kairo agent` for the classic REPL.
     if args.is_empty() {
         return Ok(Some(CliArgs {
-            command: Command::Agent,
+            command: Command::Tui,
             workspace: None,
             edit_policy: None,
             output: OutputFormat::Text,
@@ -95,7 +95,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<CliArgs>, String> {
         other => {
             return Err(format!(
                 "unknown subcommand '{other}'. Use: ask | agent | config | health | tui\n\
-                 Or run bare `kairo` for interactive agent mode.\n\
+                 Or run bare `kairo` for the full-screen TUI.\n\
                  Try: kairo --help"
             ));
         }
@@ -312,11 +312,10 @@ mod tests {
     }
 
     #[test]
-    fn bare_invocation_is_interactive_agent() {
+    fn bare_invocation_is_tui() {
         let cli = parse_args(&[]).unwrap().unwrap();
-        assert_eq!(cli.command, Command::Agent);
-        assert!(cli.task.is_none());
-        assert_eq!(cli.session, SessionArg::New);
+        assert_eq!(cli.command, Command::Tui);
+        assert!(!cli.tui_demo);
         assert!(cli.workspace.is_none());
     }
 
