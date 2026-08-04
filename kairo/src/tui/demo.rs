@@ -68,6 +68,7 @@ pub fn sample_app() -> App {
                 path: "src/lib/api.ts".into(),
                 stats: "+1 -1".into(),
             }],
+            selected_change: 0,
             session: SessionInfo {
                 mode: "Agent".into(),
                 policy: "Confirm".into(),
@@ -80,7 +81,7 @@ pub fn sample_app() -> App {
         },
         composer: ComposerState::new("Ask Kairo to explain, change, review, or test…"),
         status: StatusState {
-            hint: "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit"
+            hint: "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit · ? help"
                 .into(),
         },
         terminal_size: (120, 40),
@@ -96,5 +97,7 @@ pub fn sample_app() -> App {
             spinner_frame: 0,
             started_at: None,
         },
+        overlay: None,
+        workspace_path: std::path::PathBuf::from("."),
     }
 }
