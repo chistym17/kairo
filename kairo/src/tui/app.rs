@@ -137,8 +137,16 @@ pub struct SidebarState {
 pub struct ComposerState {
     pub text: String,
     pub placeholder: String,
-    /// Visible height in rows (grows 3..=8 later; fixed for now).
+    /// Visible widget height in rows (grows 3..=8 with content).
     pub height: u16,
+    /// Cursor position in characters (not bytes).
+    pub cursor: usize,
+    /// Vertical scroll offset within the composer (logical lines).
+    pub scroll: usize,
+    pub history: Vec<String>,
+    pub history_index: Option<usize>,
+    /// Draft saved while browsing history.
+    pub draft_backup: String,
 }
 
 #[derive(Debug, Clone)]
@@ -227,13 +235,9 @@ impl App {
                     elapsed: "—".into(),
                 },
             },
-            composer: ComposerState {
-                text: String::new(),
-                placeholder: "Ask Kairo to explain, change, review, or test…".into(),
-                height: 5,
-            },
+            composer: ComposerState::new("Ask Kairo to explain, change, review, or test…"),
             status: StatusState {
-                hint: "Enter send   Tab mode   Ctrl+P plan   Ctrl+D diff   Ctrl+I context   q quit"
+                hint: "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit"
                     .into(),
             },
             terminal_size: (120, 40),
@@ -249,5 +253,14 @@ impl App {
         // Visual-only for now; live AgentMode is fixed for the open session.
         self.header.mode = self.header.mode.next();
         self.sidebar.session.mode = self.header.mode.as_str().to_string();
+    }
+
+    /// Clear the conversation timeline (keeps sidebar / session metadata).
+    pub fn clear_conversation(&mut self) {
+        self.conversation.items.clear();
+        self.conversation.scroll = 0;
+        self.run.milestones.clear();
+        self.run.current = None;
+        self.run.verification.clear();
     }
 }

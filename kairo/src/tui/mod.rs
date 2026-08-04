@@ -1,14 +1,17 @@
 //! Full-screen Ratatui shell for interactive Kairo sessions.
 //!
-//! Part 2 wires the live [`crate::api::AgentEvent`] stream into conversation,
-//! Plan, Changes, and Context panels.
+//! Wires the live [`crate::api::AgentEvent`] stream into conversation, Plan,
+//! Changes, and Context panels, with a multiline composer (send / history /
+//! cancel).
 
 mod app;
+mod composer;
 mod demo;
 mod draw;
 mod feed;
 mod input;
 mod layout;
+mod theme;
 
 use std::io::{self, stdout, IsTerminal};
 use std::time::Duration;

@@ -262,7 +262,7 @@ pub fn refresh_status_hint(app: &mut App) {
         return;
     }
     app.status.hint =
-        "Enter send   Tab mode   Ctrl+P plan   Ctrl+D diff   Ctrl+I context   q quit".into();
+        "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit".into();
 }
 
 fn truncate(s: &str, max: usize) -> String {
