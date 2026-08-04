@@ -1,7 +1,7 @@
-//! Rendering for the static responsive shell.
+//! Rendering for the responsive TUI shell.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -9,8 +9,14 @@ use ratatui::Frame;
 use super::app::{App, PlanStepStatus, SidebarTab, TimelineItem};
 use super::feed::{self, spinner_glyph};
 use super::layout::{self, WidthMode};
+use super::theme;
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
+    // Grow/shrink the composer from content before computing layout.
+    let width_guess = frame.area().width.saturating_mul(72) / 100;
+    // Account for borders + horizontal padding inside the composer.
+    app.composer.reflow(width_guess.saturating_sub(6).max(20));
+
     let area = frame.area();
     let shell = layout::compute(area, app.composer.height);
 
@@ -29,66 +35,48 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let left = format!(
-        " {}   {}   {}   {}",
-        app.header.brand,
-        app.header.mode.as_str(),
-        app.header.model,
-        app.header.workspace,
-    );
-    let right = format!("{} ", app.header.edit_policy);
-
     let line = Line::from(vec![
+        Span::styled(format!(" {}", app.header.brand), theme::accent_bold()),
         Span::styled(
-            left,
-            Style::default().add_modifier(Modifier::BOLD),
+            format!("   {}   {}   {}", app.header.mode.as_str(), app.header.model, app.header.workspace),
+            theme::body(),
         ),
-        Span::raw(" "),
-        Span::raw(right),
+        Span::styled(format!("  {} ", app.header.edit_policy), theme::muted()),
     ]);
 
-    let block = Block::default().borders(Borders::BOTTOM);
-    let inner = block.inner(area);
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(theme::border());
+    let inner = theme::pad(block.inner(area), 1, 0);
     frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(line).alignment(Alignment::Left),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), inner);
 }
 
 fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Conversation ");
-    let inner = block.inner(area);
+        .border_style(theme::border())
+        .title(Span::styled(" Conversation ", theme::muted()));
+    let inner = theme::pad(block.inner(area), 1, 1);
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line> = Vec::new();
     for item in &app.conversation.items {
         match item {
             TimelineItem::User(text) => {
-                lines.push(Line::from(Span::styled(
-                    "You",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-                push_wrapped(&mut lines, text);
+                lines.push(Line::from(Span::styled("You", theme::accent_bold())));
+                push_wrapped(&mut lines, text, theme::body());
                 lines.push(Line::from(""));
             }
             TimelineItem::Assistant(text) => {
-                lines.push(Line::from(Span::styled(
-                    "Kairo",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-                push_wrapped(&mut lines, text);
+                lines.push(Line::from(Span::styled("Kairo", theme::accent_bold())));
+                push_wrapped(&mut lines, text, theme::body());
                 lines.push(Line::from(""));
             }
             TimelineItem::Activity { title, lines: body } => {
-                lines.push(Line::from(Span::styled(
-                    title.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
+                lines.push(Line::from(Span::styled(title.clone(), theme::accent_bold())));
                 for row in body {
-                    lines.push(Line::from(row.clone()));
+                    lines.push(Line::from(Span::styled(row.clone(), theme::muted())));
                 }
                 lines.push(Line::from(""));
             }
@@ -99,39 +87,59 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                 verification,
                 footer,
             } => {
-                lines.push(Line::from(format!("╭─ {title}")));
-                lines.push(Line::from("│"));
-                lines.push(Line::from(format!("│ {summary}")));
-                lines.push(Line::from("│"));
-                lines.push(Line::from("│ Changed"));
+                lines.push(Line::from(Span::styled(
+                    format!("╭─ {title}"),
+                    theme::accent_bold(),
+                )));
+                lines.push(Line::from(Span::styled("│", theme::muted())));
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", theme::muted()),
+                    Span::styled(summary.clone(), theme::body()),
+                ]));
+                lines.push(Line::from(Span::styled("│", theme::muted())));
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", theme::muted()),
+                    Span::styled("Changed", theme::accent()),
+                ]));
                 for c in changed {
-                    lines.push(Line::from(format!("│ {c}")));
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", theme::muted()),
+                        Span::styled(c.clone(), theme::body()),
+                    ]));
                 }
-                lines.push(Line::from("│"));
-                lines.push(Line::from("│ Verification"));
+                lines.push(Line::from(Span::styled("│", theme::muted())));
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", theme::muted()),
+                    Span::styled("Verification", theme::accent()),
+                ]));
                 for v in verification {
-                    lines.push(Line::from(format!("│ {v}")));
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", theme::muted()),
+                        Span::styled(v.clone(), theme::body()),
+                    ]));
                 }
-                lines.push(Line::from("│"));
-                lines.push(Line::from(format!("│ {footer}")));
-                lines.push(Line::from("╰─"));
+                lines.push(Line::from(Span::styled("│", theme::muted())));
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", theme::muted()),
+                    Span::styled(footer.clone(), theme::muted()),
+                ]));
+                lines.push(Line::from(Span::styled("╰─", theme::accent())));
                 lines.push(Line::from(""));
             }
         }
     }
 
-    // Live activity (milestones + spinner) — updates in place while the agent runs.
     if app.run.busy || !app.run.milestones.is_empty() || app.run.current.is_some() {
-        lines.push(Line::from(Span::styled(
-            "Activity",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
+        lines.push(Line::from(Span::styled("Activity", theme::accent_bold())));
         for row in &app.run.milestones {
-            lines.push(Line::from(row.clone()));
+            lines.push(Line::from(Span::styled(row.clone(), theme::muted())));
         }
         if let Some(current) = &app.run.current {
             let spin = spinner_glyph(app.run.spinner_frame);
-            lines.push(Line::from(format!("{spin} {current}")));
+            lines.push(Line::from(Span::styled(
+                format!("{spin} {current}"),
+                theme::accent(),
+            )));
         }
         lines.push(Line::from(""));
     }
@@ -144,16 +152,19 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn push_wrapped(lines: &mut Vec<Line>, text: &str) {
+fn push_wrapped(lines: &mut Vec<Line>, text: &str, style: Style) {
     for paragraph in text.split('\n') {
-        lines.push(Line::from(paragraph.to_string()));
+        lines.push(Line::from(Span::styled(paragraph.to_string(), style)));
     }
 }
 
 fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
     let tabs = tab_line(app.sidebar.tab, mode);
-    let block = Block::default().borders(Borders::ALL).title(tabs);
-    let inner = block.inner(area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border())
+        .title(tabs);
+    let inner = theme::pad(block.inner(area), 1, 1);
     frame.render_widget(block, area);
 
     let body = match app.sidebar.tab {
@@ -172,7 +183,6 @@ fn tab_line(active: SidebarTab, mode: WidthMode) -> Line<'static> {
             spans.push(Span::raw(" "));
         }
         let label = if mode == WidthMode::Medium {
-            // Shorter chrome on medium widths.
             match tab {
                 SidebarTab::Plan => "Plan",
                 SidebarTab::Changes => "Diff",
@@ -182,12 +192,9 @@ fn tab_line(active: SidebarTab, mode: WidthMode) -> Line<'static> {
             tab.title()
         };
         if *tab == active {
-            spans.push(Span::styled(
-                format!("[{label}]"),
-                Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ));
+            spans.push(Span::styled(format!("[{label}]"), theme::tab_active()));
         } else {
-            spans.push(Span::raw(format!(" {label} ")));
+            spans.push(Span::styled(format!(" {label} "), theme::tab_inactive()));
         }
     }
     Line::from(spans)
@@ -196,38 +203,56 @@ fn tab_line(active: SidebarTab, mode: WidthMode) -> Line<'static> {
 fn render_plan_lines(app: &App) -> Vec<Line<'static>> {
     if app.sidebar.plan_steps.is_empty() {
         return vec![
-            Line::from("PLAN"),
+            Line::from(Span::styled("PLAN", theme::accent_bold())),
             Line::from(""),
-            Line::from("No plan yet — it appears when the agent drafts one."),
+            Line::from(Span::styled(
+                "No plan yet — it appears when the agent drafts one.",
+                theme::muted(),
+            )),
         ];
     }
-    let mut lines = vec![Line::from(format!(
-        "PLAN  {}/{}",
-        app.sidebar.plan_done, app.sidebar.plan_total
+    let mut lines = vec![Line::from(Span::styled(
+        format!("PLAN  {}/{}", app.sidebar.plan_done, app.sidebar.plan_total),
+        theme::accent_bold(),
     ))];
     lines.push(Line::from(""));
     for step in &app.sidebar.plan_steps {
-        let mark = match step.status {
-            PlanStepStatus::Done => "✓",
-            PlanStepStatus::Active => "●",
-            PlanStepStatus::Todo => "○",
+        let (mark, style) = match step.status {
+            PlanStepStatus::Done => ("✓", theme::muted()),
+            PlanStepStatus::Active => ("●", theme::accent_bold()),
+            PlanStepStatus::Todo => ("○", theme::muted()),
         };
-        lines.push(Line::from(format!("{mark} {}", step.text)));
+        lines.push(Line::from(Span::styled(
+            format!("{mark} {}", step.text),
+            style,
+        )));
     }
     lines
 }
 
 fn render_changes_lines(app: &App) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("CHANGES"), Line::from("")];
+    let mut lines = vec![
+        Line::from(Span::styled("CHANGES", theme::accent_bold())),
+        Line::from(""),
+    ];
     if app.sidebar.changes.is_empty() {
-        lines.push(Line::from("No file changes yet."));
+        lines.push(Line::from(Span::styled(
+            "No file changes yet.",
+            theme::muted(),
+        )));
     } else {
         for change in &app.sidebar.changes {
-            lines.push(Line::from(format!("M {}", change.path)));
-            lines.push(Line::from(format!("  {}", change.stats)));
+            lines.push(Line::from(Span::styled(
+                format!("M {}", change.path),
+                theme::body(),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", change.stats),
+                theme::muted(),
+            )));
             lines.push(Line::from(""));
         }
-        lines.push(Line::from("Enter  View diff"));
+        lines.push(Line::from(Span::styled("Enter  View diff", theme::muted())));
     }
     lines
 }
@@ -235,16 +260,23 @@ fn render_changes_lines(app: &App) -> Vec<Line<'static>> {
 fn render_context_lines(app: &App) -> Vec<Line<'static>> {
     let s = &app.sidebar.session;
     vec![
-        Line::from("SESSION"),
+        Line::from(Span::styled("SESSION", theme::accent_bold())),
         Line::from(""),
-        Line::from(format!("Mode       {}", s.mode)),
-        Line::from(format!("Policy     {}", s.policy)),
-        Line::from(format!("Model      {}", s.model)),
-        Line::from(format!("Workspace  {}", s.workspace)),
-        Line::from(format!("Session    {}", s.session_id)),
-        Line::from(format!("Tokens     {}", s.tokens)),
-        Line::from(format!("Elapsed    {}", s.elapsed)),
+        kv("Mode", &s.mode),
+        kv("Policy", &s.policy),
+        kv("Model", &s.model),
+        kv("Workspace", &s.workspace),
+        kv("Session", &s.session_id),
+        kv("Tokens", &s.tokens),
+        kv("Elapsed", &s.elapsed),
     ]
+}
+
+fn kv(key: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{key:<10} "), theme::muted()),
+        Span::styled(value.to_string(), theme::body()),
+    ])
 }
 
 fn render_narrow_plan_strip(frame: &mut Frame, area: Rect, app: &App) {
@@ -255,12 +287,17 @@ fn render_narrow_plan_strip(frame: &mut Frame, area: Rect, app: &App) {
         .find(|s| s.status == PlanStepStatus::Active)
         .map(|s| s.text.as_str())
         .unwrap_or("…");
-    let text = format!(
-        " Plan {}/{} · {active} ",
-        app.sidebar.plan_done, app.sidebar.plan_total
-    );
-    let block = Block::default().borders(Borders::ALL);
-    let inner = block.inner(area);
+    let text = Line::from(vec![
+        Span::styled(
+            format!(" Plan {}/{} · ", app.sidebar.plan_done, app.sidebar.plan_total),
+            theme::muted(),
+        ),
+        Span::styled(active.to_string(), theme::accent()),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border());
+    let inner = theme::pad(block.inner(area), 1, 0);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(text), inner);
 }
@@ -269,40 +306,60 @@ fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
     let title = if app.run.busy {
         " Input (busy — Esc cancel) "
     } else {
-        " Input "
+        " Input · Enter send · Shift+Enter newline "
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(area);
+    let border = if app.run.busy {
+        theme::border()
+    } else {
+        theme::border_focus()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .title(Span::styled(title, theme::muted()));
+    let inner = theme::pad(block.inner(area), 1, 1);
     frame.render_widget(block, area);
 
-    let (text, style) = if app.run.busy {
-        (
-            "Agent is working…",
-            Style::default().add_modifier(Modifier::DIM),
-        )
-    } else if app.composer.text.is_empty() {
-        (
-            app.composer.placeholder.as_str(),
-            Style::default().add_modifier(Modifier::DIM),
-        )
-    } else {
-        (app.composer.text.as_str(), Style::default())
-    };
+    if app.run.busy {
+        frame.render_widget(
+            Paragraph::new(Span::styled("Agent is working…", theme::muted_dim())),
+            inner,
+        );
+        return;
+    }
 
+    if app.composer.text.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                app.composer.placeholder.clone(),
+                theme::muted_dim(),
+            )),
+            inner,
+        );
+        frame.set_cursor_position((inner.x, inner.y));
+        return;
+    }
+
+    let scroll = app.composer.scroll as u16;
     frame.render_widget(
-        Paragraph::new(Span::styled(text.to_string(), style)).wrap(Wrap { trim: false }),
+        Paragraph::new(app.composer.text.as_str())
+            .style(theme::body())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         inner,
     );
 
-    if !app.run.busy {
-        if !app.composer.text.is_empty() {
-            let x = inner.x.saturating_add(app.composer.text.len() as u16);
-            let x = x.min(inner.x.saturating_add(inner.width.saturating_sub(1)));
-            frame.set_cursor_position((x, inner.y));
-        } else {
-            frame.set_cursor_position((inner.x, inner.y));
-        }
-    }
+    let (row, col) = app.composer.cursor_row_col(inner.width.max(1));
+    let screen_row = row.saturating_sub(app.composer.scroll);
+    let x = inner
+        .x
+        .saturating_add(col as u16)
+        .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
+    let y = inner
+        .y
+        .saturating_add(screen_row as u16)
+        .min(inner.y.saturating_add(inner.height.saturating_sub(1)));
+    frame.set_cursor_position((x, y));
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
@@ -322,10 +379,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
         String::new()
     };
     let text = format!(" {}  ·  layout:{mode_label}{live} ", app.status.hint);
-    frame.render_widget(
-        Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(text).style(theme::muted_dim()), area);
 }
 
 #[allow(dead_code)]

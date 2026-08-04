@@ -1,5 +1,6 @@
 //! Responsive layout helpers for wide / medium / narrow terminals.
 
+use super::composer::{MAX_HEIGHT, MIN_HEIGHT};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +46,7 @@ pub struct ShellLayout {
 
 pub fn compute(area: Rect, composer_height: u16) -> ShellLayout {
     let width_mode = WidthMode::from_cols(area.width);
-    let composer_h = composer_height.clamp(3, 8);
+    let composer_h = composer_height.clamp(MIN_HEIGHT, MAX_HEIGHT);
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)

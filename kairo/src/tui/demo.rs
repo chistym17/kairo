@@ -78,13 +78,10 @@ pub fn sample_app() -> App {
                 elapsed: "00:23".into(),
             },
         },
-        composer: ComposerState {
-            text: String::new(),
-            placeholder: "Ask Kairo to explain, change, review, or test…".into(),
-            height: 5,
-        },
+        composer: ComposerState::new("Ask Kairo to explain, change, review, or test…"),
         status: StatusState {
-            hint: "Tab mode   Ctrl+P plan   Ctrl+D diff   Ctrl+I context   q quit".into(),
+            hint: "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit"
+                .into(),
         },
         terminal_size: (120, 40),
         run: RunUiState {
