@@ -33,6 +33,67 @@ pub fn border_focus() -> Style {
     accent()
 }
 
+/// Active Ask chip (cool / read-only).
+pub fn mode_ask_active() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Active Agent chip (warm / can edit).
+pub fn mode_agent_active() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn mode_inactive() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+pub fn mode_bar_bg() -> Style {
+    Style::default().bg(Color::Rgb(28, 28, 32))
+}
+
+/// Welcome screen action chips.
+pub fn btn_start() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn btn_sessions() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Blue)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn btn_model() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn btn_quit() -> Style {
+    Style::default()
+        .fg(Color::White)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn welcome_card_bg() -> Style {
+    Style::default().bg(Color::Rgb(22, 24, 28))
+}
+
+pub fn logo() -> Style {
+    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+}
+
 /// Active sidebar tab.
 pub fn tab_active() -> Style {
     accent_bold().add_modifier(Modifier::UNDERLINED)

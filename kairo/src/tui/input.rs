@@ -17,6 +17,8 @@ pub enum Action {
     CancelRun,
     /// Toggle Ask ↔ Agent on the live session.
     CycleMode,
+    /// Jump to a specific mode (mode bar click).
+    SetMode(super::app::AgentModeUi),
     /// Leave the active session and return to Welcome.
     LeaveSession,
     /// Open a new agent session from Welcome / Sessions.
@@ -100,13 +102,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             app.set_sidebar_tab(SidebarTab::Context);
             Action::Continue
         }
-        (KeyModifiers::NONE, KeyCode::Tab) => {
-            if app.run.busy {
-                Action::Continue
-            } else {
-                Action::CycleMode
-            }
-        }
+        (KeyModifiers::NONE, KeyCode::Tab) => Action::CycleMode,
 
         _ if app.run.busy => Action::Continue,
 
@@ -342,4 +338,23 @@ fn handle_overlay_key(key: KeyEvent, app: &mut App) -> Action {
         },
         _ => Action::Continue,
     }
+}
+
+/// Mouse clicks on the Ask / Agent chips above the composer.
+pub fn handle_mouse(column: u16, row: u16, app: &App) -> Action {
+    if app.overlay.is_some() || app.screen != Screen::Session {
+        return Action::Continue;
+    }
+    let hits = app.mode_bar_hits;
+    if rect_contains(hits.ask, column, row) {
+        return Action::SetMode(super::app::AgentModeUi::Ask);
+    }
+    if rect_contains(hits.agent, column, row) {
+        return Action::SetMode(super::app::AgentModeUi::Agent);
+    }
+    Action::Continue
+}
+
+fn rect_contains(r: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x.saturating_add(r.width) && y >= r.y && y < r.y.saturating_add(r.height)
 }

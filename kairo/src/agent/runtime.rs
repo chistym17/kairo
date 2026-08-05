@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::authorization::ApprovalGate;
+use crate::authorization::{ApprovalGate, LiveControls};
 use crate::llm::LlmClient;
 use crate::loop_engine;
 use crate::agent::{AgentEvent, AgentObserver};
@@ -97,7 +97,7 @@ impl AgentRuntime {
         session: Option<&mut Session>,
         approval_gate: Option<&dyn ApprovalGate>,
     ) -> Result<RunResult> {
-        self.run_with_cancel(goal, workspace_root, observer, session, approval_gate, None)
+        self.run_with_cancel(goal, workspace_root, observer, session, approval_gate, None, None)
             .await
     }
 
@@ -109,6 +109,7 @@ impl AgentRuntime {
         mut session: Option<&mut Session>,
         approval_gate: Option<&dyn ApprovalGate>,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        live: Option<std::sync::Arc<std::sync::Mutex<LiveControls>>>,
     ) -> Result<RunResult> {
         let goal = goal.into();
         let workspace_root = workspace_root.into();
@@ -152,6 +153,7 @@ impl AgentRuntime {
             observer,
             session.as_deref_mut(),
             approval_gate,
+            live.as_ref(),
         )
         .await;
 
