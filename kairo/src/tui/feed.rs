@@ -72,6 +72,9 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             tool,
             summary,
         } => {
+            if app.header.mode.is_ask() {
+                return;
+            }
             if let Some(label) = present::tool_started_label(tool, summary) {
                 app.run.set_current(label);
                 refresh_status_hint(app);
@@ -83,24 +86,29 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             success,
             summary,
         } => {
-            if let Some(line) = present::tool_completed_milestone(tool, *success, summary) {
-                app.run.push_milestone(line);
+            if !app.header.mode.is_ask() {
+                if let Some(line) = present::tool_completed_milestone(tool, *success, summary) {
+                    app.run.push_milestone(line);
+                }
             }
-            // Only clear the spinner when this completion matches what we showed,
-            // or when nothing user-facing is in flight.
             app.run.clear_current();
             refresh_status_hint(app);
         }
         AgentEvent::FileChanged { path } => {
             upsert_change(app, path);
-            app.run
-                .push_milestone(present::file_changed_milestone(&path.display().to_string()));
+            if !app.header.mode.is_ask() {
+                app.run
+                    .push_milestone(present::file_changed_milestone(&path.display().to_string()));
+            }
         }
         AgentEvent::VerificationCompleted {
             command,
             success,
             summary,
         } => {
+            if app.header.mode.is_ask() {
+                return;
+            }
             let line = present::verification_milestone(command, *success, summary);
             app.run.verification.push(line.clone());
             app.run.push_milestone(line);
@@ -145,7 +153,25 @@ fn finish_run(app: &mut App, result: &RunResult) {
         upsert_change(app, path);
     }
 
+    let tokens = format_tokens(
+        result.usage.input_tokens.saturating_add(result.usage.output_tokens),
+    );
+    let elapsed = format_duration_ms(result.duration_ms);
+    app.sidebar.session.tokens = tokens.clone();
+    app.sidebar.session.elapsed = elapsed.clone();
+
     let (title, summary) = present::finished_card(result);
+
+    // Ask mode: conversation only — no result card / verify / token chrome.
+    if app.header.mode.is_ask() {
+        if !summary.trim().is_empty() {
+            append_assistant_if_needed(app, &summary);
+        }
+        app.run.milestones.clear();
+        app.run.verification.clear();
+        refresh_status_hint(app);
+        return;
+    }
 
     let changed: Vec<String> = app
         .sidebar
@@ -164,10 +190,6 @@ fn finish_run(app: &mut App, result: &RunResult) {
         app.run.verification.clone()
     };
 
-    let tokens = format_tokens(
-        result.usage.input_tokens.saturating_add(result.usage.output_tokens),
-    );
-    let elapsed = format_duration_ms(result.duration_ms);
     let footer = format!(
         "{} file{} · {} turns · {tokens} tokens · {elapsed}",
         result.changed_files.len(),
@@ -178,9 +200,6 @@ fn finish_run(app: &mut App, result: &RunResult) {
         },
         result.model_turns,
     );
-
-    app.sidebar.session.tokens = tokens;
-    app.sidebar.session.elapsed = elapsed;
 
     if matches!(result.status, RunStatus::Stopped) {
         let already = matches!(
@@ -205,6 +224,29 @@ fn finish_run(app: &mut App, result: &RunResult) {
     app.run.milestones.clear();
     app.run.verification.clear();
     refresh_status_hint(app);
+}
+
+fn append_assistant_if_needed(app: &mut App, summary: &str) {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return;
+    }
+    match app.conversation.items.last() {
+        Some(TimelineItem::Assistant(existing)) if existing.contains(summary) => {}
+        Some(TimelineItem::Assistant(existing))
+            if !existing.is_empty() && summary.contains(existing.trim()) =>
+        {
+            // Summary is a fuller finish text — replace.
+            if let Some(TimelineItem::Assistant(existing)) = app.conversation.items.last_mut() {
+                *existing = summary.to_string();
+            }
+        }
+        _ => {
+            app.conversation
+                .items
+                .push(TimelineItem::Assistant(summary.to_string()));
+        }
+    }
 }
 
 fn append_assistant(app: &mut App, content: &str) {
@@ -604,6 +646,46 @@ mod tests {
                 assert!(summary.contains("query param"));
             }
             other => panic!("expected result card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_mode_finish_shows_text_only() {
+        let mut app = empty_app();
+        app.set_mode_ui(crate::tui::app::AgentModeUi::Ask);
+        apply_event(
+            &mut app,
+            &AgentEvent::TextDelta {
+                content: "I am Kairo.".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            &AgentEvent::Finished {
+                result: RunResult {
+                    run_id: "r".into(),
+                    status: RunStatus::Completed,
+                    success: true,
+                    summary: Some("I am Kairo.".into()),
+                    changed_files: vec![],
+                    steps: 1,
+                    model_turns: 1,
+                    duration_ms: 100,
+                    stop_reason: "CompletedUnverified".into(),
+                    log_path: PathBuf::new(),
+                    usage: RunUsage::default(),
+                },
+            },
+        );
+        assert!(!app.run.busy);
+        assert!(app
+            .conversation
+            .items
+            .iter()
+            .all(|i| !matches!(i, TimelineItem::ResultCard { .. })));
+        match app.conversation.items.last() {
+            Some(TimelineItem::Assistant(t)) => assert!(t.contains("Kairo")),
+            other => panic!("expected assistant text, got {other:?}"),
         }
     }
 }

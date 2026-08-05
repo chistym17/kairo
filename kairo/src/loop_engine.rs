@@ -356,6 +356,12 @@ pub async fn run(
                         continue;
                     }
 
+                    if !text.trim().is_empty() && should_accept_text_answer(state, live) {
+                        let reason = accept_text_as_answer(state, &text);
+                        write_summary(state, &reason);
+                        return reason;
+                    }
+
                     // Part 5D: Agent incomplete work → Layer 4 NonResolving recovery.
                     // Ask / ReadOnly and other exempt modes keep the legacy soft path.
                     if should_bound_no_tool_call(state) {
@@ -1709,6 +1715,70 @@ fn should_bound_no_tool_call(state: &AgentState) -> bool {
         return false;
     }
     true
+}
+
+fn live_is_ask(
+    live: Option<&std::sync::Arc<std::sync::Mutex<LiveControls>>>,
+) -> bool {
+    live.and_then(|l| l.lock().ok())
+        .map(|g| g.is_ask)
+        .unwrap_or(false)
+}
+
+fn run_has_successful_mutation(state: &AgentState) -> bool {
+    state.history.iter().any(|step| {
+        step.result.success
+            && matches!(
+                step.action,
+                Action::ApplyPatch { .. } | Action::WriteFile { .. }
+            )
+    })
+}
+
+/// Ask / read-only, or Agent with no edits yet: plain text is a finished answer.
+fn should_accept_text_answer(
+    state: &AgentState,
+    live: Option<&std::sync::Arc<std::sync::Mutex<LiveControls>>>,
+) -> bool {
+    if live_is_ask(live)
+        || matches!(state.authorization.edit_policy, EditPolicy::ReadOnly)
+    {
+        return true;
+    }
+    if state.completion.last_verify_success.is_some() {
+        return false;
+    }
+    !run_has_successful_mutation(state)
+}
+
+fn accept_text_as_answer(state: &mut AgentState, text: &str) -> StopReason {
+    let summary: String = text.trim().chars().take(2000).collect();
+    let reason = StopReason::CompletedUnverified;
+    let result = ToolResult {
+        success: true,
+        output: summary.clone(),
+        diff: None,
+        error: None,
+        stop_reason: Some(reason.clone()),
+    };
+    let step = Step::new(
+        state.step_count,
+        state.model_turns,
+        Action::Finish {
+            summary: summary.clone(),
+        },
+        result,
+        format!("text_answer_{}", state.step_count),
+    );
+    write_event(
+        &state.run_id,
+        "finish_summary",
+        &summary[..summary.len().min(500)],
+        0,
+    );
+    write_event(&state.run_id, "text_answer_accepted", "plain text completed turn", 0);
+    state.record_step(step);
+    reason
 }
 
 fn truncate_no_tool_digest(text: &str) -> String {
@@ -3905,6 +3975,49 @@ mod tests {
         let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
         state.authorization.edit_policy = EditPolicy::ReadOnly;
         assert!(!should_bound_no_tool_call(&state));
+    }
+
+    #[test]
+    fn text_answer_accepted_in_ask_readonly() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        state.authorization.edit_policy = EditPolicy::ReadOnly;
+        assert!(should_accept_text_answer(&state, None));
+        let reason = accept_text_as_answer(&mut state, "I am Kairo.");
+        assert_eq!(reason, StopReason::CompletedUnverified);
+        assert!(matches!(
+            state.history.last().map(|s| &s.action),
+            Some(Action::Finish { summary }) if summary == "I am Kairo."
+        ));
+    }
+
+    #[test]
+    fn text_answer_accepted_in_agent_before_edits() {
+        let state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        assert!(should_accept_text_answer(&state, None));
+    }
+
+    #[test]
+    fn text_answer_rejected_in_agent_after_mutation() {
+        let mut state = AgentState::new("goal", PathBuf::from("/tmp"), "test-model", 20);
+        let result = ToolResult {
+            success: true,
+            output: "ok".into(),
+            diff: None,
+            error: None,
+            stop_reason: None,
+        };
+        state.record_step(Step::new(
+            0,
+            1,
+            Action::WriteFile {
+                path: PathBuf::from("a.rs"),
+                content: "x".into(),
+            },
+            result,
+            "w1",
+        ));
+        assert!(!should_accept_text_answer(&state, None));
+        assert!(should_bound_no_tool_call(&state));
     }
 
     #[test]
