@@ -94,6 +94,14 @@ fn render_mode_bar(frame: &mut Frame, area: Rect, app: &mut App) {
         Span::styled(" Ask ", ask_style),
         Span::raw(" "),
         Span::styled(" Agent ", agent_style),
+        Span::styled(
+            if ask_active {
+                "  answers only"
+            } else {
+                "  can edit files"
+            },
+            theme::muted(),
+        ),
     ]);
 
     // Hit targets: " " (1) + " Ask " (5) + " " (1) + " Agent " (7)
@@ -296,7 +304,11 @@ fn push_prefixed(lines: &mut Vec<Line>, prefix: &str, text: &str, style: Style, 
 }
 
 fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
-    let tabs = tab_line(app.sidebar.tab, mode);
+    let tabs = if app.header.mode.is_ask() {
+        Line::from(Span::styled(" Info ", theme::tab_active()))
+    } else {
+        tab_line(app.sidebar.tab, mode)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border())
@@ -304,10 +316,14 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
     let inner = theme::pad(block.inner(area), 1, 1);
     frame.render_widget(block, area);
 
-    let body = match app.sidebar.tab {
-        SidebarTab::Plan => render_plan_lines(app),
-        SidebarTab::Changes => render_changes_lines(app),
-        SidebarTab::Context => render_context_lines(app),
+    let body = if app.header.mode.is_ask() {
+        render_context_lines(app)
+    } else {
+        match app.sidebar.tab {
+            SidebarTab::Plan => render_plan_lines(app),
+            SidebarTab::Changes => render_changes_lines(app),
+            SidebarTab::Context => render_context_lines(app),
+        }
     };
 
     frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
@@ -670,6 +686,36 @@ fn render_welcome(frame: &mut Frame, area: Rect, app: &App) {
         format!("{}  ·  {}", w.workspace_display, w.model),
         theme::muted_dim(),
     )));
+    body.push(Line::from(""));
+
+    let ask_on = w.preferred_mode.is_ask();
+    body.push(Line::from(vec![
+        Span::styled(
+            " Ask ",
+            if ask_on {
+                theme::mode_ask_active()
+            } else {
+                theme::mode_inactive()
+            },
+        ),
+        Span::raw("  "),
+        Span::styled(
+            " Agent ",
+            if !ask_on {
+                theme::mode_agent_active()
+            } else {
+                theme::mode_inactive()
+            },
+        ),
+        Span::styled(
+            if ask_on {
+                "  answers only · Tab"
+            } else {
+                "  can edit · Tab"
+            },
+            theme::muted(),
+        ),
+    ]));
     body.push(Line::from(""));
     body.push(Line::from(vec![
         Span::styled(" Enter Start ", theme::btn_start()),

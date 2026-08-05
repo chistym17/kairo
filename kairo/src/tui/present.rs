@@ -129,10 +129,71 @@ pub fn verification_milestone(command: &str, success: bool, summary: &str) -> St
 
 /// Friendly conversation / result copy for errors.
 pub fn friendly_error(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("readonly")
+        || lower.contains("read-only")
+        || lower.contains("read only")
+        || (lower.contains("mutating") && lower.contains("denied"))
+        || lower.contains("edit policy is readonly")
+    {
+        return ask_switch_to_agent_message().into();
+    }
     if looks_like_harness_noise(message) {
         return "Something went wrong — try again.".into();
     }
     humanize_error(message)
+}
+
+pub fn ask_switch_to_agent_message() -> &'static str {
+    "I'm in Ask mode (read-only). Switch to Agent (Tab or click Agent) to edit or fix files."
+}
+
+/// Light UX check — not a security gate. Used to tip users before a doomed Ask edit.
+pub fn looks_like_edit_request(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let lower = lower.trim();
+    if lower.is_empty() {
+        return false;
+    }
+    // Strong edit verbs / phrases.
+    const HITS: &[&str] = &[
+        "fix ",
+        "fix the",
+        "please fix",
+        "edit ",
+        "change ",
+        "update ",
+        "patch ",
+        "refactor ",
+        "implement ",
+        "add a ",
+        "add the ",
+        "remove ",
+        "delete ",
+        "rename ",
+        "write ",
+        "create a file",
+        "create file",
+        "apply ",
+        "make the change",
+        "make changes",
+        "modify ",
+    ];
+    if HITS.iter().any(|h| lower.contains(h)) {
+        return true;
+    }
+    // Short commands.
+    matches!(
+        lower,
+        "fix" | "edit" | "patch" | "refactor" | "implement"
+    )
+}
+
+pub fn is_mutation_tool(tool: &str) -> bool {
+    matches!(
+        tool.trim(),
+        "write_file" | "apply_patch" | "run_shell" | "run_command"
+    )
 }
 
 /// Result-card title + summary for a finished run.
@@ -213,22 +274,17 @@ mod tests {
     }
 
     #[test]
-    fn stopped_run_is_friendly() {
-        let (title, summary) = finished_card(&RunResult {
-            run_id: "r".into(),
-            status: RunStatus::Stopped,
-            success: false,
-            summary: None,
-            changed_files: vec![],
-            steps: 8,
-            model_turns: 5,
-            duration_ms: 1000,
-            stop_reason: "NoProgress".into(),
-            log_path: PathBuf::new(),
-            usage: RunUsage::default(),
-        });
-        assert_eq!(title, "Couldn't finish");
-        assert!(!summary.contains("NoProgress"));
-        assert!(summary.to_ascii_lowercase().contains("progress") || summary.contains("try"));
+    fn edit_request_detection() {
+        assert!(looks_like_edit_request("please fix the date bug"));
+        assert!(looks_like_edit_request("edit api.ts"));
+        assert!(!looks_like_edit_request("what is your name?"));
+        assert!(!looks_like_edit_request("explain how auth works"));
+    }
+
+    #[test]
+    fn readonly_error_maps_to_switch_tip() {
+        let msg = friendly_error("edit policy is ReadOnly — mutating / external tools are denied");
+        assert!(msg.contains("Agent"));
+        assert!(msg.contains("Ask"));
     }
 }

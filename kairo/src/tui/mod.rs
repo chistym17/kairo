@@ -221,7 +221,13 @@ async fn open_and_run_session(
             app.hydrate_from_persisted(&persisted);
         }
     } else {
-        app.conversation.items = vec![TimelineItem::Assistant("Ready.".into())];
+        app.set_mode_ui(app.welcome.preferred_mode);
+        app.conversation.items = vec![TimelineItem::Assistant(
+            match app.welcome.preferred_mode {
+                AgentModeUi::Ask => "Ask mode — questions only. Tab switches to Agent for edits.".into(),
+                _ => "Agent mode — I can edit files when you ask.".into(),
+            },
+        )];
         app.sidebar.plan_steps.clear();
         app.sidebar.plan_done = 0;
         app.sidebar.plan_total = 0;
@@ -229,10 +235,16 @@ async fn open_and_run_session(
         app.run = Default::default();
     }
 
+    let api_mode = app.api_mode();
+    let session_policy = match api_mode {
+        AgentMode::Ask => EditPolicy::ReadOnly,
+        AgentMode::Agent => edit_policy,
+    };
+
     let config = AgentConfig::builder()
         .workspace(workspace)
-        .mode(AgentMode::Agent)
-        .edit_policy(edit_policy)
+        .mode(api_mode)
+        .edit_policy(session_policy)
         .session(source)
         .build()
         .context("invalid agent config")?;
@@ -353,6 +365,15 @@ async fn run_live_loop(
                     }
                 }
                 Action::Send(line) => {
+                    if app.header.mode.is_ask() && present::looks_like_edit_request(&line) {
+                        app.conversation.follow_tail = true;
+                        app.conversation.items.push(TimelineItem::User(line));
+                        app.conversation.items.push(TimelineItem::Assistant(
+                            present::ask_switch_to_agent_message().into(),
+                        ));
+                        refresh_status_hint(app);
+                        continue;
+                    }
                     app.conversation.follow_tail = true;
                     app.conversation
                         .items
