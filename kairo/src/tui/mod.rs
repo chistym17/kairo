@@ -345,14 +345,20 @@ async fn run_live_loop(
                         app.conversation.items.push(TimelineItem::Assistant(format!(
                             "Could not switch mode: {e:#}"
                         )));
+                    } else if app.run.busy {
+                        // Mid-run: takes effect on the next model/tool step.
+                        app.status.hint = format!(
+                            "Switched to {} — applies on next step · Esc cancel",
+                            app.header.mode.as_str()
+                        );
                     } else {
                         let label = app.header.mode.as_str();
                         app.conversation.items.push(TimelineItem::Assistant(format!(
                             "Switched to {label} mode ({}).",
                             app.header.edit_policy
                         )));
+                        refresh_status_hint(app);
                     }
-                    refresh_status_hint(app);
                 }
                 Action::Send(line) => {
                     app.conversation.follow_tail = true;
