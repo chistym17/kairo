@@ -72,6 +72,9 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             tool,
             summary,
         } => {
+            if app.header.mode.is_ask() {
+                return;
+            }
             if let Some(label) = present::tool_started_label(tool, summary) {
                 app.run.set_current(label);
                 refresh_status_hint(app);
@@ -83,24 +86,41 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             success,
             summary,
         } => {
+            if app.header.mode.is_ask() {
+                if !*success
+                    && present::is_mutation_tool(tool)
+                    && !app.run.ask_edit_tip_shown
+                {
+                    app.run.ask_edit_tip_shown = true;
+                    app.conversation.items.push(TimelineItem::Assistant(
+                        present::ask_switch_to_agent_message().into(),
+                    ));
+                }
+                app.run.clear_current();
+                refresh_status_hint(app);
+                return;
+            }
             if let Some(line) = present::tool_completed_milestone(tool, *success, summary) {
                 app.run.push_milestone(line);
             }
-            // Only clear the spinner when this completion matches what we showed,
-            // or when nothing user-facing is in flight.
             app.run.clear_current();
             refresh_status_hint(app);
         }
         AgentEvent::FileChanged { path } => {
             upsert_change(app, path);
-            app.run
-                .push_milestone(present::file_changed_milestone(&path.display().to_string()));
+            if !app.header.mode.is_ask() {
+                app.run
+                    .push_milestone(present::file_changed_milestone(&path.display().to_string()));
+            }
         }
         AgentEvent::VerificationCompleted {
             command,
             success,
             summary,
         } => {
+            if app.header.mode.is_ask() {
+                return;
+            }
             let line = present::verification_milestone(command, *success, summary);
             app.run.verification.push(line.clone());
             app.run.push_milestone(line);
@@ -112,7 +132,19 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             refresh_status_hint(app);
         }
         AgentEvent::Error { message } => {
-            let friendly = present::friendly_error(message);
+            let friendly = if app.header.mode.is_ask() {
+                let tip = present::friendly_error(message);
+                if tip == present::ask_switch_to_agent_message() {
+                    if app.run.ask_edit_tip_shown {
+                        app.run.clear_current();
+                        return;
+                    }
+                    app.run.ask_edit_tip_shown = true;
+                }
+                tip
+            } else {
+                present::friendly_error(message)
+            };
             app.conversation
                 .items
                 .push(TimelineItem::Assistant(friendly));
@@ -145,7 +177,25 @@ fn finish_run(app: &mut App, result: &RunResult) {
         upsert_change(app, path);
     }
 
+    let tokens = format_tokens(
+        result.usage.input_tokens.saturating_add(result.usage.output_tokens),
+    );
+    let elapsed = format_duration_ms(result.duration_ms);
+    app.sidebar.session.tokens = tokens.clone();
+    app.sidebar.session.elapsed = elapsed.clone();
+
     let (title, summary) = present::finished_card(result);
+
+    // Ask mode: conversation only — no result card / verify / token chrome.
+    if app.header.mode.is_ask() {
+        if !summary.trim().is_empty() {
+            append_assistant_if_needed(app, &summary);
+        }
+        app.run.milestones.clear();
+        app.run.verification.clear();
+        refresh_status_hint(app);
+        return;
+    }
 
     let changed: Vec<String> = app
         .sidebar
@@ -164,10 +214,6 @@ fn finish_run(app: &mut App, result: &RunResult) {
         app.run.verification.clone()
     };
 
-    let tokens = format_tokens(
-        result.usage.input_tokens.saturating_add(result.usage.output_tokens),
-    );
-    let elapsed = format_duration_ms(result.duration_ms);
     let footer = format!(
         "{} file{} · {} turns · {tokens} tokens · {elapsed}",
         result.changed_files.len(),
@@ -178,9 +224,6 @@ fn finish_run(app: &mut App, result: &RunResult) {
         },
         result.model_turns,
     );
-
-    app.sidebar.session.tokens = tokens;
-    app.sidebar.session.elapsed = elapsed;
 
     if matches!(result.status, RunStatus::Stopped) {
         let already = matches!(
@@ -205,6 +248,29 @@ fn finish_run(app: &mut App, result: &RunResult) {
     app.run.milestones.clear();
     app.run.verification.clear();
     refresh_status_hint(app);
+}
+
+fn append_assistant_if_needed(app: &mut App, summary: &str) {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return;
+    }
+    match app.conversation.items.last() {
+        Some(TimelineItem::Assistant(existing)) if existing.contains(summary) => {}
+        Some(TimelineItem::Assistant(existing))
+            if !existing.is_empty() && summary.contains(existing.trim()) =>
+        {
+            // Summary is a fuller finish text — replace.
+            if let Some(TimelineItem::Assistant(existing)) = app.conversation.items.last_mut() {
+                *existing = summary.to_string();
+            }
+        }
+        _ => {
+            app.conversation
+                .items
+                .push(TimelineItem::Assistant(summary.to_string()));
+        }
+    }
 }
 
 fn append_assistant(app: &mut App, content: &str) {
@@ -336,6 +402,8 @@ pub struct RunUiState {
     pub pending_approval: Option<ApprovalRequest>,
     pub spinner_frame: usize,
     pub started_at: Option<Instant>,
+    /// Avoid repeating the Ask→Agent tip every denied tool in one turn.
+    pub ask_edit_tip_shown: bool,
 }
 
 impl RunUiState {
@@ -347,6 +415,7 @@ impl RunUiState {
         self.pending_approval = None;
         self.spinner_frame = 0;
         self.started_at = Some(Instant::now());
+        self.ask_edit_tip_shown = false;
     }
 
     pub fn set_current(&mut self, text: String) {
@@ -605,5 +674,52 @@ mod tests {
             }
             other => panic!("expected result card, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ask_mode_finish_shows_text_only() {
+        let mut app = empty_app();
+        app.set_mode_ui(crate::tui::app::AgentModeUi::Ask);
+        apply_event(
+            &mut app,
+            &AgentEvent::TextDelta {
+                content: "I am Kairo.".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            &AgentEvent::Finished {
+                result: RunResult {
+                    run_id: "r".into(),
+                    status: RunStatus::Completed,
+                    success: true,
+                    summary: Some("I am Kairo.".into()),
+                    changed_files: vec![],
+                    steps: 1,
+                    model_turns: 1,
+                    duration_ms: 100,
+                    stop_reason: "CompletedUnverified".into(),
+                    log_path: PathBuf::new(),
+                    usage: RunUsage::default(),
+                },
+            },
+        );
+        assert!(!app.run.busy);
+        assert!(app
+            .conversation
+            .items
+            .iter()
+            .all(|i| !matches!(i, TimelineItem::ResultCard { .. })));
+        match app.conversation.items.last() {
+            Some(TimelineItem::Assistant(t)) => assert!(t.contains("Kairo")),
+            other => panic!("expected assistant text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_mode_blocks_edit_request_with_tip() {
+        assert!(present::looks_like_edit_request("fix the login bug"));
+        let tip = present::ask_switch_to_agent_message();
+        assert!(tip.contains("Agent"));
     }
 }

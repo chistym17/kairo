@@ -100,6 +100,7 @@ pub fn sample_app() -> App {
             pending_approval: None,
             spinner_frame: 0,
             started_at: None,
+            ask_edit_tip_shown: false,
         },
         overlay: None,
         workspace_path: std::path::PathBuf::from("."),

@@ -15,6 +15,8 @@ pub struct WelcomeState {
     pub model: String,
     pub edit_policy: String,
     pub message: Option<String>,
+    /// Mode chosen on the welcome card before Start.
+    pub preferred_mode: crate::tui::app::AgentModeUi,
 }
 
 impl WelcomeState {
@@ -32,6 +34,7 @@ impl WelcomeState {
             model: model.into(),
             edit_policy: edit_policy.into(),
             message: None,
+            preferred_mode: crate::tui::app::AgentModeUi::Agent,
         }
     }
 }

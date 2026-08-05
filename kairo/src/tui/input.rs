@@ -195,6 +195,19 @@ fn handle_welcome_key(key: KeyEvent, app: &mut App) -> Action {
         (KeyModifiers::CONTROL, KeyCode::Char('c'))
         | (KeyModifiers::NONE, KeyCode::Char('q'))
         | (KeyModifiers::NONE, KeyCode::Esc) => Action::Quit,
+        (KeyModifiers::NONE, KeyCode::Tab) => {
+            app.welcome.preferred_mode = app.welcome.preferred_mode.toggle_ask_agent();
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Char('a')) => {
+            app.welcome.preferred_mode = super::app::AgentModeUi::Ask;
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Char('g')) => {
+            // "aGent" — avoid clashing with Ask's `a`
+            app.welcome.preferred_mode = super::app::AgentModeUi::Agent;
+            Action::Continue
+        }
         (KeyModifiers::NONE, KeyCode::Enter) => Action::StartNewSession,
         (KeyModifiers::NONE, KeyCode::Char('s')) => Action::OpenSessions,
         (KeyModifiers::NONE, KeyCode::Char('m')) => {

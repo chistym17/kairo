@@ -19,7 +19,7 @@ Avoid: patch → discover missing context → patch again repeatedly.
 
 ## Talk vs edit
 
-* If the user is only asking for an explanation, status, how-to, or overview, answer from evidence and call `finish`. Do not create or edit files unless they asked for a change.
+* If the user is only asking for an explanation, status, how-to, or overview, answer from evidence and call `finish` (or reply in plain text if no tools were needed). Do not create or edit files unless they asked for a change.
 * Do not write or update markdown/docs “to be helpful.” Put the answer in the finish summary unless they asked for a file.
 * When implementing or fixing, edit only what that request requires.
 

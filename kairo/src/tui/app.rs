@@ -271,7 +271,7 @@ impl App {
                     elapsed: "—".into(),
                 },
             },
-            composer: ComposerState::new("Message…"),
+            composer: ComposerState::new(composer_placeholder(mode)),
             status: StatusState {
                 hint: "Enter · Tab · ? · q".into(),
             },
@@ -483,10 +483,12 @@ impl App {
         };
         self.header.mode = mode;
         self.sidebar.session.mode = mode.as_str().to_string();
+        self.composer.placeholder = composer_placeholder(mode).into();
         match mode {
             AgentModeUi::Ask => {
                 self.header.edit_policy = "Read-only".into();
                 self.sidebar.session.policy = "Read-only".into();
+                self.sidebar.tab = SidebarTab::Context;
             }
             AgentModeUi::Agent | AgentModeUi::Plan => {
                 self.header.edit_policy = "Confirm edits".into();
@@ -618,5 +620,12 @@ impl App {
         let cur = self.sidebar.selected_change as i32;
         let next = (cur + delta).rem_euclid(len);
         self.sidebar.selected_change = next as usize;
+    }
+}
+
+pub fn composer_placeholder(mode: AgentModeUi) -> &'static str {
+    match mode {
+        AgentModeUi::Ask => "Ask about the codebase…",
+        AgentModeUi::Agent | AgentModeUi::Plan => "Describe a change…",
     }
 }
