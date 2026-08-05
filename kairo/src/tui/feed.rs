@@ -86,10 +86,22 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             success,
             summary,
         } => {
-            if !app.header.mode.is_ask() {
-                if let Some(line) = present::tool_completed_milestone(tool, *success, summary) {
-                    app.run.push_milestone(line);
+            if app.header.mode.is_ask() {
+                if !*success
+                    && present::is_mutation_tool(tool)
+                    && !app.run.ask_edit_tip_shown
+                {
+                    app.run.ask_edit_tip_shown = true;
+                    app.conversation.items.push(TimelineItem::Assistant(
+                        present::ask_switch_to_agent_message().into(),
+                    ));
                 }
+                app.run.clear_current();
+                refresh_status_hint(app);
+                return;
+            }
+            if let Some(line) = present::tool_completed_milestone(tool, *success, summary) {
+                app.run.push_milestone(line);
             }
             app.run.clear_current();
             refresh_status_hint(app);
@@ -120,7 +132,19 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             refresh_status_hint(app);
         }
         AgentEvent::Error { message } => {
-            let friendly = present::friendly_error(message);
+            let friendly = if app.header.mode.is_ask() {
+                let tip = present::friendly_error(message);
+                if tip == present::ask_switch_to_agent_message() {
+                    if app.run.ask_edit_tip_shown {
+                        app.run.clear_current();
+                        return;
+                    }
+                    app.run.ask_edit_tip_shown = true;
+                }
+                tip
+            } else {
+                present::friendly_error(message)
+            };
             app.conversation
                 .items
                 .push(TimelineItem::Assistant(friendly));
@@ -378,6 +402,8 @@ pub struct RunUiState {
     pub pending_approval: Option<ApprovalRequest>,
     pub spinner_frame: usize,
     pub started_at: Option<Instant>,
+    /// Avoid repeating the Ask→Agent tip every denied tool in one turn.
+    pub ask_edit_tip_shown: bool,
 }
 
 impl RunUiState {
@@ -389,6 +415,7 @@ impl RunUiState {
         self.pending_approval = None;
         self.spinner_frame = 0;
         self.started_at = Some(Instant::now());
+        self.ask_edit_tip_shown = false;
     }
 
     pub fn set_current(&mut self, text: String) {
@@ -687,5 +714,12 @@ mod tests {
             Some(TimelineItem::Assistant(t)) => assert!(t.contains("Kairo")),
             other => panic!("expected assistant text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ask_mode_blocks_edit_request_with_tip() {
+        assert!(present::looks_like_edit_request("fix the login bug"));
+        let tip = present::ask_switch_to_agent_message();
+        assert!(tip.contains("Agent"));
     }
 }
