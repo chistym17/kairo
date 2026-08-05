@@ -257,6 +257,10 @@ fn stopped_message(result: &RunResult, last_error: Option<&str>) -> String {
     humanize_error(&result.stop_reason)
 }
 
+pub(crate) fn user_facing_stop_message(result: &RunResult) -> String {
+    stopped_message(result, None)
+}
+
 /// Map raw provider/runtime errors into short user-facing text.
 pub fn humanize_error(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
@@ -306,7 +310,7 @@ pub fn humanize_error(raw: &str) -> String {
     shorten(raw, 200)
 }
 
-fn tool_label(tool: &str, summary: &str) -> String {
+pub(crate) fn tool_label(tool: &str, summary: &str) -> String {
     let name = tool.trim();
     let detail = summary.trim();
     let verb = match name {
