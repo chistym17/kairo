@@ -100,13 +100,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) -> Action {
             app.set_sidebar_tab(SidebarTab::Context);
             Action::Continue
         }
-        (KeyModifiers::NONE, KeyCode::Tab) => {
-            if app.run.busy {
-                Action::Continue
-            } else {
-                Action::CycleMode
-            }
-        }
+        (KeyModifiers::NONE, KeyCode::Tab) => Action::CycleMode,
 
         _ if app.run.busy => Action::Continue,
 
