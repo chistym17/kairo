@@ -6,11 +6,12 @@
 
 mod args;
 mod health;
-mod output;
+pub(crate) mod output;
 mod run;
 mod workspace;
 
 pub use args::{parse_args, CliArgs, Command, OutputFormat, SessionArg, UiMode};
+pub use output::humanize_error;
 pub use run::{main_from_env, run};
 pub use workspace::{current_branch, detect_workspace, display_path};
 

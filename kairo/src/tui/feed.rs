@@ -8,6 +8,7 @@ use crate::api::{AgentEvent, ApprovalRequest, RunResult, RunStatus};
 use super::app::{
     App, ChangeEntry, PlanStepStatus, PlanStepView, TimelineItem,
 };
+use super::present;
 
 /// Apply one public agent event to the shell state.
 pub fn apply_event(app: &mut App, event: &AgentEvent) {
@@ -34,6 +35,9 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             refresh_status_hint(app);
         }
         AgentEvent::TextDelta { content } => {
+            if content_looks_internal(content) {
+                return;
+            }
             append_assistant(app, content);
         }
         AgentEvent::PlanUpdated {
@@ -65,37 +69,39 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
         }
         AgentEvent::ToolStarted {
             id: _,
-            tool: _,
+            tool,
             summary,
         } => {
-            app.run.set_current(summary.clone());
-            refresh_status_hint(app);
+            if let Some(label) = present::tool_started_label(tool, summary) {
+                app.run.set_current(label);
+                refresh_status_hint(app);
+            }
         }
         AgentEvent::ToolCompleted {
             id: _,
-            tool: _,
+            tool,
             success,
             summary,
         } => {
-            let mark = if *success { "✓" } else { "✗" };
-            app.run.push_milestone(format!("{mark} {summary}"));
+            if let Some(line) = present::tool_completed_milestone(tool, *success, summary) {
+                app.run.push_milestone(line);
+            }
+            // Only clear the spinner when this completion matches what we showed,
+            // or when nothing user-facing is in flight.
             app.run.clear_current();
             refresh_status_hint(app);
         }
         AgentEvent::FileChanged { path } => {
             upsert_change(app, path);
+            app.run
+                .push_milestone(present::file_changed_milestone(&path.display().to_string()));
         }
         AgentEvent::VerificationCompleted {
             command,
             success,
             summary,
         } => {
-            let mark = if *success { "✓" } else { "✗" };
-            let line = if summary.is_empty() {
-                format!("{mark} {command}")
-            } else {
-                format!("{mark} {command} — {summary}")
-            };
+            let line = present::verification_milestone(command, *success, summary);
             app.run.verification.push(line.clone());
             app.run.push_milestone(line);
             app.run.clear_current();
@@ -106,15 +112,25 @@ pub fn apply_event(app: &mut App, event: &AgentEvent) {
             refresh_status_hint(app);
         }
         AgentEvent::Error { message } => {
+            let friendly = present::friendly_error(message);
             app.conversation
                 .items
-                .push(TimelineItem::Assistant(format!("Error: {message}")));
+                .push(TimelineItem::Assistant(friendly));
             app.run.clear_current();
         }
         AgentEvent::Finished { result } => {
             finish_run(app, result);
         }
     }
+}
+
+fn content_looks_internal(content: &str) -> bool {
+    let l = content.to_ascii_lowercase();
+    l.contains("[transition]")
+        || l.contains("[state]")
+        || l.contains("duplicate read denied")
+        || l.contains("phase_tool_denied")
+        || l.contains("recovery_active")
 }
 
 fn finish_run(app: &mut App, result: &RunResult) {
@@ -129,16 +145,7 @@ fn finish_run(app: &mut App, result: &RunResult) {
         upsert_change(app, path);
     }
 
-    let title = match result.status {
-        RunStatus::Completed => "Completed — Verified",
-        RunStatus::CompletedUnverified => "Completed — Unverified",
-        RunStatus::Stopped => "Stopped",
-    };
-
-    let summary = result
-        .summary
-        .clone()
-        .unwrap_or_else(|| result.stop_reason.clone());
+    let (title, summary) = present::finished_card(result);
 
     let changed: Vec<String> = app
         .sidebar
@@ -148,7 +155,11 @@ fn finish_run(app: &mut App, result: &RunResult) {
         .collect();
 
     let verification = if app.run.verification.is_empty() {
-        vec!["(no verification recorded)".into()]
+        if matches!(result.status, RunStatus::Stopped) {
+            Vec::new()
+        } else {
+            vec!["(no verification recorded)".into()]
+        }
     } else {
         app.run.verification.clone()
     };
@@ -171,8 +182,20 @@ fn finish_run(app: &mut App, result: &RunResult) {
     app.sidebar.session.tokens = tokens;
     app.sidebar.session.elapsed = elapsed;
 
+    if matches!(result.status, RunStatus::Stopped) {
+        let already = matches!(
+            app.conversation.items.last(),
+            Some(TimelineItem::Assistant(t)) if t == &summary
+        );
+        if !already {
+            app.conversation
+                .items
+                .push(TimelineItem::Assistant(summary.clone()));
+        }
+    }
+
     app.conversation.items.push(TimelineItem::ResultCard {
-        title: title.into(),
+        title,
         summary,
         changed,
         verification,
@@ -443,10 +466,10 @@ mod tests {
             &AgentEvent::ToolStarted {
                 id: "1".into(),
                 tool: "read_file".into(),
-                summary: "Reading api.ts".into(),
+                summary: "read_file api.ts".into(),
             },
         );
-        assert_eq!(app.run.current.as_deref(), Some("Reading api.ts"));
+        assert_eq!(app.run.current.as_deref(), Some("read api.ts"));
 
         apply_event(
             &mut app,
@@ -454,11 +477,27 @@ mod tests {
                 id: "1".into(),
                 tool: "read_file".into(),
                 success: true,
-                summary: "read api.ts".into(),
+                summary: "read_file api.ts".into(),
             },
         );
         assert!(app.run.current.is_none());
-        assert!(app.run.milestones.iter().any(|m| m.contains("read api.ts")));
+        assert!(app.run.milestones.iter().any(|m| m.contains("read")));
+
+        // Harness denial — must not appear in Activity.
+        apply_event(
+            &mut app,
+            &AgentEvent::ToolCompleted {
+                id: "2".into(),
+                tool: "read_file".into(),
+                success: false,
+                summary: "Duplicate read denied".into(),
+            },
+        );
+        assert!(!app
+            .run
+            .milestones
+            .iter()
+            .any(|m| m.to_ascii_lowercase().contains("denied")));
 
         apply_event(
             &mut app,
@@ -479,6 +518,44 @@ mod tests {
             }
             other => panic!("expected assistant text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stopped_run_shows_friendly_message() {
+        let mut app = empty_app();
+        apply_event(
+            &mut app,
+            &AgentEvent::Finished {
+                result: RunResult {
+                    run_id: "r".into(),
+                    status: RunStatus::Stopped,
+                    success: false,
+                    summary: None,
+                    changed_files: vec![],
+                    steps: 5,
+                    model_turns: 4,
+                    duration_ms: 1000,
+                    stop_reason: "NoProgress".into(),
+                    log_path: PathBuf::new(),
+                    usage: RunUsage::default(),
+                },
+            },
+        );
+        assert!(!app.run.busy);
+        let texts: Vec<String> = app
+            .conversation
+            .items
+            .iter()
+            .map(|item| match item {
+                TimelineItem::Assistant(t) => t.clone(),
+                TimelineItem::ResultCard { title, summary, .. } => {
+                    format!("{title}|{summary}")
+                }
+                _ => String::new(),
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("Couldn't finish") || t.contains("progress") || t.contains("try")));
+        assert!(!texts.iter().any(|t| t.contains("NoProgress")));
     }
 
     #[test]
