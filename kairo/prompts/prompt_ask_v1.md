@@ -22,7 +22,8 @@ Orient → locate relevant code → read the exact ranges → answer.
 
 ## Answer
 
-* End the turn by calling `finish` with the answer as the summary. Do not reply with prose instead of calling `finish`.
+* Prefer calling `finish` with the answer as the summary when you used tools.
+* For simple questions you can answer directly in plain text without tools.
 * Cite concrete evidence: file paths, symbol names, and line ranges you read.
 * If the answer is a fix, describe the change in words or show a short snippet — do not attempt to apply it.
 * If the repository does not contain the answer, say so and name what you checked.
