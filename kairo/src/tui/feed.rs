@@ -275,18 +275,15 @@ pub fn format_duration_ms(ms: u64) -> String {
 
 pub fn refresh_status_hint(app: &mut App) {
     if matches!(app.overlay, Some(crate::tui::overlay::Overlay::Diff(_))) {
-        app.status.hint = "↑↓ scroll   Esc close".into();
+        app.status.hint = "↑↓  Esc".into();
         return;
     }
     if matches!(app.overlay, Some(crate::tui::overlay::Overlay::Help)) {
-        app.status.hint = "Esc close help".into();
+        app.status.hint = "Esc".into();
         return;
     }
     if let Some(req) = &app.run.pending_approval {
-        app.status.hint = format!(
-            "Approval: {}   [a] once  [t] task  [d] diff  [r] reject",
-            truncate(&req.summary, 36)
-        );
+        app.status.hint = format!("a/t/r/d · {}", truncate(&req.summary, 40));
         return;
     }
     if app.run.busy {
@@ -294,20 +291,18 @@ pub fn refresh_status_hint(app: &mut App) {
             .run
             .current
             .as_deref()
-            .unwrap_or("working…");
-        app.status.hint = format!("Esc cancel   PgUp/PgDn scroll   ·   {activity}");
+            .unwrap_or("…");
+        app.status.hint = format!("Esc · {activity}");
         return;
     }
     if app.sidebar.tab == crate::tui::app::SidebarTab::Changes
         && !app.sidebar.changes.is_empty()
         && app.composer.is_empty()
     {
-        app.status.hint =
-            "Enter view diff · ↑↓ select file · Ctrl+P plan · ? help · q quit".into();
+        app.status.hint = "Enter diff · ↑↓ · ?".into();
         return;
     }
-    app.status.hint =
-        "Enter send · Tab Ask/Agent (mid-run ok) · Shift+Enter newline · Esc cancel · ? help · q quit".into();
+    app.status.hint = "Enter · Tab · ? · q".into();
 }
 
 fn truncate(s: &str, max: usize) -> String {
