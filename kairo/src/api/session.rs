@@ -9,7 +9,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::agent::{AgentEvent as InternalEvent, AgentObserver, AgentRuntime};
 use crate::authorization::{
-    ApprovalDecision, ApprovalGate, ApprovalRequest as InternalApprovalRequest,
+    ApprovalDecision, ApprovalGate, ApprovalRequest as InternalApprovalRequest, LiveControls,
 };
 use crate::llm::{build_client, LlmClient};
 use crate::session::{Session, SessionManager, SessionSettings};
@@ -30,6 +30,8 @@ pub struct AgentSession {
     edit_policy: Mutex<EditPolicy>,
     /// Policy restored when leaving Ask for Agent (usually Confirm).
     agent_edit_policy: Mutex<EditPolicy>,
+    /// Shared with the worker / loop so Ask↔Agent can change mid-run.
+    live: Arc<Mutex<LiveControls>>,
     workspace: PathBuf,
     commands: Sender<Command>,
     decisions: Sender<DecisionMessage>,
@@ -126,6 +128,11 @@ impl AgentSession {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
         let (decision_tx, decision_rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let live = LiveControls::shared(
+            config.mode == AgentMode::Ask,
+            config.edit_policy.into(),
+            config.system_prompt.clone(),
+        );
 
         let session_id = session.id.clone();
         let worker = Worker {
@@ -134,6 +141,7 @@ impl AgentSession {
             manager,
             workspace: config.workspace.clone(),
             mode: config.mode,
+            live: Arc::clone(&live),
             events: event_tx.clone(),
             cancel: Arc::clone(&cancel),
             gate: ChannelGate {
@@ -157,6 +165,7 @@ impl AgentSession {
                 AgentMode::Ask => EditPolicy::Confirm,
                 AgentMode::Agent => config.edit_policy,
             }),
+            live,
             workspace: config.workspace,
             commands: command_tx,
             decisions: decision_tx,
@@ -182,7 +191,8 @@ impl AgentSession {
         &self.workspace
     }
 
-    /// Switch Ask ↔ Agent for subsequent turns.
+    /// Switch Ask ↔ Agent. Takes effect on the next model/tool step, including
+    /// mid-run (edit policy + system prompt).
     ///
     /// Ask forces read-only. Agent restores the preferred agent edit policy.
     pub fn set_mode(&self, mode: AgentMode) -> Result<()> {
@@ -199,13 +209,20 @@ impl AgentSession {
             AgentMode::Agent => crate::context::default_system_prompt(),
         };
 
-        self.commands
-            .send(Command::SetMode {
-                mode,
-                edit_policy,
-                system_prompt,
-            })
-            .map_err(|_| anyhow!("session is no longer running"))?;
+        // Apply immediately so an in-flight run picks this up on the next step.
+        {
+            let mut live = self.live.lock().expect("live controls mutex poisoned");
+            live.is_ask = mode == AgentMode::Ask;
+            live.edit_policy = edit_policy.into();
+            live.system_prompt = system_prompt.clone();
+        }
+
+        // Also notify the worker (applies when idle / after the current send).
+        let _ = self.commands.send(Command::SetMode {
+            mode,
+            edit_policy,
+            system_prompt,
+        });
 
         *self.mode.lock().expect("mode mutex poisoned") = mode;
         *self.edit_policy.lock().expect("edit_policy mutex poisoned") = edit_policy;
@@ -303,6 +320,7 @@ struct Worker {
     manager: Option<SessionManager>,
     workspace: PathBuf,
     mode: AgentMode,
+    live: Arc<Mutex<LiveControls>>,
     events: UnboundedSender<AgentEvent>,
     gate: ChannelGate,
     cancel: Arc<AtomicBool>,
@@ -332,8 +350,13 @@ impl Worker {
                     system_prompt,
                 } => {
                     self.mode = mode;
-                    self.runtime.set_system_prompt(system_prompt);
+                    self.runtime.set_system_prompt(system_prompt.clone());
                     self.session.set_edit_policy(edit_policy.into());
+                    if let Ok(mut live) = self.live.lock() {
+                        live.is_ask = mode == AgentMode::Ask;
+                        live.edit_policy = edit_policy.into();
+                        live.system_prompt = system_prompt;
+                    }
                 }
                 Command::Shutdown => break,
             }
@@ -364,8 +387,22 @@ impl Worker {
                 Some(&mut self.session),
                 Some(&self.gate),
                 Some(Arc::clone(&self.cancel)),
+                Some(Arc::clone(&self.live)),
             )
             .await;
+
+        let mode_now = self
+            .live
+            .lock()
+            .map(|l| {
+                if l.is_ask {
+                    AgentMode::Ask
+                } else {
+                    AgentMode::Agent
+                }
+            })
+            .unwrap_or(self.mode);
+        self.mode = mode_now;
 
         let mut result = match outcome {
             Ok(result) => map_run_result(result),
@@ -379,7 +416,7 @@ impl Worker {
         };
 
         // Ask mode cannot verify anything, so an answered question is complete.
-        if self.mode == AgentMode::Ask && matches!(result.status, RunStatus::CompletedUnverified) {
+        if mode_now == AgentMode::Ask && matches!(result.status, RunStatus::CompletedUnverified) {
             result.status = RunStatus::Completed;
         }
 

@@ -11,6 +11,7 @@ mod feed;
 mod input;
 mod layout;
 mod overlay;
+mod present;
 mod screens;
 mod theme;
 
@@ -19,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -33,7 +34,7 @@ use crate::logging;
 use crate::session::SessionManager;
 use crate::user_config;
 
-use app::{App, Screen, TimelineItem};
+use app::{AgentModeUi, App, Screen, TimelineItem};
 use feed::{apply_event, refresh_status_hint, tick_spinner};
 use input::Action;
 
@@ -220,9 +221,7 @@ async fn open_and_run_session(
             app.hydrate_from_persisted(&persisted);
         }
     } else {
-        app.conversation.items = vec![TimelineItem::Assistant(
-            "Session ready. Type a task and press Enter.".into(),
-        )];
+        app.conversation.items = vec![TimelineItem::Assistant("Ready.".into())];
         app.sidebar.plan_steps.clear();
         app.sidebar.plan_done = 0;
         app.sidebar.plan_total = 0;
@@ -294,7 +293,8 @@ fn run_demo_loop(
                 | Action::StartNewSession
                 | Action::ResumeSelected
                 | Action::OpenSessions
-                | Action::CycleMode => {
+                | Action::CycleMode
+                | Action::SetMode(_) => {
                     feed::refresh_status_hint(app);
                 }
             },
@@ -340,18 +340,17 @@ async fn run_live_loop(
                 }
                 Action::CycleMode => {
                     app.cycle_mode();
-                    if let Err(e) = session.set_mode(app.api_mode()) {
-                        app.conversation.items.push(TimelineItem::Assistant(format!(
-                            "Could not switch mode: {e:#}"
-                        )));
-                    } else {
-                        let label = app.header.mode.as_str();
-                        app.conversation.items.push(TimelineItem::Assistant(format!(
-                            "Switched to {label} mode ({}).",
-                            app.header.edit_policy
-                        )));
+                    apply_session_mode(app, session);
+                }
+                Action::SetMode(mode) => {
+                    let already = match mode {
+                        AgentModeUi::Ask => app.header.mode.is_ask(),
+                        AgentModeUi::Plan | AgentModeUi::Agent => app.header.mode.is_agent(),
+                    };
+                    if !already {
+                        app.set_mode_ui(mode);
+                        apply_session_mode(app, session);
                     }
-                    refresh_status_hint(app);
                 }
                 Action::Send(line) => {
                     app.conversation.follow_tail = true;
@@ -399,11 +398,44 @@ async fn run_live_loop(
                 | Action::ResumeSelected
                 | Action::OpenSessions => {}
             },
+            Event::Mouse(mouse) => {
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    match input::handle_mouse(mouse.column, mouse.row, app) {
+                        Action::SetMode(mode) => {
+                            let already = match mode {
+                                AgentModeUi::Ask => app.header.mode.is_ask(),
+                                AgentModeUi::Plan | AgentModeUi::Agent => {
+                                    app.header.mode.is_agent()
+                                }
+                            };
+                            if !already {
+                                app.set_mode_ui(mode);
+                                apply_session_mode(app, session);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Event::Resize(width, height) => {
                 app.terminal_size = (width, height);
             }
             _ => {}
         }
+    }
+}
+
+fn apply_session_mode(app: &mut App, session: &AgentSession) {
+    if let Err(e) = session.set_mode(app.api_mode()) {
+        app.conversation.items.push(TimelineItem::Assistant(format!(
+            "Could not switch mode: {e:#}"
+        )));
+        return;
+    }
+    if app.run.busy {
+        app.status.hint = format!("{} · Esc", app.header.mode.as_str());
+    } else {
+        refresh_status_hint(app);
     }
 }
 

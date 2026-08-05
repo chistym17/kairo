@@ -39,6 +39,8 @@ pub struct ShellLayout {
     pub conversation: Rect,
     pub sidebar: Option<Rect>,
     pub narrow_plan_strip: Option<Rect>,
+    /// Ask / Agent switcher above the composer.
+    pub mode_bar: Rect,
     pub composer: Rect,
     pub status: Rect,
     pub width_mode: WidthMode,
@@ -53,6 +55,7 @@ pub fn compute(area: Rect, composer_height: u16) -> ShellLayout {
         .constraints([
             Constraint::Length(2),       // header
             Constraint::Min(8),          // body
+            Constraint::Length(1),       // mode bar
             Constraint::Length(composer_h),
             Constraint::Length(1),       // status
         ])
@@ -60,8 +63,9 @@ pub fn compute(area: Rect, composer_height: u16) -> ShellLayout {
 
     let header = vertical[0];
     let body = vertical[1];
-    let composer = vertical[2];
-    let status = vertical[3];
+    let mode_bar = vertical[2];
+    let composer = vertical[3];
+    let status = vertical[4];
 
     match width_mode {
         WidthMode::Wide | WidthMode::Medium => {
@@ -76,6 +80,7 @@ pub fn compute(area: Rect, composer_height: u16) -> ShellLayout {
                 conversation: cols[0],
                 sidebar: Some(cols[1]),
                 narrow_plan_strip: None,
+                mode_bar,
                 composer,
                 status,
                 width_mode,
@@ -91,6 +96,7 @@ pub fn compute(area: Rect, composer_height: u16) -> ShellLayout {
                 conversation: rows[0],
                 sidebar: None,
                 narrow_plan_strip: Some(rows[1]),
+                mode_bar,
                 composer,
                 status,
                 width_mode,
@@ -126,5 +132,7 @@ mod tests {
         let layout = compute(area, 5);
         assert!(layout.sidebar.is_some());
         assert!(layout.narrow_plan_strip.is_none());
+        assert!(layout.mode_bar.height >= 1);
+        assert_eq!(layout.mode_bar.y + layout.mode_bar.height, layout.composer.y);
     }
 }

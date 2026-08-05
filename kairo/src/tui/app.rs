@@ -66,6 +66,21 @@ impl AgentModeUi {
             Self::Plan | Self::Agent => Self::Ask,
         }
     }
+
+    pub fn is_ask(self) -> bool {
+        matches!(self, Self::Ask)
+    }
+
+    pub fn is_agent(self) -> bool {
+        matches!(self, Self::Agent | Self::Plan)
+    }
+}
+
+/// Hit targets for the Ask / Agent chips above the composer (mouse + layout).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModeBarHits {
+    pub ask: ratatui::layout::Rect,
+    pub agent: ratatui::layout::Rect,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +196,8 @@ pub struct App {
     pub workspace_path: PathBuf,
     pub welcome: WelcomeState,
     pub sessions: SessionBrowserState,
+    /// Last painted Ask/Agent chip rects (for mouse clicks).
+    pub mode_bar_hits: ModeBarHits,
 }
 
 impl App {
@@ -231,9 +248,7 @@ impl App {
                 edit_policy: policy_label.to_string(),
             },
             conversation: ConversationState {
-                items: vec![TimelineItem::Assistant(
-                    "Session ready. Type a task and press Enter.".into(),
-                )],
+                items: vec![TimelineItem::Assistant("Ready.".into())],
                 scroll: 0,
                 follow_tail: true,
                 last_rows: 0,
@@ -256,10 +271,9 @@ impl App {
                     elapsed: "—".into(),
                 },
             },
-            composer: ComposerState::new("Ask Kairo to explain, change, review, or test…"),
+            composer: ComposerState::new("Message…"),
             status: StatusState {
-                hint: "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit"
-                    .into(),
+                hint: "Enter · Tab · ? · q".into(),
             },
             terminal_size: (120, 40),
             run: RunUiState::default(),
@@ -273,6 +287,7 @@ impl App {
                 policy_label,
             ),
             sessions: SessionBrowserState::from_list(Vec::new(), None),
+            mode_bar_hits: ModeBarHits::default(),
         }
     }
 
@@ -456,9 +471,19 @@ impl App {
     }
 
     pub fn cycle_mode(&mut self) {
-        self.header.mode = self.header.mode.toggle_ask_agent();
-        self.sidebar.session.mode = self.header.mode.as_str().to_string();
-        match self.header.mode {
+        let next = self.header.mode.toggle_ask_agent();
+        self.set_mode_ui(next);
+    }
+
+    /// Set Ask or Agent explicitly (mode bar chips / Tab).
+    pub fn set_mode_ui(&mut self, mode: AgentModeUi) {
+        let mode = match mode {
+            AgentModeUi::Plan => AgentModeUi::Agent,
+            other => other,
+        };
+        self.header.mode = mode;
+        self.sidebar.session.mode = mode.as_str().to_string();
+        match mode {
             AgentModeUi::Ask => {
                 self.header.edit_policy = "Read-only".into();
                 self.sidebar.session.policy = "Read-only".into();

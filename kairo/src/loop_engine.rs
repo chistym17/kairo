@@ -1,6 +1,6 @@
 use crate::authorization::{
     apply_decision, authorize, build_approval_request, tool_effect, ApprovalDecision,
-    ApprovalGate, AuthorizationDecision, EditPolicy,
+    ApprovalGate, AuthorizationDecision, EditPolicy, LiveControls,
 };
 use crate::context::{ContextBuilder, ContextManager};
 use crate::governance::{classify_progress, GovernanceDecision};
@@ -51,6 +51,7 @@ pub async fn run(
     observer: Option<&dyn AgentObserver>,
     mut session: Option<&mut Session>,
     approval_gate: Option<&dyn ApprovalGate>,
+    live: Option<&std::sync::Arc<std::sync::Mutex<LiveControls>>>,
 ) -> StopReason {
     if let Some(session) = session.as_deref_mut() {
         state.authorization = session.authorization.clone();
@@ -67,6 +68,8 @@ pub async fn run(
     } else {
         state.turn_intent = crate::session::TurnIntent::infer_from_message(&state.goal);
     }
+    // Mid-run Ask↔Agent: prefer shared live controls over the session snapshot.
+    sync_live_controls(state, live);
     state.task.set_objective_if_empty(&state.goal);
 
     write_event(
@@ -149,6 +152,10 @@ pub async fn run(
     }
 
     loop {
+        // Pick up Ask↔Agent switches that happened while we were busy.
+        sync_live_controls(state, live);
+        let turn_builder = effective_context_builder(context_builder, live);
+
         if state.cancel_requested() {
             crate::agent_println!("\n[agent] stop requested — cancelling run");
             write_event(&state.run_id, "cancelled", "host requested stop", 0);
@@ -202,7 +209,7 @@ pub async fn run(
             };
             let (mut request, full_stats, bounded_stats, reduction) =
                 context_manager.build_bounded_request(
-                    context_builder,
+                    &turn_builder,
                     &state.workspace_root,
                     &goal_for_llm,
                     session.as_deref_mut(),
@@ -521,7 +528,7 @@ pub async fn run(
                         };
                         let (mut request, full_stats, bounded_stats, reduction) =
                             context_manager.build_bounded_request(
-                                context_builder,
+                                &turn_builder,
                                 &state.workspace_root,
                                 &goal_for_llm,
                                 session.as_deref_mut(),
@@ -651,6 +658,7 @@ pub async fn run(
         let mut verified_in_batch = false;
         let mut call_idx = 0;
         while call_idx < tool_calls.len() {
+            sync_live_controls(state, live);
             if is_parallel_readonly(&tool_calls[call_idx].action) {
                 let mut end = call_idx + 1;
                 while end < tool_calls.len()
@@ -3334,6 +3342,32 @@ fn append_authorization_session_update(
         }
     };
     session.append_session_update(body);
+}
+
+fn sync_live_controls(
+    state: &mut AgentState,
+    live: Option<&std::sync::Arc<std::sync::Mutex<LiveControls>>>,
+) {
+    let Some(live) = live else {
+        return;
+    };
+    let Ok(guard) = live.lock() else {
+        return;
+    };
+    state.authorization.edit_policy = guard.edit_policy;
+}
+
+fn effective_context_builder(
+    base: &ContextBuilder,
+    live: Option<&std::sync::Arc<std::sync::Mutex<LiveControls>>>,
+) -> ContextBuilder {
+    let mut builder = base.clone();
+    if let Some(live) = live {
+        if let Ok(guard) = live.lock() {
+            builder.set_system_prompt(guard.system_prompt.clone());
+        }
+    }
+    builder
 }
 
 fn sync_authorization_to_session(state: &AgentState, session: &mut Option<&mut Session>) {

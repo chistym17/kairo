@@ -1,8 +1,9 @@
 //! Static sample content used to verify the Part 1 shell.
 
 use super::app::{
-    AgentModeUi, App, ChangeEntry, ComposerState, ConversationState, HeaderState, PlanStepStatus,
-    PlanStepView, Screen, SessionInfo, SidebarState, SidebarTab, StatusState, TimelineItem,
+    AgentModeUi, App, ChangeEntry, ComposerState, ConversationState, HeaderState, ModeBarHits,
+    PlanStepStatus, PlanStepView, Screen, SessionInfo, SidebarState, SidebarTab, StatusState,
+    TimelineItem,
 };
 use super::feed::RunUiState;
 use super::screens::{SessionBrowserState, WelcomeState};
@@ -83,10 +84,9 @@ pub fn sample_app() -> App {
                 elapsed: "00:23".into(),
             },
         },
-        composer: ComposerState::new("Ask Kairo to explain, change, review, or test…"),
+        composer: ComposerState::new("Message…"),
         status: StatusState {
-            hint: "Enter send · Shift+Enter newline · ↑↓ history · Esc cancel · Ctrl+L clear · q quit · ? help"
-                .into(),
+            hint: "Enter · Tab · ? · q".into(),
         },
         terminal_size: (120, 40),
         run: RunUiState {
@@ -111,5 +111,6 @@ pub fn sample_app() -> App {
             "Confirm edits",
         ),
         sessions: SessionBrowserState::from_list(Vec::new(), None),
+        mode_bar_hits: ModeBarHits::default(),
     }
 }
