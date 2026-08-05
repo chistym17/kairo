@@ -44,6 +44,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_narrow_plan_strip(frame, strip, app);
     }
 
+    render_mode_bar(frame, shell.mode_bar, app);
     render_composer(frame, shell.composer, app);
     render_status(frame, shell.status, app, shell.width_mode);
 
@@ -56,10 +57,9 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(vec![
         Span::styled(format!(" {}", app.header.brand), theme::accent_bold()),
         Span::styled(
-            format!("   {}   {}   {}", app.header.mode.as_str(), app.header.model, app.header.workspace),
-            theme::body(),
+            format!("  {}  {}", app.header.model, app.header.workspace),
+            theme::muted(),
         ),
-        Span::styled(format!("  {} ", app.header.edit_policy), theme::muted()),
     ]);
 
     let block = Block::default()
@@ -70,11 +70,57 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), inner);
 }
 
+fn render_mode_bar(frame: &mut Frame, area: Rect, app: &mut App) {
+    use super::app::ModeBarHits;
+
+    frame.render_widget(Block::default().style(theme::mode_bar_bg()), area);
+
+    let ask_active = app.header.mode.is_ask();
+    let agent_active = app.header.mode.is_agent();
+
+    let ask_style = if ask_active {
+        theme::mode_ask_active()
+    } else {
+        theme::mode_inactive()
+    };
+    let agent_style = if agent_active {
+        theme::mode_agent_active()
+    } else {
+        theme::mode_inactive()
+    };
+
+    let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(" Ask ", ask_style),
+        Span::raw(" "),
+        Span::styled(" Agent ", agent_style),
+    ]);
+
+    // Hit targets: " " (1) + " Ask " (5) + " " (1) + " Agent " (7)
+    let ask_x = area.x.saturating_add(1);
+    let agent_x = ask_x.saturating_add(5).saturating_add(1);
+    app.mode_bar_hits = ModeBarHits {
+        ask: Rect {
+            x: ask_x,
+            y: area.y,
+            width: 5,
+            height: area.height.max(1),
+        },
+        agent: Rect {
+            x: agent_x,
+            y: area.y,
+            width: 7,
+            height: area.height.max(1),
+        },
+    };
+
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 fn render_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme::border())
-        .title(Span::styled(" Conversation ", theme::muted()));
+        .border_style(theme::border());
     let inner = theme::pad(block.inner(area), 1, 1);
     frame.render_widget(block, area);
     // Wipe stale cells so stdout corruption / long wraps cannot bleed across frames.
@@ -350,10 +396,7 @@ fn render_changes_lines(app: &App) -> Vec<Line<'static>> {
             )));
             lines.push(Line::from(""));
         }
-        lines.push(Line::from(Span::styled(
-            "Enter  View diff",
-            theme::muted(),
-        )));
+        lines.push(Line::from(Span::styled("Enter diff", theme::muted())));
     }
     lines
 }
@@ -364,10 +407,8 @@ fn render_context_lines(app: &App) -> Vec<Line<'static>> {
         Line::from(Span::styled("SESSION", theme::accent_bold())),
         Line::from(""),
         kv("Mode", &s.mode),
-        kv("Policy", &s.policy),
         kv("Model", &s.model),
         kv("Workspace", &s.workspace),
-        kv("Session", &s.session_id),
         kv("Tokens", &s.tokens),
         kv("Elapsed", &s.elapsed),
     ]
@@ -404,11 +445,6 @@ fn render_narrow_plan_strip(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
-    let title = if app.run.busy {
-        " Input (busy — Esc cancel) "
-    } else {
-        " Input · Enter send · Shift+Enter newline "
-    };
     let border = if app.run.busy {
         theme::border()
     } else {
@@ -416,14 +452,13 @@ fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border)
-        .title(Span::styled(title, theme::muted()));
+        .border_style(border);
     let inner = theme::pad(block.inner(area), 1, 1);
     frame.render_widget(block, area);
 
     if app.run.busy {
         frame.render_widget(
-            Paragraph::new(Span::styled("Agent is working…", theme::muted_dim())),
+            Paragraph::new(Span::styled("…", theme::muted_dim())),
             inner,
         );
         return;
@@ -464,22 +499,18 @@ fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App, mode: WidthMode) {
-    let mode_label = match mode {
-        WidthMode::Wide => "wide",
-        WidthMode::Medium => "medium",
-        WidthMode::Narrow => "narrow",
-    };
+    let _ = mode;
     let live = if app.run.busy {
         if let Some(started) = app.run.started_at {
             let ms = started.elapsed().as_millis() as u64;
-            format!(" · {}", feed::format_duration_ms(ms))
+            format!("  {}", feed::format_duration_ms(ms))
         } else {
             String::new()
         }
     } else {
         String::new()
     };
-    let text = format!(" {}  ·  layout:{mode_label}{live} ", app.status.hint);
+    let text = format!(" {}{} ", app.status.hint, live);
     frame.render_widget(Paragraph::new(text).style(theme::muted_dim()), area);
 }
 
@@ -584,16 +615,12 @@ fn render_help_modal(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
 
     let lines = vec![
-        Line::from(Span::styled("Tab           Ask ↔ Agent (works mid-run)", theme::body())),
-        Line::from(Span::styled("Enter         Send task", theme::body())),
-        Line::from(Span::styled("Shift+Enter   Newline", theme::body())),
-        Line::from(Span::styled("Esc           Cancel / close", theme::body())),
-        Line::from(Span::styled("Ctrl+P/D/I    Plan / Changes / Context", theme::body())),
-        Line::from(Span::styled("PgUp/PgDn     Scroll conversation", theme::body())),
-        Line::from(Span::styled("Ctrl+L        Clear conversation", theme::body())),
-        Line::from(Span::styled("a / t / r     Approve once / task / reject", theme::body())),
-        Line::from(Span::styled("d             Diff (from approval)", theme::body())),
-        Line::from(Span::styled("?             This help", theme::body())),
+        Line::from(Span::styled("Tab        Ask / Agent", theme::body())),
+        Line::from(Span::styled("Enter      Send", theme::body())),
+        Line::from(Span::styled("Shift+Enter Newline", theme::body())),
+        Line::from(Span::styled("Esc        Cancel", theme::body())),
+        Line::from(Span::styled("Ctrl+P/D/I Plan / Diff / Info", theme::body())),
+        Line::from(Span::styled("a t r d    Approve / task / reject / diff", theme::body())),
         Line::from(""),
         Line::from(Span::styled("Esc close", theme::muted())),
     ];
@@ -601,65 +628,89 @@ fn render_help_modal(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border_focus())
-        .title(Span::styled(" Commands ", theme::accent_bold()));
+        .title(Span::styled(" Keys ", theme::accent_bold()));
     let inner = theme::pad(block.inner(popup), 1, 1);
     frame.render_widget(block, popup);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_welcome(frame: &mut Frame, area: Rect, app: &App) {
+    // Soft full-screen wash.
+    frame.render_widget(Block::default().style(theme::mode_bar_bg()), area);
+
+    let card = centered_rect(58, 68, area);
+    frame.render_widget(Clear, card);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme::border());
-    let inner = theme::pad(block.inner(area), 2, 1);
-    frame.render_widget(block, area);
+        .border_style(theme::border_focus())
+        .style(theme::welcome_card_bg());
+    let inner = theme::pad(block.inner(card), 3, 1);
+    frame.render_widget(block, card);
 
     let w = &app.welcome;
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(Span::styled("KAIRO", theme::accent_bold())),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Coding agent for your terminal",
-            theme::muted(),
-        )),
-        Line::from(""),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Workspace  ", theme::muted()),
-            Span::styled(w.workspace_display.clone(), theme::body()),
-        ]),
-        Line::from(vec![
-            Span::styled("Provider   ", theme::muted()),
-            Span::styled(w.provider.clone(), theme::body()),
-        ]),
-        Line::from(vec![
-            Span::styled("Model      ", theme::muted()),
-            Span::styled(w.model.clone(), theme::body()),
-        ]),
-        Line::from(vec![
-            Span::styled("Policy     ", theme::muted()),
-            Span::styled(w.edit_policy.clone(), theme::body()),
-        ]),
-        Line::from(""),
-    ];
-    if let Some(msg) = &w.message {
-        lines.push(Line::from(Span::styled(msg.clone(), theme::accent())));
-        lines.push(Line::from(""));
+    let mut body: Vec<Line> = Vec::new();
+
+    // Logo — no leading spaces; Paragraph centers the whole block.
+    for row in kairo_logo_lines() {
+        body.push(Line::from(Span::styled(row, theme::logo())));
     }
-    lines.push(Line::from(Span::styled(
-        "[Enter] Start agent        [s] Sessions        [m] Change model        [q] Quit",
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled("KAIRO", theme::accent_bold())));
+    body.push(Line::from(Span::styled(
+        "Your coding agent in the terminal.",
+        theme::body(),
+    )));
+    body.push(Line::from(Span::styled(
+        "Ask, plan, edit, and verify in your repo.",
         theme::muted(),
     )));
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        format!("{}  ·  {}", w.workspace_display, w.model),
+        theme::muted_dim(),
+    )));
+    body.push(Line::from(""));
+    body.push(Line::from(vec![
+        Span::styled(" Enter Start ", theme::btn_start()),
+        Span::raw("  "),
+        Span::styled(" s Sessions ", theme::btn_sessions()),
+        Span::raw("  "),
+        Span::styled(" m Model ", theme::btn_model()),
+        Span::raw("  "),
+        Span::styled(" q Quit ", theme::btn_quit()),
+    ]));
+
+    if let Some(msg) = &w.message {
+        body.push(Line::from(""));
+        body.push(Line::from(Span::styled(msg.clone(), theme::accent())));
+    }
+
+    // Vertically center the block inside the card.
+    let content_h = body.len() as u16;
+    let top_pad = inner.height.saturating_sub(content_h) / 2;
+    let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
+    lines.extend(body);
 
     frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Left),
+        Paragraph::new(lines).alignment(Alignment::Center),
         inner,
     );
 
     if let Some(Overlay::ModelPicker(view)) = app.overlay.as_ref() {
         render_model_picker(frame, area, view);
     }
+}
+
+/// Single-width ASCII agent mark — every row same length so centering stacks cleanly.
+fn kairo_logo_lines() -> [&'static str; 5] {
+    [
+        r"  .-----.  ",
+        r" / o   o \ ",
+        r" |   -   | ",
+        r"  '-----+  ",
+        r" --*--*--  ",
+    ]
 }
 
 fn render_model_picker(frame: &mut Frame, area: Rect, view: &super::overlay::ModelPickerView) {
