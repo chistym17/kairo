@@ -365,6 +365,15 @@ async fn run_live_loop(
                     }
                 }
                 Action::Send(line) => {
+                    if present::looks_like_safety_refuse(&line) {
+                        app.conversation.follow_tail = true;
+                        app.conversation.items.push(TimelineItem::User(line));
+                        app.conversation.items.push(TimelineItem::Assistant(
+                            present::safety_refuse_message().into(),
+                        ));
+                        refresh_status_hint(app);
+                        continue;
+                    }
                     if app.header.mode.is_ask() && present::looks_like_edit_request(&line) {
                         app.conversation.follow_tail = true;
                         app.conversation.items.push(TimelineItem::User(line));

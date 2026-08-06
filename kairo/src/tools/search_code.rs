@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::tools::ignore::is_ignored_dir_name;
+use crate::tools::safety::is_sensitive_name;
 use crate::tools::{truncate_output, ToolResult};
 
 const DEFAULT_MAX_MATCHES: usize = 40;
@@ -96,6 +97,11 @@ fn walk_search(
 
     let md = fs::metadata(cur)?;
     if md.is_file() {
+        if let Some(name) = cur.file_name().and_then(|n| n.to_str()) {
+            if is_sensitive_name(name) {
+                return Ok(());
+            }
+        }
         *files_scanned += 1;
         search_file(workspace_root, cur, needle, matches, truncated)?;
         return Ok(());
@@ -116,6 +122,11 @@ fn walk_search(
             }
             walk_search(workspace_root, &p, needle, matches, files_scanned, truncated)?;
         } else {
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if is_sensitive_name(name) {
+                    continue;
+                }
+            }
             *files_scanned += 1;
             search_file(workspace_root, &p, needle, matches, truncated)?;
         }
