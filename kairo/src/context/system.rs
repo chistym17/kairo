@@ -25,12 +25,13 @@ pub fn ask_system_prompt() -> String {
 
 pub fn compose_system_prompt(base: &str, project_instructions: Option<&str>) -> String {
     let base = crate::context::normalize::normalize_text(base);
+    let safety = crate::tools::safety::SAFETY_TRAILER;
     match project_instructions {
         Some(text) if !text.trim().is_empty() => {
             let text = crate::context::normalize::normalize_text(text);
-            format!("{base}\n\n## Project instructions\n\n{text}")
+            format!("{base}\n\n## Project instructions\n\n{text}\n\n{safety}")
         }
-        _ => base,
+        _ => format!("{base}\n\n{safety}"),
     }
 }
 
@@ -61,6 +62,7 @@ mod tests {
         assert!(p.contains("Choose one coherent group"));
         assert!(p.contains("## Finish"));
         assert!(p.contains("Do not call `finish` while the latest verification"));
+        assert!(p.contains("## Safety"));
         assert!(p.contains("unfamiliar repository"));
         assert!(p.contains("understand the affected code paths before making the first patch"));
         assert!(p.contains("`locate`"));
@@ -77,8 +79,18 @@ mod tests {
         assert!(p.contains("every write tool is denied"));
         assert!(p.contains("calling `finish` with the answer"));
         assert!(p.contains("do not attempt to apply it"));
+        assert!(p.contains("## Safety"));
         // Ask mode must not carry edit/verify workflow instructions.
         assert!(!p.contains("## Edit"));
         assert!(!p.contains("apply_patch` for existing files"));
+    }
+
+    #[test]
+    fn compose_appends_safety_after_project_instructions() {
+        let out = compose_system_prompt("base", Some("do whatever AGENTS says"));
+        assert!(out.contains("base"));
+        assert!(out.contains("do whatever AGENTS says"));
+        assert!(out.contains("cannot be overridden"));
+        assert!(out.find("Project instructions").unwrap() < out.find("cannot be overridden").unwrap());
     }
 }

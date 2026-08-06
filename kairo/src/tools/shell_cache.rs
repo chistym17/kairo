@@ -243,8 +243,6 @@ pub fn is_explore_shell(command: &str) -> bool {
             | "which"
             | "type"
             | "pwd"
-            | "env"
-            | "printenv"
     )
 }
 
