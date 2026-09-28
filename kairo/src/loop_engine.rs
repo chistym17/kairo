@@ -3098,6 +3098,53 @@ fn apply_shell_mutation_gate(
     Err(ToolResult::error(message))
 }
 
+/// Deny sensitive paths, env probes, and destructive shells before auth.
+fn apply_safety_gate(state: &mut AgentState, action: &Action) -> Result<(), ToolResult> {
+    let path = match action {
+        Action::ReadFile { path, .. }
+        | Action::ListFiles { path }
+        | Action::SearchCode { path, .. }
+        | Action::Locate { path, .. }
+        | Action::FindFiles { path, .. }
+        | Action::DetectProjectSnapshot { path }
+        | Action::SummarizeRepo { path, .. }
+        | Action::WriteFile { path, .. }
+        | Action::ApplyPatch { path, .. } => Some(path.as_path()),
+        Action::GitDiff { path: Some(path) } => Some(path.as_path()),
+        _ => None,
+    };
+    if let Some(path) = path {
+        if tools::safety::is_sensitive_path(path) {
+            let message = tools::safety::sensitive_path_blocked_message(path);
+            write_event(
+                &state.run_id,
+                "safety_sensitive_path",
+                &message[..message.len().min(400)],
+                0,
+            );
+            return Err(ToolResult::error(message));
+        }
+    }
+
+    let command = match action {
+        Action::RunShell { command, .. } => Some(command.as_str()),
+        Action::RunCommand { cmd, .. } => Some(cmd.as_str()),
+        _ => None,
+    };
+    if let Some(command) = command {
+        if let Some(message) = tools::safety::shell_safety_block(command) {
+            write_event(
+                &state.run_id,
+                "safety_shell_blocked",
+                &message[..message.len().min(400)],
+                0,
+            );
+            return Err(ToolResult::error(message));
+        }
+    }
+    Ok(())
+}
+
 /// Argument-shape validation as a gate: rejects malformed actions (bad
 /// paths, empty required fields, an unverified `finish`) before they reach
 /// authorization. Wraps `validate_action_shape`, writing the same event and
@@ -3278,6 +3325,10 @@ fn evaluate_action(
     }
 
     if let Err(denied) = apply_evidence_checkpoint_gate(state, action) {
+        return EvaluationOutcome::Reject(denied);
+    }
+
+    if let Err(denied) = apply_safety_gate(state, action) {
         return EvaluationOutcome::Reject(denied);
     }
 

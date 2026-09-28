@@ -38,6 +38,7 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
 
     let start = Instant::now();
     // bash + pipefail so `cmd | tail` cannot hide a crashed left-hand side as exit 0.
+    // Clear parent env so API keys / dotenv secrets are not inherited.
     let spawned = Command::new("bash")
         .arg("-o")
         .arg("pipefail")
@@ -46,6 +47,7 @@ pub fn execute(opts: RunShellOpts<'_>, workspace_root: &Path) -> ToolResult {
         .current_dir(&cwd_abs)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .spawn();
@@ -312,5 +314,26 @@ mod tests {
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.contains("truncated"), "{}", result.output);
         assert!(result.output.len() < 4000);
+    }
+
+    #[test]
+    fn env_clear_hides_parent_secrets() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("KAIRO_SAFETY_TEST_SECRET", "should-not-leak");
+        let result = execute(
+            RunShellOpts {
+                command: "printenv KAIRO_SAFETY_TEST_SECRET || true",
+                cwd: Path::new("."),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        std::env::remove_var("KAIRO_SAFETY_TEST_SECRET");
+        assert!(result.success, "{:?}", result.error);
+        assert!(
+            !result.output.contains("should-not-leak"),
+            "parent env must not leak into run_shell: {}",
+            result.output
+        );
     }
 }

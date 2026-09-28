@@ -2,6 +2,19 @@
 
 All notable changes to the **Kairo** crate are documented here.
 
+## [0.2.1] — 2026-09-28 — safety + ask/agent
+
+### Security
+
+- `run_command` cwd now uses the same workspace containment check as `run_shell` (blocks symlink escapes)
+- Destructive / secret-probe shell gates classify every `;` / `&&` / `|` segment, not only the leading token
+- `git push` / `fetch` / `pull` (and other non-read git subcommands) are no longer treated as read-only explore
+- Verification classification no longer treats bare `"test"` / `"lint"` substrings as verify; network tools (`curl`/`wget`/…) never downgrade to read-only
+
+### Product
+
+- Ask / agent mode intent handling and safety guardrails from the `ask/agent-mode` line
+
 ## [0.2.0] — 2026-08-03 — Kairo v2 (architecture)
 
 Product release of the Layer-4 runtime redesign. Same install path (`cargo install kairo`); this is the **v2** architecture line for real local use.
