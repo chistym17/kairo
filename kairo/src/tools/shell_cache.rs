@@ -207,12 +207,36 @@ pub fn is_verify_shell(command: &str) -> bool {
 }
 
 /// True for archaeology-style shells (git/grep/sed/…), false for verify/build/test.
+///
+/// Every `|` / `&&` / `;` segment must be explore-safe. Git is explore only for
+/// known read-only subcommands (`status`/`log`/`diff`/…), not `push`/`fetch`/….
 pub fn is_explore_shell(command: &str) -> bool {
-    let bin = primary_binary(command);
+    use crate::tools::shell_mutation::split_shell_segments;
+
+    let segments = split_shell_segments(command);
+    if segments.is_empty() {
+        return false;
+    }
+    segments.iter().all(|segment| is_explore_segment(segment))
+}
+
+fn is_explore_segment(segment: &str) -> bool {
+    use crate::tools::shell_mutation::primary_binary;
+
+    let bin = primary_binary(segment);
+    if bin.is_empty() {
+        return false;
+    }
+    // Pure `cd` is neutral in a chain.
+    if bin == "cd" {
+        return true;
+    }
+    if bin == "git" {
+        return is_explore_git_segment(segment);
+    }
     matches!(
         bin.as_str(),
-        "git"
-            | "grep"
+        "grep"
             | "egrep"
             | "fgrep"
             | "rg"
@@ -243,35 +267,137 @@ pub fn is_explore_shell(command: &str) -> bool {
             | "which"
             | "type"
             | "pwd"
+            | "true"
+            | "false"
     )
 }
 
-fn primary_binary(command: &str) -> String {
-    let mut rest = normalize_command(command);
-    // Peel leading `cd … &&` / `cd … ;` so we classify the real program.
-    loop {
-        let lower = rest.to_ascii_lowercase();
-        if !(lower.starts_with("cd ") || lower.starts_with("cd\t")) {
-            break;
-        }
-        if let Some(idx) = rest.find("&&") {
-            rest = rest[idx + 2..].trim().to_string();
-            continue;
-        }
-        if let Some(idx) = rest.find(';') {
-            rest = rest[idx + 1..].trim().to_string();
-            continue;
-        }
-        break;
+fn is_explore_git_segment(segment: &str) -> bool {
+    let sub = git_subcommand(segment);
+    match sub.as_str() {
+        "status" | "log" | "diff" | "show" | "blame" | "rev-parse" | "ls-files" | "ls-tree"
+        | "cat-file" | "describe" | "shortlog" | "name-rev" | "whatchanged" | "range-diff"
+        | "version" | "help" | "grep" => true,
+        "branch" => !git_branch_mutates(segment),
+        "remote" => is_readonly_git_remote(segment),
+        _ => false,
     }
-    rest.split_whitespace()
-        .next()
-        .unwrap_or("")
+}
+
+fn git_subcommand(segment: &str) -> String {
+    let mut rest = segment.trim();
+    // Peel leading cd (should already be its own segment, but be defensive).
+    let lower = rest.to_ascii_lowercase();
+    if lower.starts_with("cd ") || lower.starts_with("cd\t") {
+        if let Some(idx) = rest.find("&&") {
+            rest = rest[idx + 2..].trim();
+        } else if let Some(idx) = rest.find(';') {
+            rest = rest[idx + 1..].trim();
+        }
+    }
+    let mut parts = rest.split_whitespace();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    let base = first
         .trim_matches(|c| c == '"' || c == '\'')
         .rsplit('/')
         .next()
         .unwrap_or("")
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    if base != "git" {
+        return String::new();
+    }
+    // Skip common global flags before the subcommand.
+    while let Some(tok) = parts.next() {
+        let t = tok.trim_matches(|c| c == '"' || c == '\'');
+        if t == "-C" || t == "-c" {
+            let _ = parts.next();
+            continue;
+        }
+        if t.starts_with('-') {
+            continue;
+        }
+        return t.to_ascii_lowercase();
+    }
+    String::new()
+}
+
+fn git_branch_mutates(segment: &str) -> bool {
+    let mut parts = segment.split_whitespace();
+    // Advance past git (+ globals) to the `branch` subcommand.
+    while let Some(tok) = parts.next() {
+        let t = tok
+            .trim_matches(|c| c == '"' || c == '\'')
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if t == "git" {
+            continue;
+        }
+        if t.starts_with('-') {
+            if t == "-c" || t == "-C" {
+                let _ = parts.next();
+            }
+            continue;
+        }
+        if t != "branch" {
+            return false;
+        }
+        break;
+    }
+    parts.any(|tok| {
+        matches!(
+            tok.trim_matches(|c| c == '"' || c == '\''),
+            "-d" | "-D"
+                | "-m"
+                | "-M"
+                | "-c"
+                | "-C"
+                | "--delete"
+                | "--move"
+                | "--copy"
+                | "--unset-upstream"
+        )
+    })
+}
+
+fn is_readonly_git_remote(segment: &str) -> bool {
+    let mut parts = segment.split_whitespace();
+    // Advance to `remote`
+    while let Some(tok) = parts.next() {
+        let t = tok
+            .trim_matches(|c| c == '"' || c == '\'')
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if t == "git" {
+            continue;
+        }
+        if t.starts_with('-') {
+            if t == "-c" || t == "-C" {
+                let _ = parts.next();
+            }
+            continue;
+        }
+        if t != "remote" {
+            return false;
+        }
+        break;
+    }
+    let args: Vec<&str> = parts
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+        .collect();
+    if args.is_empty() {
+        return true;
+    }
+    matches!(args[0], "-v" | "--verbose" | "show" | "get-url")
+}
+
+fn primary_binary(command: &str) -> String {
+    crate::tools::shell_mutation::primary_binary(command)
 }
 
 fn parse_kind(kind: &str) -> Option<ShellKind> {
@@ -324,6 +450,12 @@ mod tests {
         ));
         assert!(is_explore_shell("grep -n dueDate store.ts"));
         assert!(is_explore_shell("sed -n '1,5p' a.ts"));
+        assert!(is_explore_shell("git status"));
+        assert!(is_explore_shell("git remote -v"));
+        assert!(!is_explore_shell("git push origin main"));
+        assert!(!is_explore_shell("git fetch origin"));
+        assert!(!is_explore_shell("git pull"));
+        assert!(!is_explore_shell("git status && git push origin main"));
         assert!(!is_explore_shell("cd frontend-v2 && npm run build"));
         assert!(!is_explore_shell(
             "cd backend && .venv/bin/python manage.py test tasks"

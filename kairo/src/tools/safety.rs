@@ -5,6 +5,8 @@
 
 use std::path::{Component, Path};
 
+use super::shell_mutation::{primary_binary, split_shell_segments};
+
 /// Fixed trailer appended after optional project instructions so AGENTS.md
 /// cannot quietly override scope/safety.
 pub const SAFETY_TRAILER: &str = "\
@@ -89,11 +91,7 @@ pub fn shell_safety_block(command: &str) -> Option<String> {
 
 pub fn is_secret_probe_shell(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    let bin = primary_binary(&lower);
-    if matches!(bin.as_str(), "env" | "printenv") {
-        return true;
-    }
-    // Common secret-name dumps.
+    // Whole-command patterns (may span segments).
     if lower.contains("$api_key")
         || lower.contains("$openai")
         || lower.contains("printenv")
@@ -102,12 +100,52 @@ pub fn is_secret_probe_shell(command: &str) -> bool {
     {
         return true;
     }
+    for segment in split_shell_segments(&lower) {
+        let bin = primary_binary(segment);
+        if matches!(bin.as_str(), "env" | "printenv") {
+            return true;
+        }
+    }
     shell_mentions_sensitive_path(&lower)
 }
 
 pub fn is_destructive_shell(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    let bin = primary_binary(&lower);
+
+    // Fork bomb
+    if lower.contains(":(){") || lower.contains(":(){:|:&};:") {
+        return true;
+    }
+
+    // Whole-command rm patterns (may span awkward spacing).
+    if lower.contains("rm -rf /")
+        || lower.contains("rm -fr /")
+        || lower.contains("rm -rf ~")
+        || lower.contains("rm -rf /*")
+    {
+        return true;
+    }
+
+    // Pipe remote script to shell (spans `|` segments).
+    if (lower.contains("curl ") || lower.contains("wget "))
+        && (lower.contains("| bash")
+            || lower.contains("| sh")
+            || lower.contains("|bash")
+            || lower.contains("|sh"))
+    {
+        return true;
+    }
+
+    for segment in split_shell_segments(&lower) {
+        if is_destructive_segment(segment) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_destructive_segment(segment: &str) -> bool {
+    let bin = primary_binary(segment);
 
     if matches!(
         bin.as_str(),
@@ -118,79 +156,48 @@ pub fn is_destructive_shell(command: &str) -> bool {
 
     // rm -rf / or ~ or $HOME (and common variants)
     if bin == "rm"
-        && (lower.contains("-rf") || lower.contains("-fr") || lower.contains("--recursive"))
-        && (lower.contains(" /")
-            || lower.contains(" ~")
-            || lower.contains("$home")
-            || lower.contains("/*")
-            || lower.ends_with(" /")
-            || lower.contains(" / ") )
-    {
-        return true;
-    }
-    if lower.contains("rm -rf /")
-        || lower.contains("rm -fr /")
-        || lower.contains("rm -rf ~")
-        || lower.contains("rm -rf /*")
+        && (segment.contains("-rf") || segment.contains("-fr") || segment.contains("--recursive"))
+        && (segment.contains(" /")
+            || segment.contains(" ~")
+            || segment.contains("$home")
+            || segment.contains("/*")
+            || segment.ends_with(" /")
+            || segment.contains(" / "))
     {
         return true;
     }
 
     // Wipe / overwrite devices
-    if bin == "dd" && (lower.contains("of=/dev/") || lower.contains("if=/dev/")) {
+    if bin == "dd" && (segment.contains("of=/dev/") || segment.contains("if=/dev/")) {
         return true;
     }
     if bin == "shred" {
         return true;
     }
 
-    // Pipe remote script to shell
-    if (lower.contains("curl ") || lower.contains("wget "))
-        && (lower.contains("| bash")
-            || lower.contains("| sh")
-            || lower.contains("|bash")
-            || lower.contains("|sh"))
-    {
-        return true;
-    }
-
     // Force-push / hard repo damage beyond normal mutation gate
     if bin == "git" {
-        let rest = lower.trim_start_matches("git").trim_start();
-        if rest.contains("push") && (rest.contains("--force") || rest.contains(" -f ") || rest.ends_with(" -f"))
+        let after_git = strip_leading_binary(segment, "git");
+        if after_git.contains("push")
+            && (after_git.contains("--force")
+                || after_git.contains(" -f ")
+                || after_git.ends_with(" -f"))
         {
             return true;
         }
-        if rest.starts_with("clean") && (rest.contains("-fdx") || rest.contains("-ffd")) {
+        if after_git.trim_start().starts_with("clean")
+            && (after_git.contains("-fdx") || after_git.contains("-ffd"))
+        {
             return true;
         }
-    }
-
-    // Fork bomb
-    if lower.contains(":(){") || lower.contains(":(){:|:&};:") {
-        return true;
     }
 
     false
 }
 
-fn shell_mentions_sensitive_path(lower: &str) -> bool {
-    for raw in lower.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ';' | '|' | '&' | '>' | '<'))
-    {
-        let t = raw.trim().trim_start_matches("./");
-        if t.is_empty() {
-            continue;
-        }
-        let name = t.rsplit('/').next().unwrap_or(t);
-        if is_sensitive_name(name) {
-            return true;
-        }
-    }
-    false
-}
-
-fn primary_binary(command: &str) -> String {
-    let mut rest = command.trim().to_string();
+fn strip_leading_binary(segment: &str, want: &str) -> String {
+    let mut rest = segment.trim().to_string();
+    // Peel leading cd … && / ;
     loop {
         let lower = rest.to_ascii_lowercase();
         if !(lower.starts_with("cd ") || lower.starts_with("cd\t")) {
@@ -206,14 +213,36 @@ fn primary_binary(command: &str) -> String {
         }
         break;
     }
-    rest.split_whitespace()
-        .next()
-        .unwrap_or("")
+    let mut parts = rest.split_whitespace();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    let base = first
         .trim_matches(|c| c == '"' || c == '\'')
         .rsplit('/')
         .next()
         .unwrap_or("")
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    if base != want {
+        return rest;
+    }
+    parts.collect::<Vec<_>>().join(" ")
+}
+
+fn shell_mentions_sensitive_path(lower: &str) -> bool {
+    for raw in lower.split(|c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ';' | '|' | '&' | '>' | '<')
+    }) {
+        let t = raw.trim().trim_start_matches("./");
+        if t.is_empty() {
+            continue;
+        }
+        let name = t.rsplit('/').next().unwrap_or(t);
+        if is_sensitive_name(name) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -243,6 +272,12 @@ mod tests {
     }
 
     #[test]
+    fn blocks_chained_secret_probes() {
+        assert!(is_secret_probe_shell("true; env"));
+        assert!(is_secret_probe_shell("echo x && printenv SOME_VAR"));
+    }
+
+    #[test]
     fn blocks_destructive_shells() {
         assert!(is_destructive_shell("rm -rf /"));
         assert!(is_destructive_shell("sudo rm -rf /tmp/x"));
@@ -252,6 +287,15 @@ mod tests {
         assert!(!is_destructive_shell("rm -f build/tmp.o")); // still a workspace mutation; different gate
         assert!(!is_destructive_shell("cargo test"));
         assert!(!is_destructive_shell("git status"));
+    }
+
+    #[test]
+    fn blocks_chained_destructive_shells() {
+        assert!(is_destructive_shell("echo ok && sudo reboot"));
+        assert!(is_destructive_shell("ls && sudo shutdown -h now"));
+        assert!(is_destructive_shell("echo x && shred -uz secret.key"));
+        assert!(is_destructive_shell("cd a && ls && sudo reboot"));
+        assert!(is_destructive_shell("true; sudo poweroff"));
     }
 
     #[test]

@@ -193,7 +193,8 @@ fn is_mutating_binary(bin: &str, segment: &str) -> bool {
     }
 }
 
-fn split_shell_segments(command: &str) -> Vec<&str> {
+/// Split on `|`, `&&`, and `;` so each simple command can be classified.
+pub(crate) fn split_shell_segments(command: &str) -> Vec<&str> {
     let mut out = Vec::new();
     for pipe_part in command.split('|') {
         for and_part in pipe_part.split("&&") {
@@ -211,7 +212,8 @@ fn split_shell_segments(command: &str) -> Vec<&str> {
     out
 }
 
-fn primary_binary(command: &str) -> String {
+/// Leading program name of a simple command (after peeling `cd … &&` / `cd … ;`).
+pub(crate) fn primary_binary(command: &str) -> String {
     let mut rest = command.trim().to_string();
     loop {
         let lower = rest.to_ascii_lowercase();

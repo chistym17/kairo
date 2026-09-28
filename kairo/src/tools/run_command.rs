@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::tools::{truncate_output, ToolResult};
+use crate::tools::{resolve_workspace_cwd, truncate_output, ToolResult};
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const MAX_TIMEOUT_SECS: u64 = 900;
@@ -55,26 +55,10 @@ pub fn execute(opts: RunCommandOpts<'_>, workspace_root: &Path) -> ToolResult {
     }
 
     let timeout_secs = opts.timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
-    let cwd_rel = if opts.cwd.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        opts.cwd.to_path_buf()
+    let (cwd_abs, cwd_rel) = match resolve_workspace_cwd(workspace_root, opts.cwd) {
+        Ok(v) => v,
+        Err(msg) => return ToolResult::error(msg),
     };
-    let cwd_abs = workspace_root.join(&cwd_rel);
-
-    if !cwd_abs.exists() {
-        return ToolResult::error(format!(
-            "working_directory not found: {} (under workspace {})",
-            cwd_rel.display(),
-            workspace_root.display()
-        ));
-    }
-    if !cwd_abs.is_dir() {
-        return ToolResult::error(format!(
-            "working_directory is not a directory: {}",
-            cwd_rel.display()
-        ));
-    }
 
     let start = Instant::now();
     let output = Command::new(program)
@@ -305,5 +289,34 @@ mod tests {
             dir.path(),
         );
         assert!(!result.success);
+    }
+
+    #[test]
+    fn rejects_symlink_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let link = dir.path().join("escape");
+        symlink(outside.path(), &link).unwrap();
+
+        let result = execute(
+            RunCommandOpts {
+                cmd: "ls",
+                cwd: Path::new("escape"),
+                timeout_secs: 10,
+            },
+            dir.path(),
+        );
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("escape attempt"),
+            "{:?}",
+            result.error
+        );
     }
 }
