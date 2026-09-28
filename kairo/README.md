@@ -1,8 +1,19 @@
 # Kairo
 
-Terminal coding agent for a local repo — [kairo.so](https://kairo.so)
+Local terminal coding agent — [kairo.so](https://kairo.so)
 
-**Ask** questions (read-only) or run **agent** mode to edit with approval, then verify.
+Ask questions about a repo, or let it plan/edit/verify with your approval.
+
+**Good for:** scoped bugfixes, repo Q&A  
+**Not for:** unattended autopilot  
+**Model:** DeepSeek [`deepseek-v4-flash`](https://platform.deepseek.com) (recommended)
+
+## Features
+
+- **Ask** — read-only Q&A over the workspace
+- **Agent** — explore → edit → verify (default: confirm before first edit)
+- **Safety** — workspace-scoped tools, edit policies, approval prompts
+- **TUI** — full-screen terminal UI for interactive sessions
 
 ## Install
 
@@ -10,25 +21,44 @@ Terminal coding agent for a local repo — [kairo.so](https://kairo.so)
 curl -fsSL https://raw.githubusercontent.com/chistym17/agent-harness/main/install.sh | sh
 ```
 
-Or: `cargo install kairo`
+Puts `kairo` in `~/.local/bin` ([Releases](https://github.com/chistym17/agent-harness/releases)). No Rust needed.
 
-## Run
+```bash
+cargo install kairo   # optional, if you already use Rust
+```
+
+## Setup
+
+First run asks for provider + API key (saved to `~/.config/kairo/config.toml`).
+
+Or set env:
+
+| Provider | Env |
+|----------|-----|
+| DeepSeek | `LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY` |
+| Groq | `LLM_PROVIDER=groq` + `GROQ_API_KEY` |
+
+## Use
 
 ```bash
 cd your-repo
-kairo                              # agent (confirms before first edit)
+kairo                              # interactive agent
 kairo ask "Where is auth handled?"
 kairo agent --task "Fix failing tests"
+kairo health
+kairo config
 ```
-
-First run prompts for an API key (DeepSeek recommended). Config: `~/.config/kairo/config.toml`
 
 | Mode | Edits |
 |------|--------|
-| `ask` | no |
-| `agent` | yes, after confirm |
-| `--edit-policy auto` | yes, no prompts |
+| `ask` | never |
+| `agent` / `kairo` | confirm first edit (default) |
+| `--edit-policy auto` | no prompts (trusted/CI only) |
 
-## More
+Approvals: **Enter**/`t` = for task · `a` = once · `r` = reject
 
-[Limitations](https://github.com/chistym17/agent-harness/blob/main/docs/KNOWN_LIMITATIONS.md) · [Changelog](CHANGELOG.md) · [Releases](https://github.com/chistym17/agent-harness/releases)
+## Docs
+
+- [Changelog](CHANGELOG.md)
+- [Limitations](https://github.com/chistym17/agent-harness/blob/main/docs/KNOWN_LIMITATIONS.md)
+- [Source](https://github.com/chistym17/agent-harness)
