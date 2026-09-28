@@ -11,24 +11,25 @@ Point it at a repo, **ask** read-only questions, or run **agent** mode to plan, 
 
 ## Five minutes to first run
 
-### 1. Install
+### 1. Install (no Rust required)
 
-You need a stable [Rust toolchain](https://rustup.rs/).
+```bash
+curl -fsSL https://raw.githubusercontent.com/chistym17/agent-harness/main/install.sh | sh
+```
+
+That downloads the latest [GitHub Release](https://github.com/chistym17/agent-harness/releases) binary into `~/.local/bin`. If that directory is not on your `PATH`, the script prints the export line to add.
+
+Pin a version:
+
+```bash
+KAIRO_VERSION=v0.2.1 curl -fsSL https://raw.githubusercontent.com/chistym17/agent-harness/main/install.sh | sh
+```
+
+**Or with Rust / cargo:**
 
 ```bash
 cargo install kairo
-```
-
-That puts `kairo` on your `PATH`. Alternatives:
-
-```bash
-# latest from GitHub (before / between crates.io releases)
-cargo install --git https://github.com/chistym17/agent-harness --bin kairo
-
-# from a local clone
-git clone https://github.com/chistym17/agent-harness.git
-cd agent-harness
-cargo install --path kairo
+# or: cargo install --git https://github.com/chistym17/agent-harness --bin kairo
 ```
 
 ### 2. API key
