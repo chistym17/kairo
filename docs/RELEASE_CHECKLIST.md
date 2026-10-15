@@ -43,7 +43,7 @@ kairo --version   # or: kairo health
 
 Manual rebuild for an existing tag: Actions → Release → Run workflow → set tag (e.g. `v0.2.1`).
 
-Also sync site install script when shipping: copy root `install.sh` → `frontend/install.sh` (served at `https://kairo.so/install.sh`).
+Also sync site install script when shipping: copy root `install.sh` into the separate **kairo-site** repo (served at `https://kairo.so/install.sh`).
 
 ## Smoke (fresh install path)
 
