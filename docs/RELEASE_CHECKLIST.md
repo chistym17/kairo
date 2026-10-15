@@ -37,17 +37,19 @@ git push origin v0.2.1
 After the workflow finishes:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chistym17/agent-harness/main/install.sh | sh
+curl -fsSL https://kairo.so/install.sh | sh
 kairo --version   # or: kairo health
 ```
 
 Manual rebuild for an existing tag: Actions → Release → Run workflow → set tag (e.g. `v0.2.1`).
 
+Also sync site install script when shipping: copy root `install.sh` → `frontend/install.sh` (served at `https://kairo.so/install.sh`).
+
 ## Smoke (fresh install path)
 
 ```bash
 # binary path
-curl -fsSL https://raw.githubusercontent.com/chistym17/agent-harness/main/install.sh | sh
+curl -fsSL https://kairo.so/install.sh | sh
 # or: cargo install kairo --force
 
 kairo health

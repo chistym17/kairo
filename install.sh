@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Install the latest Kairo binary from GitHub Releases (no Rust required).
 #
-#   curl -fsSL https://raw.githubusercontent.com/chistym17/agent-harness/main/install.sh | sh
+#   curl -fsSL https://kairo.so/install.sh | sh
 #
 # Optional:
 #   KAIRO_VERSION=v0.2.1   # install a specific release tag (default: latest)

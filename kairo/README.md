@@ -18,7 +18,7 @@ Ask questions about a repo, or let it plan/edit/verify with your approval.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chistym17/agent-harness/main/install.sh | sh
+curl -fsSL https://kairo.so/install.sh | sh
 ```
 
 Puts `kairo` in `~/.local/bin` ([Releases](https://github.com/chistym17/agent-harness/releases)). No Rust needed.
