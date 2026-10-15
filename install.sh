@@ -9,7 +9,7 @@
 
 set -eu
 
-REPO="chistym17/agent-harness"
+REPO="chistym17/kairo"
 INSTALL_DIR="${KAIRO_INSTALL_DIR:-${HOME}/.local/bin}"
 VERSION="${KAIRO_VERSION:-latest}"
 

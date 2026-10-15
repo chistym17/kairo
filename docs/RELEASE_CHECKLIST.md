@@ -13,7 +13,7 @@ Run before publishing a version (crates.io + GitHub Release binaries).
 ## Package dry-run (crates.io)
 
 ```bash
-cd /path/to/agent-harness
+cd /path/to/kairo
 cargo package -p kairo --allow-dirty   # or clean tree without --allow-dirty
 cargo package -p kairo --list | grep -E '\.env|oracle|sessions/|logs/' && echo 'FAIL: junk in package' || echo 'OK'
 ```
@@ -31,7 +31,7 @@ Tagging triggers `.github/workflows/release.yml`, which builds Linux/macOS binar
 ```bash
 git tag v0.2.1
 git push origin v0.2.1
-# watch: https://github.com/chistym17/agent-harness/actions
+# watch: https://github.com/chistym17/kairo/actions
 ```
 
 After the workflow finishes:

@@ -21,7 +21,7 @@ Ask questions about a repo, or let it plan/edit/verify with your approval.
 curl -fsSL https://kairo.so/install.sh | sh
 ```
 
-Puts `kairo` in `~/.local/bin` ([Releases](https://github.com/chistym17/agent-harness/releases)). No Rust needed.
+Puts `kairo` in `~/.local/bin` ([Releases](https://github.com/chistym17/kairo/releases)). No Rust needed.
 
 ```bash
 cargo install kairo   # optional, if you already use Rust
@@ -60,5 +60,5 @@ Approvals: **Enter**/`t` = for task · `a` = once · `r` = reject
 ## Docs
 
 - [Changelog](CHANGELOG.md)
-- [Limitations](https://github.com/chistym17/agent-harness/blob/main/docs/KNOWN_LIMITATIONS.md)
-- [Source](https://github.com/chistym17/agent-harness)
+- [Limitations](https://github.com/chistym17/kairo/blob/main/docs/KNOWN_LIMITATIONS.md)
+- [Source](https://github.com/chistym17/kairo)
